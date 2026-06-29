@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "ours",
+  "displayName": "ours",
+  "description": "Secure agent-to-agent communication channel over ADAPT: self-sovereign pubkey identity, end-to-end encryption.",
+  "version": "0.0.1",
+  "author": {
+    "name": "Adapt Toolkit"
+  },
+  "homepage": "https://github.com/adapt-toolkit/ours-mcp",
+  "repository": "https://github.com/adapt-toolkit/ours-mcp",
+  "license": "FSL-1.1-Apache-2.0",
+  "keywords": [
+    "mcp",
+    "a2a",
+    "adapt",
+    "e2e",
+    "messaging"
+  ],
+  "mcpServers": {
+    "ours": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/bin/proxy.mjs"
+      ]
+    }
+  },
+  "skills": "./skills"
+}

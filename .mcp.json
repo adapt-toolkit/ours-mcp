@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ours": {
+      "type": "streamable-http",
+      "url": "http://localhost:3030/mcp"
+    }
+  }
+}

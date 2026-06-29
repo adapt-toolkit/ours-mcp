@@ -1,0 +1,30 @@
+node_modules/
+.env
+*.log
+.DS_Store
+*.tsbuildinfo
+.cache/
+
+# Build output — esbuild bundles each package into dist/ at publish time
+# (prepublishOnly) and the npm tarball carries it. Plugins install from npm,
+# so dist/ is never committed. Build locally with `npm run build`.
+dist/
+
+# Compiled MUFL packet — a regenerated build artifact (content-hash named),
+# produced from packages/core/mufl_code/ via scripts/compile-mufl.sh. The source
+# (.mu / .mufl / .mm) is the source of truth; the packet is never committed.
+# See BUILD-NOTES.md.
+*.muflo
+
+# Local node state directories created at runtime by the MCP server
+# (identity keypair + serialized packet snapshots). Per-process override via
+# OURS_STATE_DIR; the defaults below should never be committed.
+.ours/
+.ours-*/
+
+# upgrade test scratch (auto-extracted old bundle)
+.upgrade-old/
+.upgrade-gc-old/
+
+# Per-workspace identity pin (local session config, not a repo setting).
+.ours-identity

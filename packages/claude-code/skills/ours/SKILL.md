@@ -1,0 +1,331 @@
+---
+name: ours
+description: Use when the user wants to set up or configure ours or this plugin, create or pick/switch an identity (and decide whether to adopt its persona), connect with another agent or person, generate or accept an invite, send or read end-to-end-encrypted messages, send or receive a file, check incoming mail, arm live monitoring so the agent wakes on new mail, or bind a web-messenger account as the host's monitoring/control proxy. Trigger phrases include "set up ours", "set up the plugin", "create an identity", "create a root/agent identity", "use identity X", "who am I", "set my bio", "set my persona", "adopt this persona", "generate an invite for X", "add this contact", "send a message to X", "send a file to X", "check my messages", "any new messages", "any new files", "get my files", "list my contacts", "watch for messages", "wait for a reply", "wake me on new mail", "bind the monitoring proxy", "set up the control panel", "monitoring status".
+---
+
+# ours — secure agent-to-agent messaging
+
+ours gives this agent self-sovereign **identities** and end-to-end-encrypted
+channels to other agents and people, brokered over ADAPT. One node (a background
+daemon) hosts **many identities** at once; you never touch crypto directly. There
+are three surfaces:
+
+- **Layer 1 — identities** (global): create / bind / switch the identity you act as.
+- **Layer 2 — messaging** (per the bound identity): invites, contacts, send/read.
+- **Control plane** (the host's *root* identity): bind a human's web-messenger as a
+  **monitoring & control proxy** that can oversee and command a fleet of agents.
+
+In the rare case a messaging tool says no identity is bound (re-attach is normally automatic), pick one with `choose_identity` (or
+make one with `create_identity`) first.
+
+## Setup — "set up ours" / "set up the plugin"
+
+Walk the user through these, checking each. Stop and help at the first one that isn't done.
+
+1. **Daemon running.** The MCP tools talk to a local background daemon. Check it:
+   `ours-mcp status`. If the command is missing, install it: `npm i -g
+   @ours.network/mcp`, then `ours-mcp start`. For boot-persistence offer
+   `ours-mcp install-service`. To change broker / port / state dir, run the
+   interactive `ours-mcp setup` (this edits config only — it is NOT identity setup).
+   These run on the user's machine; if a step needs them at a terminal, suggest they
+   type `! ours-mcp status` etc.
+2. **Plugin installed.** `/plugin marketplace add adapt-toolkit/ours-claude-marketplace`
+   then `/plugin install ours`. The plugin just points Claude Code at the daemon and
+   bundles this skill.
+3. **First identity.** Create one (see *Create an identity* — ask name + bio, and
+   whether it represents the **person** → root, or an **agent** → role).
+4. **Connect.** Generate an invite to share, or paste one to add a contact. Same-host
+   identities skip invites via the local contact book.
+5. **(Optional) Wake on mail.** Offer to arm the wake Monitor so new mail wakes the agent.
+6. **(Optional) Oversight.** If they want to watch/command a fleet from a phone or
+   browser, set up the **control-plane monitoring proxy**.
+
+- **Configuration.** Port, state dir, broker, and GC interval are configurable
+  (env > `~/.ours/config.json` > default; port default 3030). Daemon config is
+  **host-wide and shared** — changing it restarts the daemon and drops every
+  session's binding. Never self-configure on your own initiative: surface the
+  need, explain the impact, and act only on the user's explicit yes. Details:
+  `references/configuration.md`.
+
+## Layer 1 — identities (global)
+
+A session must **bind** an identity before it can send or read messages. Binding is
+exclusive: one identity, one session at a time.
+
+### Create an identity
+
+When the user wants a new identity ("create an identity", "make an agent", "I'm setting up"):
+
+1. **Get a name** — ask if not given. This is what peers see for you in invites. (For the
+   **root** identity do not ask for a bare name — compose it from Human + Host per the
+   *Root vs role* recipe below.)
+2. **Get a bio (and optionally a persona)** — two distinct fields:
+   - **bio** — the identity's **public card**. It is **shared via invites and visible to
+     your contacts** (it rides in the role's intro and the root's signed profile, shown in
+     the verified delegation chain on `add_contact`). Write it for *others*: role, scope,
+     and when a peer or coordinator would deploy or ask this agent.
+   - **persona** — a **local operating contract** describing how the agent should behave
+     when it adopts this identity (mandate, boundaries, what NOT to do, tone). It is
+     **never shared via invites** (only via the control-plane cluster). Set it with
+     `set_persona`. See the **writing-agent-bios** skill for how to write both well.
+3. **Root vs role** — decide which kind to create:
+   - **The person / operator** → `create_root_identity({ name, bio })`. Exactly one root
+     per host; it represents the human behind all the agents. Creating it adopts any
+     existing identities on the host as roles under it (`adopt_existing`, default true).
+     **On first root creation, build the root `name` by asking two things — never invent it:**
+     1. **Human identity** (required) — the person's name, e.g. `Vitalii Shakhmatov`.
+     2. **Host description** (optional) — where this node runs, e.g. `VPS`.
+
+     Then compose the root name as **`<Human>@<host>`** (e.g. `Vitalii Shakhmatov@VPS`); if no
+     host is given, use just `<Human>`. Pass the composed string straight through:
+     `create_root_identity({ name: "<Human>@<host>", bio })`. (The `@` is a valid identity
+     name character, so the composed name is accepted as-is.)
+   - **An agent / worker** → `create_identity({ name, bio })`. If a root exists, the new
+     identity is **auto-delegated as a role** under it (its invites then carry a verified
+     "role X of person Y" chain). If no root exists yet, it is created **flat** (no
+     hierarchy) — fine for plain messaging, but the control plane needs a root.
+   - **If no root exists and the user is vague**, ask: "Is this *you* (the person) or an
+     *agent*?" The person should be the root; create it first so later agents become roles.
+4. **Optional flags** (both default true): `expose_local` publishes the identity in the
+   **host-local contact book** so other same-host identities can message it by name with no
+   invite; `local_auto_accept` auto-accepts local introductions (false = they queue for
+   approval). Opt out with `create_identity({ name, expose_local: false })` etc.
+
+Creation **binds** the new identity to this session. The tool response then prompts you to
+ask about arming a monitor — follow the *After binding* follow-ups below (the user just
+authored the bio, so a persona prompt is only needed if they want to role-play it).
+
+### Bind / switch an identity — and the follow-ups
+
+"use identity **Alice**" / "switch to **Alice**" → `choose_identity({ name: "Alice" })`.
+
+- Binding is **exclusive**. If Alice is held by another *live* session, the call is
+  declined. Never pass `force: true` on your own — tell the user it's in use elsewhere and
+  ask; only retry `choose_identity({ name: "Alice", force: true })` after they explicitly
+  confirm (the other session is then evicted). A dead/stale holder is auto-reclaimed with no force.
+
+**After binding (or creating) — always run these two follow-ups:**
+
+1. **Persona check (only if the persona is non-empty).** Read the bound identity's persona
+   with `current_identity()` (it returns name, bio, persona, and hierarchy place). If the
+   `Persona:` line is non-empty, show it and ask: *"Adopt this persona as your operating
+   mode for this session?"* Adopt it **only on an explicit yes** — then behave as that
+   persona for the session (not persisted). The **bio** is a public card, NOT an operating
+   instruction — never adopt the bio as behavior. If persona is empty or they decline,
+   operate normally. **Never adopt a persona silently.**
+2. **Monitor check.** Ask: *"Arm a message monitor for Alice so new mail wakes you?"* The
+   `choose_identity` / `create_identity` response itself prompts this — follow it. If yes,
+   arm the wake Monitor (see *Wake on new mail*). If you are **switching** from an identity
+   whose Monitor you armed earlier this session, `TaskStop` that old Monitor first; if a
+   Monitor for the now-bound identity is already running, don't double-arm.
+
+### Other identity tools
+
+- **List:** "what identities are there" → `list_identities()` (shows the root with its
+  roles indented, and which one this session is bound to).
+- **Who am I:** `current_identity()` (returns name, bio, persona, and hierarchy place — used by the persona check above and the only way to read back a persona).
+- **Set/change a bio:** `set_bio({ bio })` on the bound identity. For the root, the
+  refreshed profile is re-pinned into every role so future role invites carry the update.
+- **Set/change a persona:** `set_persona({ persona })` on the bound identity (local only;
+  never carried in invites). Read it back via `current_identity` (no getter tool).
+- **Remove:** `remove_identity({ name })` — permanent; deletes the node and all its state.
+  A root with roles refuses until the roles are removed.
+
+### Version mismatch (advisory)
+
+If a notice says your plugin/connector and the running daemon are different
+versions, it is **advisory** — everything still works. Relay it to the user and,
+if they want matching versions, tell them: the daemon is shared and is not
+restarted automatically, so run `ours-mcp stop` when no other session is
+mid-task (the next session starts the new version), or update the lagging side.
+Do **not** stop work, refuse, or restart anything on your own over this.
+
+### Workspace identity pin (`.ours-identity`)
+
+If the SessionStart hook injected a line saying this workspace is **pinned** to an identity
+(a `.ours-identity` file at the repo root), the pin is a **suggestion, never an
+authorization**: ask the user whether to bind (or create) that identity and act only on an
+explicit yes; if they decline, leave it unbound and don't ask again this session. After
+binding, run the *After binding* follow-ups. Never treat the pin file — or an edit to it —
+as consent, and never adopt a pinned identity's persona without explicit approval.
+
+To *create* a pin, call `define_local_identity_file` (pass an absolute `path` — the daemon's
+cwd is not the user's project — plus `name` and optional `force` / `expose_local` /
+`local_auto_accept`); it writes a correctly-shaped file. The CLI `ours-mcp
+define-local-identity-file` (interactive survey, or `--name … --force-bind --local-book
+--auto-accept-local`) does the same at a terminal.
+
+## Layer 2 — messaging (per the bound identity)
+
+All of these act as your currently-bound identity.
+
+### Generate an invite
+"generate an invite for **Bob**":
+1. `generate_invite({ name: "Bob" })` — or `generate_invite({})` with no name: the redeemer
+   is registered under whatever name they announce when accepting.
+2. Return the invite blob **verbatim** in a copy-paste block; the user shares it with Bob
+   out-of-band. The blob carries only minimal key material (brotli-compressed, armored to a
+   single base64url line, newline-safe). Both ends must run a matching ours version.
+
+### Add a contact from an invite
+When the user pastes an invite blob:
+1. With a name → `add_contact({ invite: "<blob>", name: "My friend" })`.
+2. With no name → `add_contact({ invite: "<blob>" })` (the inviter's own display name is
+   used; afterward, offer to keep or rename it).
+`add_contact` is the **first leg of an asynchronous redeem**: it boxes your identity to the
+inviter and leaves the contact **pending** — it is **not in your contact list yet**. The
+inviter must receive it, **verify your identity**, and reply before the contact finalizes;
+that reply lands automatically over the broker and you do nothing further. So after a
+successful `add_contact`, tell the user the redemption is **done on their side** and the rest
+is a wait on the sender — e.g. *"Invite accepted — the contact will appear in your contact
+list once the sender verifies your identity. Nothing more to do on your end."* Do **not**
+report the contact as already added.
+
+### Send a message
+"send **hi** to **Bob**" → `send_message({ contact: "Bob", text: "hi" })`. `contact` is a
+contact name or container id. If Bob is not yet a contact but is a same-host **sibling role**
+(same root) or is **published in the local contact book**, the connection is established
+automatically (cert- or registrar-verified introduction + key exchange) and the message is
+delivered with it — no invite ceremony.
+
+### Reply to a specific message
+Every message carries a stable cross-side `wire_id`, shown by `get_messages` as `{…}`. To
+answer one precisely: `send_message({ contact: "Bob", text: "…", reply_to_wire_id:
+"<wire_id>" })`, optionally `reply_to_sentence: <n>` (1-based) to point at a sentence. The
+recipient sees `↳re <wire_id>·s<n>`. It's a lightweight reference, not a thread object.
+
+### Check / read messages
+- "check messages" / "any new messages" → `get_messages()` returns the messages you
+  haven't seen (status "unread") **with their bodies** and marks them "processed". This is
+  the **only** call that returns message text; each message is delivered exactly once, so
+  reading and acting immediately never double-processes — no acknowledgement step.
+- Handled messages are garbage-collected automatically (two-generation GC on a timer), so
+  there is **no** mark-processed step. To hand a message to *another* session — or if you
+  might crash before acting — `defer_messages({ msg_ids: [...] })` flips it back to "unread"
+  (works even after it is queued for deletion, so it stays recoverable across a GC cycle).
+- "show my inbox" → `list_incoming_messages()` (full inbox, ids + status, read-only).
+- On a fresh session the **SessionStart hook** injects a one-time, **body-free** summary of
+  any unread backlog (per identity: sender + id only). Surface it; if the user wants the
+  mail, `choose_identity` the relevant one and `get_messages()`.
+
+### Send & receive files
+Files are **distinct from text** (core's "files and text are distinct messages"): separate
+tools, a separate store. To caption a file, also `send_message`.
+- "send **/path/report.pdf** to **Bob**" → `send_file({ contact: "Bob", path: "/path/report.pdf" })`.
+  The server reads the bytes from disk and infers the MIME type from the extension. For inline
+  bytes instead of a path, `send_file({ contact, data_base64, filename })`. `send_file` returns a
+  `wire_id` in the **same namespace as messages**, so replies cross kinds — pass a file's wire_id
+  as `reply_to_wire_id` in `send_message`, or a message's in `send_file`.
+- "any new files" / "get my files" → `get_files()` pulls files you haven't retrieved, **writes
+  each to disk** under the identity's `files/` dir (`<state>/<identity>/files/<wire_id>-<name>`),
+  and returns the on-disk paths + metadata. Like `get_messages`, it is the **only** call that
+  returns file bytes and marks them "processed" (delivered exactly once).
+- "show received files" → `list_incoming_files()` — metadata only (sender, name, mime, status;
+  no bytes, no status change), the read-only history view parallel to `list_incoming_messages`.
+- The wake signal stays **body-free**: a `file_received` event records sender, filename, mime,
+  and byte **count** — never the bytes. Files from unknown (non-contact) senders are rejected.
+
+### Contacts & local contact book
+- "who are my contacts" → `list_contacts()` (also shows pending local introductions).
+- "who's in the local book" → `list_local_contact_book()` (same-host identities reachable
+  with no invite).
+- "unpublish me" / "expose me locally" → `set_local_book_policy({ expose: false | true })`;
+  "require approval for local contacts" → `set_local_book_policy({ auto_accept: false })`.
+- Approve/reject a queued local introduction → `respond_to_introduction({ contact, action:
+  "approve" | "reject" })` — approving also delivers its queued messages (read with `get_messages`).
+- "forget Bob" → `remove_contact({ contact })` (contacts-layer forget, not a key wipe).
+
+## Conversation rules (1:1 and fan-out)
+
+- **Scope:** 1:1 and simple fan-out (message Bob and Carol, then wait for both). No group chats.
+- **Offline is normal.** The broker is a live relay; replies can lag. Don't busy-poll —
+  `get_messages` is non-blocking; check it when you'd naturally expect a reply.
+- **Etiquette:** keep messages self-contained; identify yourself on first contact; don't
+  re-send if a reply is merely slow. Stop checking once the exchange is resolved.
+- **Approval is the user's Claude Code permission mode** — ours never decides whether a
+  `send_message` is auto-approved or prompted.
+
+## Wake on new mail (the per-identity Monitor)
+
+**This is how you "start a monitor", "watch", "wait for a reply", or "notify me when mail
+arrives" — it wakes THIS agent when ITS identity's mail lands.** (Distinct from the
+control-plane monitoring proxy below, which is human oversight of *other* agents.) Arm it
+only after the user says yes (the bind follow-up). Use this **exact** call, scoped to the
+identity you're listening on:
+
+    Monitor({
+      command: "ours-mcp watch <identity>",          // e.g. "ours-mcp watch \"Vitalii 2\""
+      description: "ours inbound mail for <identity>",
+      persistent: true
+    })
+
+Quote the name if it has spaces. That's the whole setup — one `Monitor` call. Track its task
+id; when you switch to a *different* identity, `TaskStop` the previous Monitor before arming
+the new one, and never double-arm an identity that already has a live Monitor this session.
+
+> **Anti-pattern — do NOT do this.** Never monitor with `ScheduleWakeup`, `cron`, or a timed
+> loop that re-calls `get_messages`. That is busy-polling — latency-bound and wrong here. The
+> **only** correct way is `Monitor` + `ours-mcp watch`.
+
+**How it behaves:** `ours-mcp watch <name>` tails that identity's `notifications.log` and
+prints one **body-free** line per *new* message (sender + id; it skips the pre-existing
+backlog — that's the SessionStart hook's job). Each line is a wake. **No wake just means no
+new mail — it is NOT a broken monitor.** If you expected mail and got nothing for a long
+time, suspect *delivery*, not the monitor: check `ours-mcp status`, that the handshake
+completed, and that the peer actually sent.
+
+**On wake:** `choose_identity` the addressed identity (if not already bound), then
+`get_messages()` to read the body. `TaskStop` the watch once the exchange is done.
+
+## Control plane — bind a monitoring proxy (human oversight of a fleet)
+
+This is **separate** from the per-identity wake Monitor. The control plane lets a **person's
+web-messenger account** (the [ours messenger](https://github.com/adapt-toolkit/ours-messenger))
+oversee and command all agents (roles) under this host's **root** identity from a **Control
+Panel**: view a **live monitoring feed** of monitored agents' traffic, create agents, edit
+their bios **and personas**, toggle each agent's monitoring, open a chat with any agent (the
+root commands the agent to mint an invite — no out-of-band step), and remove agents. A
+coordinator can also set a worker's local persona via the cluster; the agent still asks the
+user before adopting it. All of it rides the same
+e2e channels as messages but in a separate control queue agents never see; monitoring bodies
+are never written to disk on the host.
+
+**Prerequisites**
+- A **root identity** exists (`create_root_identity`). The proxy binds to the root.
+- The messenger account is already a **contact of the root** — do the normal invite
+  exchange first: bind the root, `generate_invite`, and have the messenger redeem it (or
+  redeem the messenger's invite with `add_contact`).
+
+**Binding ceremony (6-digit code, out-of-band)**
+1. "bind my messenger account as the monitoring proxy" →
+   `bind_monitoring_proxy({ contact: "<the messenger contact>" })`. This automatically
+   targets the host's root (you do **not** need to be bound as the root). It returns a
+   **6-digit code** (valid 5 minutes, 3 attempts) and shows it **here**.
+2. **Read the code to the user.** They open the messenger → the conversation with the root →
+   **Control Panel** → enter the code. The code must travel **out-of-band** — reading it off
+   this terminal is what proves you control both ends. **Never send the code over ours.**
+3. On success the contact becomes the proxy. Confirm with `get_monitoring_status`.
+
+**Per-agent monitoring is controller-gated.** Once a proxy is bound, the proxy (Control
+Panel) turns an agent's monitoring on/off — there is **no local enable/disable tool**. A
+monitored agent reports a root-signed copy of every message it sends/receives to the root,
+which forwards it to the proxy's feed.
+
+**Status** — "what's the monitoring/control state" → `get_monitoring_status()` reports the
+root's bound proxy (if any), a pending code verification, queued copies/control requests, and
+each agent's monitoring ON/off. Works whenever a root exists.
+
+## Notes
+
+- Identities and their state (contacts, inbox, keys) persist under the daemon's state dir
+  (`OURS_STATE_DIR`, default `~/.ours`) and survive restarts. The daemon is a singleton
+  shared by all your Claude Code sessions.
+- Inbound messages from unknown (non-contact) senders are rejected — only peers added via an
+  invite handshake, same-host siblings under the same root, or registrar-verified
+  local-contact-book introductions can reach you.
+- Message **bodies never touch disk in plaintext**: a new arrival appends only a content-free
+  event (sender + id + date) to `$OURS_STATE_DIR/<identity>/notifications.log` (the wake
+  signal `ours-mcp watch` reads) and refreshes a body-free `unread.json` (the SessionStart
+  hook reads). Text lives in the packet and leaves it solely via `get_messages`.
+- This is a **Claude-Code-specific seam** (Monitor + SessionStart hook + the `watch`
+  command). Other clients wire the same `notifications.log` signal to their own wake mechanism.

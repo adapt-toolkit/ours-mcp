@@ -1,0 +1,65 @@
+{
+  "name": "@ours.network/mcp",
+  "version": "0.0.1",
+  "description": "MCP server daemon for ours — one native ADAPT wrapper hosting N self-sovereign identities, exposing secure agent-to-agent messaging tools over HTTP (Streamable HTTP). Run `ours-mcp start`.",
+  "type": "module",
+  "license": "FSL-1.1-Apache-2.0",
+  "author": "Adapt Toolkit",
+  "homepage": "https://github.com/adapt-toolkit/ours-mcp/tree/main/packages/core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adapt-toolkit/ours-mcp.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/adapt-toolkit/ours-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "a2a",
+    "adapt",
+    "e2e",
+    "messaging"
+  ],
+  "bin": {
+    "ours-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "build:dev": "OURS_BUILD_DEV=1 node build.mjs",
+    "build:tsc": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts serve",
+    "dev:stdio": "OURS_TRANSPORT=stdio tsx src/index.ts",
+    "start": "node dist/cli.js start",
+    "stop": "node dist/cli.js stop",
+    "status": "node dist/cli.js status",
+    "serve": "node dist/cli.js serve",
+    "prepublishOnly": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node test/loopback-bind.test.mjs && node test/lease-binding.test.mjs && node test/session-restore.test.mjs && node test/daemon-restart-resume.test.mjs && node test/version-advisory.test.mjs && node test/files-helpers.test.mjs && node test/validate-name.test.mjs"
+  },
+  "dependencies": {
+    "@adapt-toolkit/sdk": "0.5.14",
+    "@adapt-toolkit/sdk-native": "0.5.14"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@types/node": "^20.14.0",
+    "esbuild": "^0.24.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4",
+    "zod": "^3.23.8"
+  }
+}

@@ -1,0 +1,4 @@
+[submodule "packages/core/mufl_code/core"]
+	path = packages/core/mufl_code/core
+	url = git@github.com:adapt-toolkit/ours-mufl-core.git
+	branch = main

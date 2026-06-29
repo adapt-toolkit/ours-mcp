@@ -1,0 +1,27 @@
+// ours messenger packet — compile configuration.
+//
+// Pulls in the full ADAPT standard library plus the shared ours mufl core
+// (the ours-mufl-core repo, checked out as the core/ subfolder) so
+// `actor.mu` can `loads libraries` the crypto / identity / transport modules
+// and the shared protocol libraries (`a2a_protocol`, `version`) by name.
+//
+// Compile: scripts/compile-mufl.sh (copies actor.mu, this file, and core/
+// into a temp dir and runs mufl-compile there).
+
+config script
+{
+    stdlib_config = (config_load #$MUFL_STDLIB_PATH).
+    core_config = (config_load #"core").
+
+    (
+        $imports ->
+        (
+            $libraries -> (stdlib_config $exports $libraries)'(core_config $exports $libraries),
+        ),
+        $exports ->
+        (
+            $libraries -> (,),
+            $applications -> (,)
+        )
+    ).
+}
