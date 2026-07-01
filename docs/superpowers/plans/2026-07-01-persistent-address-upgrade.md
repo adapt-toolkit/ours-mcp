@@ -206,52 +206,34 @@ git rev-parse HEAD   # record this SHA for the submodule bumps in Phase 2/3
 
 Repo: `/home/shakhvit/work/adapt/ours.network/ours-mcp`.
 
-### Task 4 (SPIKE): Resolve how the wrapper delivers `init_arg`
+### Task 4 (RESOLVED — reference): how the wrapper delivers `init_arg`
 
-This is the one genuine unknown and it gates the boot path for both daemons. Resolve it here (local compile + native SDK on hand); reuse the identical solution in Phase 3.
+Resolved from toolkit SDK source; no runtime spike needed to code the mechanism. This
+task is a documentation anchor for Tasks 6 & 9 — no code, no commit.
 
-**Files:**
-- Investigate: installed `@adapt-toolkit/sdk` wrapper API under `packages/core/node_modules/@adapt-toolkit/sdk/`; toolkit `typescript/sdk/src/wasm/adapt.ts` (`CreatePacket(lt, unit, seed, entropy, secure, init_arg?)`), `typescript/sdk-native/adapt_js.cc:328-345`, and the `PacketWrapperConfigurator` / `packet_manager.create_packet` source.
-- Test: `scratchpad` throwaway script.
+**Confirmed mechanism** (source-verified in adapt-toolkit):
+- `wrapper.packet_manager.create_packet(config, cb, contents)` computes
+  `const init_arg = packet_config.init_arg ? object_to_adapt_value(JSON.parse(packet_config.init_arg)) : undefined;`
+  and passes it as `CreatePacket`'s 6th arg
+  (`typescript/sdk/src/utilities/wrappers/wrappers/adapt_wrapper.ts:193-194`).
+- `PacketWrapperConfigurator.init_arg` is backed by the CLI arg **`--init_trn_argument`**
+  (`typescript/sdk/src/utilities/wrappers/configurators/packet_wrapper_configurator.ts:88`).
+- Therefore inject via
+  `config.process_arguments(['--unit_hash', …, '--seed_phrase', seed, '--unit_dir_path', …, '--init_trn_argument', <jsonString>])`.
+- `CreatePacket`'s 6th arg is delivered to `trn __init arg`
+  (`typescript/sdk-native/adapt_js.cc:340-342`), which calls
+  `reseed_identity_from_secret(arg SAFE(secretkey_sign))`.
+- Authoritative passing example: `tests/Functional/29.Javascript/identity_reseed.mu` — create
+  A, `export_secret`, create B with the secret as the 6th arg, assert `addressA == addressB`.
 
-**Interfaces:**
-- Produces: a documented, working way to pass a SIGN secret as `init_arg` through `wrapper.packet_manager.create_packet(config, cb, contents)` — one of: (a) `config.process_arguments(['--init_arg', <hex>])`, (b) an extra `create_packet` parameter, or (c) a documented reason to use low-level `CreatePacket` plus how to keep broker/handler wiring.
+**The one runtime-confirmed detail (deferred to SDK delivery):** the wrapper's `init_arg`
+path is JSON-only (`JSON.parse` → `object_to_adapt_value`), while the low-level test passes
+the raw `AdaptValue` secret directly. So the exact JSON encoding of a `secretkey_sign` that
+round-trips through `object_to_adapt_value` and satisfies `SAFE(secretkey_sign)` — a hex
+string vs a typed-bytes object — must be confirmed when the runtime SDK lands. Tasks 6 & 9
+code the **hex-string** form as primary and flag the exact line for runtime verification.
 
-- [ ] **Step 1: Compile a tiny reseed actor**
-
-Create `scratchpad/reseed_probe.mu` with two transactions mirroring the toolkit example (`adapt-toolkit/tests/Functional/29.Javascript/identity_reseed.mu:26-35`):
-
-```
-    trn __init arg
-    {
-        if arg { key_storage::reseed_identity_from_secret (arg SAFE(secretkey_sign)). }
-    }
-
-    trn readonly export_secret _
-    {
-        return key_storage::export_identity_signing_secret().
-    }
-```
-
-Compile it against the #77 toolkit (adapt to the minimal `application ... loads libraries key_storage uses transactions` wrapper; reuse `scripts/compile-mufl.sh` machinery or invoke `mufl-compile` directly as that script does).
-
-- [ ] **Step 2: Write a Node probe that creates A, exports, recreates B with the secret**
-
-In `scratchpad/reseed_probe.mjs`, boot the wrapper exactly as `index.ts:1746-1753` does, create packet A via `wrapper.packet_manager.create_packet`, call `export_secret`, then create packet B trying each candidate `init_arg` mechanism (start with `config.process_arguments(['--init_arg', secretHex])`). Read both `GetContainerID()`s.
-
-- [ ] **Step 3: Run the probe**
-
-```bash
-cd /home/shakhvit/work/adapt/ours.network/ours-mcp
-node scratchpad/reseed_probe.mjs
-# Expected: addressA === addressB via one of the candidate mechanisms.
-```
-
-- [ ] **Step 4: Record the winning mechanism**
-
-Append the working call signature (verbatim) to the plan header of Task 5 (or a `scratchpad/INIT_ARG.md` note) so Task 5 and Phase 3 use it directly. If only low-level `CreatePacket` works, document how broker registration + `on_return_data` handlers are preserved.
-
-- [ ] **Step 5: Commit nothing** (spike artifacts stay in scratchpad).
+- [ ] **Step 1:** No action — reference only. Proceed to Task 5.
 
 ### Task 5: actor.mu — add `export_signing_secret` + `__init` reseed
 
@@ -339,7 +321,10 @@ Replace `seedPath` usage. Add near `index.ts:250`:
 const keyPath = (dir: string) => join(dir, 'identity.key');
 ```
 
-Give `createPacket` an optional injected secret and pass it via Task 4's mechanism (shown here as the `--init_arg` candidate; substitute the verified form):
+Give `createPacket` an optional injected secret and pass it via the Task-4 mechanism
+(`--init_trn_argument`, a JSON string). The `signingSecret` is the hex string persisted in
+`identity.key`; JSON-encode it so `JSON.parse` in the wrapper yields that string, which
+`object_to_adapt_value` maps to a string AdaptValue for `SAFE(secretkey_sign)`:
 
 ```ts
 function createPacket(
@@ -347,7 +332,9 @@ function createPacket(
 ): Promise<Identity> {
   const config = new PacketWrapperConfigurator();
   const args = ['--unit_hash', UNIT.hash, '--seed_phrase', seed, '--unit_dir_path', UNIT.dir];
-  if (signingSecret) args.push('--init_arg', signingSecret);   // Task 4 verified form
+  // RUNTIME-VERIFY (Task 4): confirm secretkey_sign round-trips as a JSON hex string;
+  // if it needs a typed-bytes object, change JSON.stringify(signingSecret) accordingly.
+  if (signingSecret) args.push('--init_trn_argument', JSON.stringify(signingSecret));
   config.process_arguments(args);
   // ...unchanged body...
 }

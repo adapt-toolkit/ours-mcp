@@ -170,17 +170,25 @@ and the resulting `.muflo` committed, replacing `FEEDE00E….muflo`.
 
 **Broker possession-proof:** same as ours-mcp — verify; note `--test_mode` is passed.
 
-## Shared spike (single unknown, blocks both daemons' boot path)
+## init_arg delivery (RESOLVED from toolkit SDK source)
 
-Both daemons create packets via `wrapper.packet_manager.create_packet(config, cb, contents)`
-with `config.process_arguments(['--seed_phrase', …])` — **there is no `init_arg` on this
-path today**. #77's reseed needs the SIGN secret delivered as `CreatePacket`'s 6th
-`init_arg`. Determine, against the #77 SDK/wrapper, whether the wrapper exposes it as:
-(a) a `--init_arg` config flag, (b) an extra `create_packet` parameter, or (c) requires
-dropping to the lower-level `CreatePacket` (which loses the wrapper's broker/handler
-wiring). Resolve once in `ours-mcp` (it has the local compile + native SDK on hand); reuse
-the identical solution in `ours-tg-connector`. Everything else is deterministic; this gates
-the reseed boot path.
+Both daemons create packets via `wrapper.packet_manager.create_packet(config, cb, contents)`.
+The wrapper reads `packet_config.init_arg`
+(`adapt_wrapper.ts:193-194`: `object_to_adapt_value(JSON.parse(packet_config.init_arg))`)
+and passes it as `CreatePacket`'s 6th arg, delivered to `trn __init arg`
+(`adapt_js.cc:340-342`). `PacketWrapperConfigurator.init_arg` is backed by the CLI arg
+**`--init_trn_argument`** (`packet_wrapper_configurator.ts:88`). So the injection is:
+
+```
+config.process_arguments([ '--unit_hash', …, '--seed_phrase', seed,
+                           '--unit_dir_path', …, '--init_trn_argument', <jsonString> ])
+```
+
+No wrapper change and no drop to low-level `CreatePacket` is needed. The **one** detail
+deferred to runtime-SDK delivery: the wrapper's `init_arg` path is JSON-only
+(`JSON.parse` → `object_to_adapt_value`), so the exact JSON encoding of a `secretkey_sign`
+(hex string vs typed-bytes object) that satisfies `SAFE(secretkey_sign)` is confirmed then.
+The plan codes the hex-string form as primary and flags the line.
 
 ## SDK version handling
 
