@@ -51,8 +51,8 @@
     "test": "node test/loopback-bind.test.mjs && node test/lease-binding.test.mjs && node test/session-restore.test.mjs && node test/daemon-restart-resume.test.mjs && node test/version-advisory.test.mjs && node test/files-helpers.test.mjs && node test/validate-name.test.mjs"
   },
   "dependencies": {
-    "@adapt-toolkit/sdk": "0.5.14",
-    "@adapt-toolkit/sdk-native": "0.5.14"
+    "@adapt-toolkit/sdk": "0.6.1",
+    "@adapt-toolkit/sdk-native": "0.6.1"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
