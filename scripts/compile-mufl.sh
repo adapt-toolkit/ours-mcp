@@ -17,7 +17,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 mufl_src_dir="$repo_root/packages/core/mufl_code"
 dist_dir="$repo_root/packages/core/dist/mufl_code"
 
-toolkit="${ADAPT_TOOLKIT:-/home/shakhvit/work/adapt/adapt-toolkit}"
+toolkit="${ADAPT_TOOLKIT:?set ADAPT_TOOLKIT to your adapt-toolkit checkout}"
 if [ ! -d "$toolkit" ]; then
   echo "error: ADAPT toolkit not found at '$toolkit' (set ADAPT_TOOLKIT)." >&2
   exit 1

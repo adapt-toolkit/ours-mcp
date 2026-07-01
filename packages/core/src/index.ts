@@ -22,7 +22,7 @@
 //     list_incoming_messages, get_messages, defer_messages, set_bio,
 //     set_local_book_policy, respond_to_introduction
 //
-//   IDENTITY HIERARCHY (see IDENTITY-HIERARCHY-DESIGN.md): one ROOT identity
+//   IDENTITY HIERARCHY: one ROOT identity
 //   per host represents the person; every other identity is a ROLE carrying a
 //   delegation cert signed by the root (the packet state is authoritative —
 //   root.json only names which identity is the root). Roles of the same root
@@ -356,7 +356,7 @@ async function pinRegistrar(id: Identity): Promise<void> {
 }
 
 // ----- identity hierarchy (host-side bookkeeping) -------------------------------
-// One ROOT identity per host (see IDENTITY-HIERARCHY-DESIGN.md). The marker
+// One ROOT identity per host. The marker
 // file only names WHICH identity is the root; the cryptographic facts (the
 // delegation certs, the root profile) live in the packets themselves and are
 // what peers actually verify.
@@ -613,7 +613,7 @@ async function sendViaLocalBook(id: Identity, contact: string, text: string): Pr
 }
 
 // ----- monitoring + control plane ----------------------------------------------
-// (see MONITORING-AND-SHARED-LIBRARY-DESIGN.md). The MCP server process is the
+// The MCP server process is the
 // daemon: monitored roles report message copies to the root packet, control
 // requests from the bound browser proxy queue in the root packet, and the
 // handlers below pull + execute + reply. Message bodies transit this process

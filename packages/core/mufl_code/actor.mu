@@ -43,7 +43,7 @@
 //   defer_messages          — flip processed/ready_to_delete messages back to unread
 //   gc                      — two-generation GC of handled messages (host-fired, not a tool)
 //
-// Identity hierarchy (host-fired transactions; see IDENTITY-HIERARCHY-DESIGN.md):
+// Identity hierarchy (host-fired transactions):
 //   sign_delegation         — root-only in practice: sign a delegation cert for a role
 //   export_root_profile     — root-only in practice: my self-signed root profile blob
 //   set_delegation          — role: store my verified delegation cert + root material
@@ -62,8 +62,7 @@
 //   reject_introduction     — drop a pending local introduction
 //   list_pending_introductions — (readonly) pending introductions (names + queue sizes)
 //
-// Monitoring + control plane (host-fired unless noted; see
-// MONITORING-AND-SHARED-LIBRARY-DESIGN.md):
+// Monitoring + control plane (host-fired unless noted):
 //   get_monitoring_status   — (readonly) enabled flag / proxy binding / queue sizes
 //   sign_monitoring_auth    — root-only: sign an enable/disable auth for a role
 //   set_monitoring          — role: verify the root-signed auth, set the flag
@@ -139,7 +138,7 @@ application actor loads libraries
         seen_nonce_cap is int = 1024.
         pending_queue_cap is int = 50.
 
-        // ---- monitoring shapes + limits (see MONITORING-AND-SHARED-LIBRARY-DESIGN.md) ----
+        // ---- monitoring shapes + limits ----
         // Root-signed authorization for flipping a role's monitoring flag. Like
         // a delegation cert, verified against the role's pinned root keys, so
         // only this hierarchy's root can change what its roles report.
@@ -403,8 +402,7 @@ application actor loads libraries
             $on_file_sent -> fn (_: any) -> transaction::action::type[] { return []. }
         ).
 
-        // Wire the control plane (see MONITORING-AND-SHARED-LIBRARY-DESIGN.md
-        // Part 4): control requests from the bound browser proxy queue in
+        // Wire the control plane: control requests from the bound browser proxy queue in
         // control_inbox — NEVER the message inbox, so agent sessions don't see
         // them — and the notify event wakes the daemon's dispatcher. The
         // payload stays opaque here; sender authorization happens in the
@@ -971,7 +969,7 @@ application actor loads libraries
     }
 
     // ---- identity hierarchy ---------------------------------------------------
-    // Two layers (see IDENTITY-HIERARCHY-DESIGN.md): one ROOT identity per host
+    // Two layers: one ROOT identity per host
     // (represents the person; structurally just a packet with no delegation
     // cert) and ROLE identities under it, each carrying a cert signed by the
     // root. The host drives issuance: it asks the root packet to sign a cert
@@ -1137,7 +1135,7 @@ application actor loads libraries
     }
 
     // ---- monitoring + control plane -------------------------------------------
-    // (see MONITORING-AND-SHARED-LIBRARY-DESIGN.md). A monitored ROLE reports
+    // A monitored ROLE reports
     // every message it sends/receives to its ROOT (the monitor_copy_actions
     // branches in the storage hooks above); the root queues the copies and the
     // host forwards them to a human proxy bound via 6-digit-code verification.
