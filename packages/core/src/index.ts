@@ -4,8 +4,8 @@
 //
 // One MCP server process == one native ADAPT wrapper hosting N packets, one per
 // IDENTITY. ADAPT natively supports many packets per wrapper; each packet is an
-// independent node with its own seed-derived container id and its own encrypted
-// channels. The MCP tool surface is split into two layers:
+// independent node with its own signing-key-derived container id and its own
+// encrypted channels. The MCP tool surface is split into two layers:
 //
 //   GLOBAL (identity management — TypeScript-level, not packet transactions):
 //     create_root_identity  create THE root identity (one per host); adopts

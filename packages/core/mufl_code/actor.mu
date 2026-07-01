@@ -518,6 +518,7 @@ application actor loads libraries
     trn __init arg
     {
         if arg { key_storage::reseed_identity_from_secret (arg SAFE(secretkey_sign)). }
+        return ::transaction::success[].
     }
 
     // ---- message store --------------------------------------------------------
