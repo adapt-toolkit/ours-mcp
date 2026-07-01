@@ -45,10 +45,14 @@
 // the prior holder, whose next per-container call returns a clean "reassigned" error.
 //
 // Persistence is DATA-level, per identity, code-independent (survives upgrades):
-// each identity lives under STATE_DIR/<name>/ as { identity.seed, state_data.bin,
-// inbox.log, inbox_cursor }. On boot we recreate every persisted packet from its
-// seed (stable id + keys) and replay state_data.bin via ::actor::import_state,
-// which also re-registers peer keys so encrypted channels keep working.
+// each identity lives under STATE_DIR/<name>/ as { identity.key, state_data.bin,
+// inbox.log, inbox_cursor }. identity.key holds the exported root SIGN secret
+// (adapt #77); on boot we recreate every persisted packet with that secret
+// injected as init_arg — ::actor::__init reseeds the identity from it, which
+// preserves the container id regardless of the (ephemeral, unpersisted) seed
+// phrase used to recreate the packet — and replay state_data.bin via
+// ::actor::import_state, which also re-registers peer keys so encrypted
+// channels keep working.
 //
 // notifications.log: one CONTENT-FREE line per inbound message under
 // STATE_DIR/<name>/notifications.log ({event, from, msg_id, date} — never the
@@ -122,7 +126,7 @@ const log = (...parts: unknown[]) =>
 // `@` is permitted so a composed root identity name "<Human>@<host>"
 // (e.g. "Vitalii Shakhmatov@VPS") from the onboarding skill validates.
 const NAME_RE = /^[A-Za-z0-9 _.@-]{1,64}$/;
-// STATE_DIR/contact-book/ belongs to the local contact book (registrar seed +
+// STATE_DIR/contact-book/ belongs to the local contact book (registrar.key +
 // book.json), so no identity may claim that directory name.
 const BOOK_DIR_NAME = 'contact-book';
 export function validateName(name: string): string | null {
@@ -177,7 +181,6 @@ type Pending = {
 
 interface Identity {
   name: string; // display name == identity name == dir name
-  seed: string;
   cid: string; // container id
   pw: AdaptPacketWrapper;
   dir: string; // STATE_DIR/<name>
@@ -191,8 +194,8 @@ const identities = new Map<string, Identity>(); // name -> Identity
 // The local-contact-book REGISTRAR: a dedicated, host-held packet (same unit)
 // that is never exposed for messaging and never appears in `identities`. Its
 // only job is signing — introduction credentials per connect attempt, and book
-// entries at publish time. Its seed lives under STATE_DIR/contact-book/ and the
-// private key never leaves this host, which is what makes "local" enforceable:
+// entries at publish time. Its SIGN secret lives under STATE_DIR/contact-book/
+// (registrar.key) and never leaves this host, which is what makes "local" enforceable:
 // a remote peer cannot mint a credential the targets' pinned keys will accept.
 let registrar: Identity | null = null;
 let registrarAdBlob: Buffer | null = null;
@@ -247,7 +250,7 @@ function persistBindings(): void {
 
 // ----- per-identity paths -----------------------------------------------------
 const identityDir = (name: string) => join(STATE_DIR, name);
-const seedPath = (dir: string) => join(dir, 'identity.seed');
+const keyPath = (dir: string) => join(dir, 'identity.key');
 const dataPath = (dir: string) => join(dir, 'state_data.bin');
 // Content-free, append-only event log: one line per inbound message, carrying
 // only {event, from, msg_id, date} — NEVER the body. It is the host wake signal
@@ -268,7 +271,7 @@ function listPersistedNames(): string[] {
   if (!fs.existsSync(STATE_DIR)) return [];
   return fs
     .readdirSync(STATE_DIR, { withFileTypes: true })
-    .filter((d) => d.isDirectory() && fs.existsSync(seedPath(join(STATE_DIR, d.name))))
+    .filter((d) => d.isDirectory() && fs.existsSync(keyPath(join(STATE_DIR, d.name))))
     .map((d) => d.name);
 }
 
@@ -278,7 +281,7 @@ function listPersistedNames(): string[] {
 // being wrapper-local is the discovery boundary; the per-attempt registrar
 // credential (minted at connect time) is the authorization boundary.
 const bookDir = () => join(STATE_DIR, BOOK_DIR_NAME);
-const registrarSeedPath = () => join(bookDir(), 'registrar.seed');
+const registrarKeyPath = () => join(bookDir(), 'registrar.key');
 const bookPath = () => join(bookDir(), 'book.json');
 
 interface BookEntry {
@@ -309,6 +312,19 @@ function writeBook(entries: Record<string, BookEntry>): void {
 function exportAdBlob(id: Identity): Buffer {
   return withScope((lt) =>
     Buffer.from(readonlyTx(id, '::actor::export_address_document', lt).GetBinary()),
+  );
+}
+
+// Export the root SIGN secret (adapt #77) so it can be persisted to identity.key
+// and later injected as init_arg to reseed a recreated packet onto the same
+// container id. Hex-encoded to match the JSON string createPacket's
+// --init_trn_argument sends the wrapper.
+function exportSigningSecret(id: Identity): string {
+  return withScope((lt) =>
+    // RUNTIME-VERIFY(#77): confirm secretkey_sign's native leaf exposes GetBinary()
+    // (like crypto_signature/bin leaves elsewhere in this file) rather than needing
+    // Visualize(); adjust the hex encoding here if not.
+    Buffer.from(readonlyTx(id, '::actor::export_signing_secret', lt).GetBinary()).toString('hex'),
   );
 }
 
@@ -1286,14 +1302,18 @@ async function processControlRequests(root: Identity): Promise<void> {
 
 async function ensureRegistrar(): Promise<void> {
   fs.mkdirSync(bookDir(), { recursive: true });
-  let seed: string;
+  let secret: string | undefined;
   try {
-    seed = fs.readFileSync(registrarSeedPath(), 'utf8').trim();
+    secret = fs.readFileSync(registrarKeyPath(), 'utf8').trim();
   } catch {
-    seed = randomBytes(24).toString('hex');
-    fs.writeFileSync(registrarSeedPath(), seed, { mode: 0o600 });
+    // fresh registrar: no persisted key yet — createPacket below mints one,
+    // exported and persisted right after.
   }
-  registrar = await createPacket(BOOK_DIR_NAME, seed, bookDir(), false);
+  const seed = randomBytes(24).toString('hex'); // ephemeral entropy, not persisted
+  registrar = await createPacket(BOOK_DIR_NAME, seed, bookDir(), false, secret);
+  if (!secret) {
+    fs.writeFileSync(registrarKeyPath(), exportSigningSecret(registrar), { mode: 0o600 });
+  }
   registrarAdBlob = exportAdBlob(registrar);
   log(`contact-book registrar ready (${registrar.cid})`);
 }
@@ -1658,13 +1678,20 @@ function wireHandlers(id: Identity): void {
   };
 }
 
-function createPacket(name: string, seed: string, dir: string, track = true): Promise<Identity> {
+function createPacket(
+  name: string, seed: string, dir: string, track = true, signingSecret?: string,
+): Promise<Identity> {
   const config = new PacketWrapperConfigurator();
-  config.process_arguments([
+  const args = [
     '--unit_hash', UNIT.hash,
     '--seed_phrase', seed,
     '--unit_dir_path', UNIT.dir,
-  ]);
+  ];
+  // RUNTIME-VERIFY(#77): confirm secretkey_sign round-trips as a JSON hex string
+  // through --init_trn_argument (wrapper does object_to_adapt_value(JSON.parse(...)));
+  // if it needs a typed-bytes object instead, change JSON.stringify(signingSecret).
+  if (signingSecret) args.push('--init_trn_argument', JSON.stringify(signingSecret));
+  config.process_arguments(args);
   return new Promise<Identity>((resolveCreate, rejectCreate) => {
     const timer = setTimeout(
       () => rejectCreate(new Error(`packet creation for "${name}" timed out`)),
@@ -1676,7 +1703,6 @@ function createPacket(name: string, seed: string, dir: string, track = true): Pr
         clearTimeout(timer);
         const id: Identity = {
           name,
-          seed,
           cid: withScope((lt) => pw.packet.GetContainerID().Attach(lt).Visualize()),
           pw,
           dir,
@@ -1702,9 +1728,9 @@ async function provisionIdentity(
 ): Promise<Identity> {
   const dir = identityDir(name);
   fs.mkdirSync(dir, { recursive: true });
-  const seed = randomBytes(24).toString('hex');
-  fs.writeFileSync(seedPath(dir), seed, { mode: 0o600 });
+  const seed = randomBytes(24).toString('hex'); // ephemeral entropy, not persisted
   const id = await createPacket(name, seed, dir);
+  fs.writeFileSync(keyPath(dir), exportSigningSecret(id), { mode: 0o600 });
   await withScopeAsync(async (lt) => {
     await mutatingTx(id, '::a2a_messaging::set_my_name', { name }, lt);
   });
@@ -1721,11 +1747,13 @@ async function provisionIdentity(
   return id;
 }
 
-// Restore a persisted identity: recreate the packet from its seed, replay state.
+// Restore a persisted identity: recreate the packet and reseed it from the
+// persisted SIGN secret (adapt #77) — the seed phrase is irrelevant once
+// reseed_identity_from_secret overwrites the container id — then replay state.
 async function restoreIdentity(name: string): Promise<Identity> {
   const dir = identityDir(name);
-  const seed = fs.readFileSync(seedPath(dir), 'utf8').trim();
-  const id = await createPacket(name, seed, dir);
+  const secret = fs.readFileSync(keyPath(dir), 'utf8').trim();
+  const id = await createPacket(name, '', dir, true, secret);
   if (hasSavedState(dir)) {
     try {
       const buf = fs.readFileSync(dataPath(dir));
@@ -1757,7 +1785,8 @@ async function bootWrapper(): Promise<void> {
 
   // The contact-book registrar boots first so restored identities can be
   // pinned (a no-op for already-pinned ones — pin_registrar is idempotent for
-  // the same keys, and the seed-derived registrar keys are stable).
+  // the same keys, and reseeding from registrar.key keeps the registrar keys
+  // stable across restarts — adapt #77).
   try {
     await ensureRegistrar();
   } catch (err) {
