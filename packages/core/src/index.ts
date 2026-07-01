@@ -95,6 +95,7 @@ import type {
   AdaptPacketWrapper,
 } from '@adapt-toolkit/sdk/wrappers';
 import type { AdaptValue, AdaptPacketContext } from '@adapt-toolkit/sdk/backend';
+import { AdaptEnvironment, AdaptEvaluationUnit } from '@adapt-toolkit/sdk/backend';
 import { object_to_adapt_value } from '@adapt-toolkit/sdk/wrapper';
 import { AdaptObjectLifetime } from '@adapt-toolkit/sdk/common';
 import { loadConfig, buildIdentityFile, writeIdentityFile } from './config';
@@ -316,15 +317,13 @@ function exportAdBlob(id: Identity): Buffer {
 }
 
 // Export the root SIGN secret (adapt #77) so it can be persisted to identity.key
-// and later injected as init_arg to reseed a recreated packet onto the same
-// container id. Hex-encoded to match the JSON string createPacket's
-// --init_trn_argument sends the wrapper.
+// and later reparsed + injected to reseed a recreated packet onto the same
+// container id. secretkey_sign is a domain-typed leaf: GetBinary() throws
+// "Invalid domain", so we Serialize() it (self-contained, reparses cross-host)
+// and hex-encode the bytes.
 function exportSigningSecret(id: Identity): string {
   return withScope((lt) =>
-    // RUNTIME-VERIFY(#77): confirm secretkey_sign's native leaf exposes GetBinary()
-    // (like crypto_signature/bin leaves elsewhere in this file) rather than needing
-    // Visualize(); adjust the hex encoding here if not.
-    Buffer.from(readonlyTx(id, '::actor::export_signing_secret', lt).GetBinary()).toString('hex'),
+    Buffer.from(readonlyTx(id, '::actor::export_signing_secret', lt).Serialize()).toString('hex'),
   );
 }
 
@@ -1682,16 +1681,29 @@ function createPacket(
   name: string, seed: string, dir: string, track = true, signingSecret?: string,
 ): Promise<Identity> {
   const config = new PacketWrapperConfigurator();
-  const args = [
+  config.process_arguments([
     '--unit_hash', UNIT.hash,
     '--seed_phrase', seed,
     '--unit_dir_path', UNIT.dir,
-  ];
-  // RUNTIME-VERIFY(#77): confirm secretkey_sign round-trips as a JSON hex string
-  // through --init_trn_argument (wrapper does object_to_adapt_value(JSON.parse(...)));
-  // if it needs a typed-bytes object instead, change JSON.stringify(signingSecret).
-  if (signingSecret) args.push('--init_trn_argument', JSON.stringify(signingSecret));
-  config.process_arguments(args);
+  ]);
+  // A persisted SIGN secret (adapt #77) cannot travel through the wrapper's JSON
+  // --init_trn_argument channel: the wrapper builds it via
+  // object_to_adapt_value(JSON.parse(init_arg)), which only makes JSON
+  // primitives/dicts — never a domain-typed secretkey_sign leaf — and feeding a
+  // hex string into `arg SAFE(secretkey_sign)` aborts the native runtime. So we
+  // reparse the Serialize()-hex back into a raw AdaptValue and pre-create the
+  // packet exactly as the wrapper does internally (Seed phrase: <seed>, empty
+  // entropy — irrelevant here, since ::actor::__init reseeds the identity from the
+  // secret and overwrites the container-id-deriving key), then hand it in as the
+  // 4th `_packet` arg so the wrapper skips its own CreatePacket/init_arg path.
+  const prePacket: AdaptPacketContext | undefined = signingSecret
+    ? withScope((lt) => {
+        const unit = AdaptEvaluationUnit.LoadFromContents(lt, UNIT.contents);
+        const host = AdaptEnvironment.EmptyPacket(lt, true).Attach(lt);
+        const initArg = host.ParseValue(Buffer.from(signingSecret, 'hex')).Attach(lt);
+        return AdaptEnvironment.CreatePacket(lt, unit, `Seed phrase: ${seed}`, '', false, initArg).Detach();
+      })
+    : undefined;
   return new Promise<Identity>((resolveCreate, rejectCreate) => {
     const timer = setTimeout(
       () => rejectCreate(new Error(`packet creation for "${name}" timed out`)),
@@ -1715,6 +1727,7 @@ function createPacket(
         resolveCreate(id);
       },
       UNIT.contents,
+      prePacket,
     );
   });
 }
