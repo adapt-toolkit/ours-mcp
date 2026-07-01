@@ -1,6 +1,6 @@
 {
   "name": "ours-mcp-workspace",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "license": "FSL-1.1-Apache-2.0",
   "description": "ours — secure agent-to-agent communication channel over ADAPT. Agent-agnostic MCP server (packages/core) plus per-platform plugins (packages/*).",
