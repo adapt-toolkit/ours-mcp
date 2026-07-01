@@ -512,6 +512,14 @@ application actor loads libraries
         ).
     }
 
+    // On recreation the host injects the persisted SIGN secret as init_arg;
+    // reseeding restores the container address (adapt #77). Fresh-create passes
+    // no arg and the bootstrapped identity stands.
+    trn __init arg
+    {
+        if arg { key_storage::reseed_identity_from_secret (arg SAFE(secretkey_sign)). }
+    }
+
     // ---- message store --------------------------------------------------------
 
     trn readonly list_incoming_messages _
@@ -799,6 +807,13 @@ application actor loads libraries
     trn readonly export_address_document_native _
     {
         return address_document::get_my_address_document().
+    }
+
+    // Export the root SIGN secret so the host can persist it (identity.key) and
+    // reseed a recreated packet to the same address across upgrades (adapt #77).
+    trn readonly export_signing_secret _
+    {
+        return key_storage::export_identity_signing_secret().
     }
 
     trn pin_registrar _:($registrar_ad -> registrar_ad_blob: bin, $replace -> replace: bool+)
@@ -1389,9 +1404,12 @@ application actor loads libraries
 
     // ---- upgrade: state export / import -------------------------------------
     // The host persists state by calling export_state (readonly) and serializing
-    // the returned value to a code-independent blob. On a code upgrade it recreates
-    // this packet from the same seed (same container id + same default keys, since
-    // both derive from the seed) and replays the blob through import_state.
+    // the returned value to a code-independent blob. On a code upgrade it also
+    // persists the root SIGN secret (export_signing_secret) and recreates the
+    // packet with that secret injected as init_arg; __init reseeds the identity
+    // from it (reseed_identity_from_secret), which preserves the container
+    // address regardless of the seed phrase or key-derivation used to recreate
+    // the packet. The blob is then replayed through import_state.
     //
     // The packet-level snapshot is NOT used for upgrades: it is bound to the unit
     // code hash, so a new .muflo cannot load an old snapshot. This data blob is.
