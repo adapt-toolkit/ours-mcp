@@ -43,7 +43,7 @@ fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
-cp "$mufl_src_dir/actor.mu" "$mufl_src_dir/config.mufl" "$tmp_dir/"
+cp "$mufl_src_dir/actor.mu" "$mufl_src_dir/config.mufl" "$mufl_src_dir/protocol_container.mm" "$tmp_dir/"
 mkdir "$tmp_dir/core"
 cp "$mufl_src_dir/core/config.mufl" "$mufl_src_dir/core"/*.mm "$tmp_dir/core/"
 

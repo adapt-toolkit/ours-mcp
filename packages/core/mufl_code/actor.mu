@@ -42,6 +42,10 @@
 //   get_messages            — return unread messages + mark them processed (sole body egress)
 //   defer_messages          — flip processed/ready_to_delete messages back to unread
 //   gc                      — two-generation GC of handled messages (host-fired, not a tool)
+//   ::a2a_messaging::flush_deferred — (host-fired) replay deferred queues once conditions clear
+//   restore_degraded_contacts — (host-fired) (re)issue restore requests for every degraded contact
+//   list_degraded_contacts  — (readonly) contacts currently degraded (channel needs restore)
+//   list_deferred_queues    — (readonly) per-contact deferred-message queue sizes
 //
 // Identity hierarchy (host-fired transactions):
 //   sign_delegation         — root-only in practice: sign a delegation cert for a role
@@ -80,6 +84,8 @@
 //   ::a2a_control::control_message — control payload from a contact (queued for the daemon)
 //   local_introduce         — same-host peer connects via the local contact book
 //   sibling_introduce       — intra-root peer connects, authorized by its delegation cert
+//   ::a2a_messaging::request_contact_restore / submit_restore_response / complete_restore
+//                            — contact-restore handshake (signed re-key between known contacts)
 
 application actor loads libraries
     identity_proof_document,
@@ -98,6 +104,8 @@ application actor loads libraries
     a2a_capabilities,
     a2a_cluster,
     a2a_control,
+    protocol_container,
+    registration_proof,
     version
     uses transactions
 {
@@ -512,12 +520,20 @@ application actor loads libraries
         ).
     }
 
-    // On recreation the host injects the persisted SIGN secret as init_arg;
-    // reseeding restores the container address (adapt #77). Fresh-create passes
-    // no arg and the bootstrapped identity stands.
+    // On recreation the host injects the persisted SIGN secret as init_arg: the
+    // hex string of the Serialize()'d secretkey_sign. Deserialize it back
+    // (_hex_string_to_binary -> _read_or_abort) and reseed to restore the
+    // container address (adapt #77). Fresh-create passes no arg and the
+    // bootstrapped identity stands.
     trn __init arg
     {
-        if arg { key_storage::reseed_identity_from_secret (arg SAFE(secretkey_sign)). }
+        // Fresh create passes no init_arg — the wrapper hands __init an empty
+        // dict (not nil), so guard on the actual string type before deserializing
+        // the persisted SIGN secret (Serialize()-hex) and reseeding (adapt #77).
+        if _typeof arg == "STRING" {
+            key_storage::reseed_identity_from_secret
+                ((_read_or_abort (_hex_string_to_binary (arg SAFE(str)))) SAFE(secretkey_sign)).
+        }
         return ::transaction::success[].
     }
 
@@ -1430,6 +1446,7 @@ application actor loads libraries
         // shapes. The blob stays code-independent; import_state migrates the
         // pre-namespacing FLAT shape forward (see there).
         return (
+            $app_format_version -> 1,
             $core              -> a2a_messaging::export_core_state NIL,
             // ---- app-owned state (agent inbox + local contact book) ----
             $inbox             -> inbox,
@@ -1457,6 +1474,13 @@ application actor loads libraries
     trn import_state data: any
     {
         current_transaction_info::validate_origin_or_abort (transaction::envelope::origin::user,).
+
+        // App-level format stamp (absent == 0, every pre-stamp blob). Same contract
+        // as the core stamp (see a2a_messaging::import_core_state): additive fields
+        // stay optional reads; a future BREAKING app-blob change dispatches here.
+        app_fmt is int = 0.
+        if (data $app_format_version) != NIL { app_fmt -> (data $app_format_version) safe int. }
+        abort "App state blob format_version " + (_str app_fmt) + " is newer than this code (supports up to 1) — upgrade ours-mcp before importing." when app_fmt > 1.
 
         // Core (contact/profile/hierarchy/cluster) state — validated and restored by
         // the shared library, which also replays every peer's address document

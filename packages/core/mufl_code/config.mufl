@@ -16,7 +16,7 @@ config script
     (
         $imports ->
         (
-            $libraries -> (stdlib_config $exports $libraries)'(core_config $exports $libraries),
+            $libraries -> (stdlib_config $exports $libraries)'(core_config $exports $libraries)'($protocol_container -> #"protocol_container.mm"),
         ),
         $exports ->
         (

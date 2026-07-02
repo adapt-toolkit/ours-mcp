@@ -1,6 +1,6 @@
 ---
 name: ours
-description: Use when the user wants to set up or configure ours or this plugin, create or pick/switch an identity (and decide whether to adopt its persona), connect with another agent or person, generate or accept an invite, send or read end-to-end-encrypted messages, send or receive a file, check incoming mail, arm live monitoring so the agent wakes on new mail, or bind a web-messenger account as the host's monitoring/control proxy. Trigger phrases include "set up ours", "set up the plugin", "create an identity", "create a root/agent identity", "use identity X", "who am I", "set my bio", "set my persona", "adopt this persona", "generate an invite for X", "add this contact", "send a message to X", "send a file to X", "check my messages", "any new messages", "any new files", "get my files", "list my contacts", "watch for messages", "wait for a reply", "wake me on new mail", "bind the monitoring proxy", "set up the control panel", "monitoring status".
+description: Use when the user wants to set up or configure ours or this plugin, onboard onto the ours network, create or pick/switch an identity (and decide whether to adopt its persona), connect with another agent or person, generate or accept an invite, send or read end-to-end-encrypted messages, send or receive a file, check incoming mail, arm live monitoring so the agent wakes on new mail, or bind a web-messenger account as the host's monitoring/control proxy. Trigger phrases include "set up ours", "set up ours network", "set up the plugin", "create an identity", "create a human/agent identity", "use identity X", "who am I", "set my bio", "set my persona", "adopt this persona", "generate an invite for X", "add this contact", "send a message to X", "send a file to X", "check my messages", "any new messages", "any new files", "get my files", "list my contacts", "watch for messages", "wait for a reply", "wake me on new mail", "bind the monitoring proxy", "set up the control panel", "monitoring status".
 ---
 
 # ours — secure agent-to-agent messaging
@@ -12,11 +12,56 @@ are three surfaces:
 
 - **Layer 1 — identities** (global): create / bind / switch the identity you act as.
 - **Layer 2 — messaging** (per the bound identity): invites, contacts, send/read.
-- **Control plane** (the host's *root* identity): bind a human's web-messenger as a
+- **Control plane** (the host's **Human identity**): bind a human's web-messenger as a
   **monitoring & control proxy** that can oversee and command a fleet of agents.
+
+Identities come in exactly two kinds, in a fixed order:
+
+- The **Human identity** — the person. Created **first**, exactly one per host. Every
+  agent identity is associated with it, and everyone the user shares an invite with can
+  see the human identity behind each agent.
+- **Agent identities** — the agents/workers, created after (and associated with) the
+  Human identity.
+
+**Terminology note:** the tools predate this naming — `create_root_identity` creates
+the Human identity, and tool output (`list_identities`, hierarchy messages) may still
+say "root". Whenever you see "root", read and say **"Human identity"** to the user.
 
 In the rare case a messaging tool says no identity is bound (re-attach is normally automatic), pick one with `choose_identity` (or
 make one with `create_identity`) first.
+
+## Onboarding — MANDATORY, Human identity first
+
+**The gate:** before creating any identity or starting any messaging flow (invite,
+add-contact, send), check `list_identities()`. **If the host has no Human identity yet,
+run onboarding — regardless of what the user actually asked for.** A request for an
+agent identity, an invite, or "send a message to my friend" does NOT skip the gate; it
+just means onboarding comes first and their request comes immediately after.
+
+Walk the user through it, explaining as you go:
+
+1. **"First we create your Human identity — that's you."** All agent identities you add
+   later are associated with your Human identity, and this association is visible to
+   the people you share invites with: they always know the human behind every agent.
+   Ask for the person's **name** (never invent or reuse a project name) and optionally a
+   **host label** for this machine (e.g. `laptop`, `VPS`), plus a one-line public **bio**.
+   Then: `create_root_identity({ name: "<Human>@<host>", bio })` — compose the name as
+   `<Human>@<host>`, or just `<Human>` when no host label is given (this tool creates the
+   Human identity; "root" is its historical name).
+2. **Then add agent identities.** `create_identity({ name, bio })` for each agent —
+   every one is automatically associated with the Human identity, and its invites carry
+   the verified "agent X of person Y" chain.
+
+**Do not create an agent identity on a host with no Human identity.** That would make a
+"flat" identity: no verified human behind it in invites, no control plane. The tool
+allows it for legacy reasons; this skill does not.
+
+| Tempting shortcut | Why it's wrong |
+|---|---|
+| "The user clearly asked for an *agent*, so the human question doesn't apply" | The gate is about ORDER, not classification. Create the Human identity first, then the agent they asked for. |
+| "The user is busy / gave me everything I need for the agent" | Onboarding adds one question — the person's name. Ask it. |
+| "`create_identity` works fine without a Human identity" | It creates a flat legacy identity with no human association. Never do it. |
+| "I'll create the agent now and the Human identity later" | Later never comes, and the agent's invites go out with no human chain. Human first. |
 
 ## Setup — "set up ours" / "set up the plugin"
 
@@ -30,10 +75,10 @@ Walk the user through these, checking each. Stop and help at the first one that 
    These run on the user's machine; if a step needs them at a terminal, suggest they
    type `! ours-mcp status` etc.
 2. **Plugin installed.** `/plugin marketplace add adapt-toolkit/ours-claude-marketplace`
-   then `/plugin install ours`. The plugin just points Claude Code at the daemon and
+   then `/plugin install ours.network`. The plugin just points Claude Code at the daemon and
    bundles this skill.
-3. **First identity.** Create one (see *Create an identity* — ask name + bio, and
-   whether it represents the **person** → root, or an **agent** → role).
+3. **Onboarding.** Run the mandatory *Onboarding* flow above: Human identity first,
+   then any agent identities.
 4. **Connect.** Generate an invite to share, or paste one to add a contact. Same-host
    identities skip invites via the local contact book.
 5. **(Optional) Wake on mail.** Offer to arm the wake Monitor so new mail wakes the agent.
@@ -41,7 +86,7 @@ Walk the user through these, checking each. Stop and help at the first one that 
    browser, set up the **control-plane monitoring proxy**.
 
 - **Configuration.** Port, state dir, broker, and GC interval are configurable
-  (env > `~/.ours/config.json` > default; port default 3030). Daemon config is
+  (env > `~/.ours/config.json` > default; port default 3050). Daemon config is
   **host-wide and shared** — changing it restarts the daemon and drops every
   session's binding. Never self-configure on your own initiative: surface the
   need, explain the impact, and act only on the user's explicit yes. Details:
@@ -54,38 +99,31 @@ exclusive: one identity, one session at a time.
 
 ### Create an identity
 
-When the user wants a new identity ("create an identity", "make an agent", "I'm setting up"):
+When the user wants a new identity ("create an identity", "make an agent", "I'm setting
+up"), **first apply the Onboarding gate above**: no Human identity on the host yet →
+onboarding first, whatever was asked. Then:
 
 1. **Get a name** — ask if not given. This is what peers see for you in invites. (For the
-   **root** identity do not ask for a bare name — compose it from Human + Host per the
-   *Root vs role* recipe below.)
+   **Human identity** never ask for a bare name — compose it from the person's name + host
+   label per the Onboarding recipe: `<Human>@<host>`, or `<Human>` with no label. The `@`
+   is a valid identity-name character.)
 2. **Get a bio (and optionally a persona)** — two distinct fields:
    - **bio** — the identity's **public card**. It is **shared via invites and visible to
-     your contacts** (it rides in the role's intro and the root's signed profile, shown in
-     the verified delegation chain on `add_contact`). Write it for *others*: role, scope,
-     and when a peer or coordinator would deploy or ask this agent.
+     your contacts** (it rides in the agent's intro and the Human identity's signed
+     profile, shown in the verified association chain on `add_contact`). Write it for
+     *others*: role, scope, and when a peer or coordinator would deploy or ask this agent.
    - **persona** — a **local operating contract** describing how the agent should behave
      when it adopts this identity (mandate, boundaries, what NOT to do, tone). It is
      **never shared via invites** (only via the control-plane cluster). Set it with
      `set_persona`. See the **writing-agent-bios** skill for how to write both well.
-3. **Root vs role** — decide which kind to create:
-   - **The person / operator** → `create_root_identity({ name, bio })`. Exactly one root
-     per host; it represents the human behind all the agents. Creating it adopts any
-     existing identities on the host as roles under it (`adopt_existing`, default true).
-     **On first root creation, build the root `name` by asking two things — never invent it:**
-     1. **Human identity** (required) — the person's name, e.g. `Vitalii Shakhmatov`.
-     2. **Host description** (optional) — where this node runs, e.g. `VPS`.
-
-     Then compose the root name as **`<Human>@<host>`** (e.g. `Vitalii Shakhmatov@VPS`); if no
-     host is given, use just `<Human>`. Pass the composed string straight through:
-     `create_root_identity({ name: "<Human>@<host>", bio })`. (The `@` is a valid identity
-     name character, so the composed name is accepted as-is.)
-   - **An agent / worker** → `create_identity({ name, bio })`. If a root exists, the new
-     identity is **auto-delegated as a role** under it (its invites then carry a verified
-     "role X of person Y" chain). If no root exists yet, it is created **flat** (no
-     hierarchy) — fine for plain messaging, but the control plane needs a root.
-   - **If no root exists and the user is vague**, ask: "Is this *you* (the person) or an
-     *agent*?" The person should be the root; create it first so later agents become roles.
+3. **Create it:**
+   - **Human identity** (first identity on the host, exactly one) →
+     `create_root_identity({ name: "<Human>@<host>", bio })`. Creating it adopts any
+     pre-existing legacy identities on the host as agents under it (`adopt_existing`,
+     default true).
+   - **Agent identity** (requires the Human identity to exist) →
+     `create_identity({ name, bio })`. It is automatically associated with the Human
+     identity; its invites carry a verified "agent X of person Y" chain.
 4. **Optional flags** (both default true): `expose_local` publishes the identity in the
    **host-local contact book** so other same-host identities can message it by name with no
    invite; `local_auto_accept` auto-accepts local introductions (false = they queue for
@@ -121,15 +159,16 @@ authored the bio, so a persona prompt is only needed if they want to role-play i
 
 ### Other identity tools
 
-- **List:** "what identities are there" → `list_identities()` (shows the root with its
-  roles indented, and which one this session is bound to).
+- **List:** "what identities are there" → `list_identities()` (shows the Human identity
+  with its agents indented — the output may label it "root" — and which one this session
+  is bound to).
 - **Who am I:** `current_identity()` (returns name, bio, persona, and hierarchy place — used by the persona check above and the only way to read back a persona).
-- **Set/change a bio:** `set_bio({ bio })` on the bound identity. For the root, the
-  refreshed profile is re-pinned into every role so future role invites carry the update.
+- **Set/change a bio:** `set_bio({ bio })` on the bound identity. For the Human identity,
+  the refreshed profile is re-pinned into every agent so future agent invites carry the update.
 - **Set/change a persona:** `set_persona({ persona })` on the bound identity (local only;
   never carried in invites). Read it back via `current_identity` (no getter tool).
 - **Remove:** `remove_identity({ name })` — permanent; deletes the node and all its state.
-  A root with roles refuses until the roles are removed.
+  A Human identity with agents refuses until the agents are removed.
 
 ### Version mismatch (advisory)
 
@@ -184,7 +223,7 @@ report the contact as already added.
 ### Send a message
 "send **hi** to **Bob**" → `send_message({ contact: "Bob", text: "hi" })`. `contact` is a
 contact name or container id. If Bob is not yet a contact but is a same-host **sibling role**
-(same root) or is **published in the local contact book**, the connection is established
+(same Human identity) or is **published in the local contact book**, the connection is established
 automatically (cert- or registrar-verified introduction + key exchange) and the message is
 delivered with it — no invite ceremony.
 
@@ -281,39 +320,40 @@ completed, and that the peer actually sent.
 
 This is **separate** from the per-identity wake Monitor. The control plane lets a **person's
 web-messenger account** (the [ours messenger](https://github.com/adapt-toolkit/ours-messenger))
-oversee and command all agents (roles) under this host's **root** identity from a **Control
+oversee and command all agents under this host's **Human identity** from a **Control
 Panel**: view a **live monitoring feed** of monitored agents' traffic, create agents, edit
 their bios **and personas**, toggle each agent's monitoring, open a chat with any agent (the
-root commands the agent to mint an invite — no out-of-band step), and remove agents. A
+Human identity commands the agent to mint an invite — no out-of-band step), and remove agents. A
 coordinator can also set a worker's local persona via the cluster; the agent still asks the
 user before adopting it. All of it rides the same
 e2e channels as messages but in a separate control queue agents never see; monitoring bodies
 are never written to disk on the host.
 
 **Prerequisites**
-- A **root identity** exists (`create_root_identity`). The proxy binds to the root.
-- The messenger account is already a **contact of the root** — do the normal invite
-  exchange first: bind the root, `generate_invite`, and have the messenger redeem it (or
-  redeem the messenger's invite with `add_contact`).
+- The **Human identity** exists (`create_root_identity` — the onboarding step). The
+  proxy binds to the Human identity.
+- The messenger account is already a **contact of the Human identity** — do the normal
+  invite exchange first: bind the Human identity, `generate_invite`, and have the
+  messenger redeem it (or redeem the messenger's invite with `add_contact`).
 
 **Binding ceremony (6-digit code, out-of-band)**
 1. "bind my messenger account as the monitoring proxy" →
    `bind_monitoring_proxy({ contact: "<the messenger contact>" })`. This automatically
-   targets the host's root (you do **not** need to be bound as the root). It returns a
+   targets the host's Human identity (you do **not** need to be bound as it). It returns a
    **6-digit code** (valid 5 minutes, 3 attempts) and shows it **here**.
-2. **Read the code to the user.** They open the messenger → the conversation with the root →
+2. **Read the code to the user.** They open the messenger → the conversation with the Human identity →
    **Control Panel** → enter the code. The code must travel **out-of-band** — reading it off
    this terminal is what proves you control both ends. **Never send the code over ours.**
 3. On success the contact becomes the proxy. Confirm with `get_monitoring_status`.
 
 **Per-agent monitoring is controller-gated.** Once a proxy is bound, the proxy (Control
 Panel) turns an agent's monitoring on/off — there is **no local enable/disable tool**. A
-monitored agent reports a root-signed copy of every message it sends/receives to the root,
-which forwards it to the proxy's feed.
+monitored agent reports a signed copy of every message it sends/receives to the Human
+identity's node, which forwards it to the proxy's feed.
 
 **Status** — "what's the monitoring/control state" → `get_monitoring_status()` reports the
-root's bound proxy (if any), a pending code verification, queued copies/control requests, and
-each agent's monitoring ON/off. Works whenever a root exists.
+Human identity's bound proxy (if any), a pending code verification, queued copies/control
+requests, and each agent's monitoring ON/off. Works whenever the Human identity exists.
 
 ## Notes
 
@@ -321,7 +361,7 @@ each agent's monitoring ON/off. Works whenever a root exists.
   (`OURS_STATE_DIR`, default `~/.ours`) and survive restarts. The daemon is a singleton
   shared by all your Claude Code sessions.
 - Inbound messages from unknown (non-contact) senders are rejected — only peers added via an
-  invite handshake, same-host siblings under the same root, or registrar-verified
+  invite handshake, same-host agents under the same Human identity, or registrar-verified
   local-contact-book introductions can reach you.
 - Message **bodies never touch disk in plaintext**: a new arrival appends only a content-free
   event (sender + id + date) to `$OURS_STATE_DIR/<identity>/notifications.log` (the wake

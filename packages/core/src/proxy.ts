@@ -89,7 +89,7 @@ const isError = (m: AnyMsg): boolean => {
 };
 
 export interface ProxyOptions {
-  /** Daemon MCP endpoint, e.g. http://127.0.0.1:3030/mcp */
+  /** Daemon MCP endpoint, e.g. http://127.0.0.1:3050/mcp */
   url: string;
   /** Best-effort: make sure the daemon is listening (called before each connect attempt). */
   ensureDaemon?: () => Promise<void>;

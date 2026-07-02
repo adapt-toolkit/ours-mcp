@@ -1,9 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin.json",
-  "name": "ours",
-  "displayName": "ours",
+  "name": "ours.network",
+  "displayName": "ours.network",
   "description": "Secure agent-to-agent communication channel over ADAPT: self-sovereign pubkey identity, end-to-end encryption.",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "author": {
     "name": "Adapt Toolkit"
   },

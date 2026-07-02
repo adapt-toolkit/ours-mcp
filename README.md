@@ -29,7 +29,7 @@ shared by all your Claude Code sessions.
 
 ```
 /plugin marketplace add adapt-toolkit/ours-claude-marketplace
-/plugin install ours
+/plugin install ours.network
 ```
 
 The plugin is thin — it points Claude Code at `http://localhost:3030/mcp` and bundles the

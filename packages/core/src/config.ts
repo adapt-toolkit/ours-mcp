@@ -13,13 +13,18 @@ export interface OursConfig {
   port: number;
   stateDir: string;
   gcIntervalMs: number;
+  // When true, the proxy auto-spawns the daemon if port `port` is not
+  // answering. Off by default: an unreachable daemon is reported as an error
+  // ("start it with `ours-mcp start`") instead of being silently launched.
+  autoStart: boolean;
 }
 
 export const DEFAULT_CONFIG: OursConfig = {
-  brokerUrl: 'wss://ours.network/broker',
-  port: 3030,
+  brokerUrl: 'wss://ours.network/broker_new',
+  port: 3050,
   stateDir: resolve(homedir(), '.ours'),
   gcIntervalMs: 3_600_000,
+  autoStart: false,
 };
 
 export function configPath(): string {
@@ -46,7 +51,14 @@ function readFileConfig(): Partial<OursConfig> {
   if (typeof parsed.gcIntervalMs === 'number' && Number.isFinite(parsed.gcIntervalMs)) {
     out.gcIntervalMs = parsed.gcIntervalMs;
   }
+  if (typeof parsed.autoStart === 'boolean') out.autoStart = parsed.autoStart;
   return out;
+}
+
+function envBool(name: string): boolean | undefined {
+  const v = process.env[name];
+  if (v === undefined) return undefined;
+  return v === '1' || v.toLowerCase() === 'true';
 }
 
 function envInt(name: string): number | undefined {
@@ -63,6 +75,7 @@ export function loadConfig(): OursConfig {
     port: envInt('OURS_PORT') ?? file.port ?? DEFAULT_CONFIG.port,
     stateDir: resolve(process.env.OURS_STATE_DIR ?? file.stateDir ?? DEFAULT_CONFIG.stateDir),
     gcIntervalMs: envInt('OURS_GC_INTERVAL_MS') ?? file.gcIntervalMs ?? DEFAULT_CONFIG.gcIntervalMs,
+    autoStart: envBool('OURS_AUTOSTART') ?? file.autoStart ?? DEFAULT_CONFIG.autoStart,
   };
 }
 

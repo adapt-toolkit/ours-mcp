@@ -5,7 +5,8 @@
 // The server is meant to run as ONE long-lived background daemon (HTTP transport)
 // that many Claude Code sessions connect to over http://localhost:<port>/mcp —
 // one shared ADAPT wrapper hosting N identities. This CLI starts/stops/inspects
-// that daemon. The Claude Code plugin only *connects*; it never spawns the server.
+// that daemon. The Claude Code plugin only *connects*; it never spawns the
+// server unless `autoStart` is explicitly enabled (config.json / OURS_AUTOSTART).
 //
 //   ours-mcp start     start the daemon in the background (idempotent)
 //   ours-mcp stop      stop the running daemon
@@ -18,9 +19,10 @@
 // Config precedence per field: env var > config.json (OURS_CONFIG, else
 // ~/.ours/config.json) > default. Env vars override the file:
 //   OURS_BROKER_URL      broker to connect to (default: public broker)
-//   OURS_PORT            HTTP port (default 3030)
+//   OURS_PORT            HTTP port (default 3050)
 //   OURS_STATE_DIR       state + pid/log dir (default ~/.ours)
 //   OURS_GC_INTERVAL_MS  message-GC interval in ms (default 3600000)
+//   OURS_AUTOSTART       "1"/"true": proxy auto-spawns the daemon (default off)
 
 import { spawn, spawnSync } from 'node:child_process';
 import { connect } from 'node:net';
@@ -321,6 +323,7 @@ async function cmdSetup(): Promise<void> {
     const portStr = await ask('HTTP port', String(current.port));
     const stateDir = await ask('state dir', current.stateDir);
     const gcStr = await ask('GC interval (ms)', String(current.gcIntervalMs));
+    const autoStartStr = await ask('proxy auto-starts daemon (true/false)', String(current.autoStart));
 
     const port = parseInt(portStr, 10);
     if (!Number.isFinite(port) || port <= 0) {
@@ -332,7 +335,8 @@ async function cmdSetup(): Promise<void> {
       err(`invalid GC interval: ${gcStr}`);
       process.exit(1);
     }
-    next = { brokerUrl, port, stateDir: resolve(stateDir), gcIntervalMs };
+    const autoStart = autoStartStr.toLowerCase() === 'true' || autoStartStr === '1';
+    next = { brokerUrl, port, stateDir: resolve(stateDir), gcIntervalMs, autoStart };
   } finally {
     rl.close();
   }
@@ -342,7 +346,7 @@ async function cmdSetup(): Promise<void> {
   out(`wrote ${path} (mode 0600):`);
   out(JSON.stringify(next, null, 2));
 
-  const shadowed = (['OURS_BROKER_URL', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_GC_INTERVAL_MS'] as const)
+  const shadowed = (['OURS_BROKER_URL', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_GC_INTERVAL_MS', 'OURS_AUTOSTART'] as const)
     .filter((k) => process.env[k] !== undefined);
   if (shadowed.length) {
     out('');
@@ -777,7 +781,7 @@ function usage(): void {
   out('');
   out('Config precedence (per field): env var > config.json > default.');
   out('  config.json: OURS_CONFIG, else ~/.ours/config.json — edit with `setup`.');
-  out('  env: OURS_BROKER_URL, OURS_PORT (3030), OURS_STATE_DIR (~/.ours), OURS_GC_INTERVAL_MS (3600000)');
+  out('  env: OURS_BROKER_URL, OURS_PORT (3050), OURS_STATE_DIR (~/.ours), OURS_GC_INTERVAL_MS (3600000), OURS_AUTOSTART (off)');
   out('(install-service bakes the resolved config values into the service definition.)');
 }
 
@@ -843,9 +847,19 @@ async function main(): Promise<void> {
       // this over stdio (stable for the whole session, no 15-min re-handshake);
       // it bridges to the daemon's http endpoint and keeps the identity binding
       // stable across the daemon's session lifetime. Runs until stdin closes.
+      //
+      // The daemon is expected to be running already (`ours-mcp start` /
+      // install-service). With autoStart off (the default) an unreachable
+      // daemon is a hard startup error; with it on, the proxy spawns the
+      // daemon on demand before each connect attempt.
+      if (!CONFIG.autoStart && !(await portOpen(PORT))) {
+        err(`ours-mcp daemon is not running on port ${PORT} — start it with \`ours-mcp start\`.`);
+        err('(or enable auto-start: `ours-mcp setup` → autoStart, or OURS_AUTOSTART=1)');
+        process.exit(1);
+      }
       await runProxy({
         url: `http://127.0.0.1:${PORT}/mcp`,
-        ensureDaemon: ensureDaemonRunning,
+        ensureDaemon: CONFIG.autoStart ? ensureDaemonRunning : undefined,
         stateDir: STATE_DIR,
       });
       break;

@@ -94,8 +94,7 @@ import type {
   AdaptWrapper,
   AdaptPacketWrapper,
 } from '@adapt-toolkit/sdk/wrappers';
-import type { AdaptValue, AdaptPacketContext } from '@adapt-toolkit/sdk/backend';
-import { AdaptEnvironment, AdaptEvaluationUnit } from '@adapt-toolkit/sdk/backend';
+import type { AdaptValue } from '@adapt-toolkit/sdk/backend';
 import { object_to_adapt_value } from '@adapt-toolkit/sdk/wrapper';
 import { AdaptObjectLifetime } from '@adapt-toolkit/sdk/common';
 import { loadConfig, buildIdentityFile, writeIdentityFile } from './config';
@@ -1340,6 +1339,77 @@ function saveState(id: Identity): void {
   }
 }
 
+// ----- contact restore (host driving) ------------------------------------
+// The packet self-heals degraded contacts (known cid, no encryption keys —
+// the outcome of a breaking-change migration that dropped peer_ads) through
+// the signed request_contact_restore handshake. The host's jobs: fire the
+// sweep on boot + the GC cadence, and drain deferred queues once a contact
+// heals ($contact_restored notify, or the sweep for a flush lost to a crash).
+function renderDegraded(av: AdaptValue): Array<{ cid: string; name: string; attempts: number; queued: number }> {
+  const out: Array<{ cid: string; name: string; attempts: number; queued: number }> = [];
+  const arr = av.Reduce('degraded');
+  if (arr.IsNil()) return out;
+  for (let i = 0; ; i++) {
+    const e = arr.Reduce(i);
+    if (e.IsNil()) break;
+    out.push({
+      cid: e.Reduce('container_id').Visualize(),
+      name: e.Reduce('name').Visualize(),
+      attempts: Number(e.Reduce('attempts').Visualize()),
+      queued: Number(e.Reduce('queued').Visualize()),
+    });
+  }
+  return out;
+}
+
+function renderDeferredQueues(av: AdaptValue): Array<{ cid: string; queued: number; degraded: boolean }> {
+  const out: Array<{ cid: string; queued: number; degraded: boolean }> = [];
+  const arr = av.Reduce('queues');
+  if (arr.IsNil()) return out;
+  for (let i = 0; ; i++) {
+    const e = arr.Reduce(i);
+    if (e.IsNil()) break;
+    out.push({
+      cid: e.Reduce('container_id').Visualize(),
+      queued: Number(e.Reduce('queued').Visualize()),
+      degraded: e.Reduce('degraded').GetBoolean(),
+    });
+  }
+  return out;
+}
+
+// Drain messages queued while a contact was degraded. Idempotent (empty or
+// still-degraded queue → flushed 0), so re-firing is always safe.
+async function flushDeferredFor(id: Identity, contactCid: string): Promise<void> {
+  try {
+    const flushed = await withScopeAsync(async (lt) => {
+      const r = await mutatingTx(id, '::a2a_messaging::flush_deferred', { contact: contactCid }, lt);
+      return Number(r.Reduce('flushed').Visualize());
+    });
+    if (flushed > 0) log(`[${id.name}] flushed ${flushed} deferred message(s) to ${contactCid.slice(0, 12)}…`);
+  } catch (err) {
+    log(`[${id.name}] deferred flush to ${contactCid.slice(0, 12)}… failed:`, String(err));
+  }
+}
+
+// Boot + GC sweep: (re)request restores for degraded contacts and flush any
+// healed-but-still-queued contact (a crash between restore and flush).
+async function contactRestoreSweep(id: Identity): Promise<void> {
+  try {
+    const requested = await withScopeAsync(async (lt) => {
+      const r = await mutatingTx(id, '::a2a_messaging::restore_degraded_contacts', {}, lt);
+      return Number(r.Reduce('requested').Visualize());
+    });
+    if (requested > 0) log(`[${id.name}] contact restore requested for ${requested} degraded contact(s)`);
+    const queues = withScope((lt) => renderDeferredQueues(readonlyTx(id, '::a2a_messaging::list_deferred_queues', lt)));
+    for (const q of queues) {
+      if (!q.degraded) await flushDeferredFor(id, q.cid);
+    }
+  } catch (err) {
+    log(`[${id.name}] contact-restore sweep failed:`, String(err));
+  }
+}
+
 // ----- notifications.log + unread snapshot -----------------------------------
 // Append a content-free arrival event (no body, ever). The event line is the
 // host wake signal (`ours-mcp watch` tails it), so anything an away agent
@@ -1605,6 +1675,14 @@ function wireHandlers(id: Identity): void {
         process.nextTick(() =>
           pushNotification(id.name, `[${id.name}] "${name}" queued a message awaiting introduction approval (${queued} queued).`),
         );
+      } else if (event === 'contact_restored') {
+        // A degraded contact's keys were re-established (signed restore
+        // handshake). Drain anything queued toward it; content-free log line.
+        const name = payload.Reduce('name').Visualize();
+        const cid = payload.Reduce('container_id').Visualize();
+        appendNotifyLog(id, { event: 'contact_restored', from: name });
+        log(`[${id.name}] contact "${name}" restored (re-keyed)`);
+        process.nextTick(() => void flushDeferredFor(id, String(cid)));
       } else if (event === 'control_request') {
         // Daemon-internal: the proxy's request queue is drained and executed
         // here, never surfaced to agent sessions.
@@ -1681,29 +1759,20 @@ function createPacket(
   name: string, seed: string, dir: string, track = true, signingSecret?: string,
 ): Promise<Identity> {
   const config = new PacketWrapperConfigurator();
-  config.process_arguments([
+  const args = [
     '--unit_hash', UNIT.hash,
     '--seed_phrase', seed,
     '--unit_dir_path', UNIT.dir,
-  ]);
-  // A persisted SIGN secret (adapt #77) cannot travel through the wrapper's JSON
-  // --init_trn_argument channel: the wrapper builds it via
-  // object_to_adapt_value(JSON.parse(init_arg)), which only makes JSON
-  // primitives/dicts — never a domain-typed secretkey_sign leaf — and feeding a
-  // hex string into `arg SAFE(secretkey_sign)` aborts the native runtime. So we
-  // reparse the Serialize()-hex back into a raw AdaptValue and pre-create the
-  // packet exactly as the wrapper does internally (Seed phrase: <seed>, empty
-  // entropy — irrelevant here, since ::actor::__init reseeds the identity from the
-  // secret and overwrites the container-id-deriving key), then hand it in as the
-  // 4th `_packet` arg so the wrapper skips its own CreatePacket/init_arg path.
-  const prePacket: AdaptPacketContext | undefined = signingSecret
-    ? withScope((lt) => {
-        const unit = AdaptEvaluationUnit.LoadFromContents(lt, UNIT.contents);
-        const host = AdaptEnvironment.EmptyPacket(lt, true).Attach(lt);
-        const initArg = host.ParseValue(Buffer.from(signingSecret, 'hex')).Attach(lt);
-        return AdaptEnvironment.CreatePacket(lt, unit, `Seed phrase: ${seed}`, '', false, initArg).Detach();
-      })
-    : undefined;
+  ];
+  // A persisted SIGN secret (adapt #77) is the Serialize()-hex of the secretkey_sign
+  // (see exportSigningSecret). Deliver it through the wrapper's normal init_arg
+  // channel: actor.mu's __init deserializes it (_hex_string_to_binary ->
+  // _read_or_abort) and reseeds, restoring the container address — no pre-created
+  // packet, so the wrapper still runs its own protocol/attestation setup.
+  if (signingSecret) {
+    args.push('--init_trn_argument', JSON.stringify(signingSecret));
+  }
+  config.process_arguments(args);
   return new Promise<Identity>((resolveCreate, rejectCreate) => {
     const timer = setTimeout(
       () => rejectCreate(new Error(`packet creation for "${name}" timed out`)),
@@ -1727,7 +1796,6 @@ function createPacket(
         resolveCreate(id);
       },
       UNIT.contents,
-      prePacket,
     );
   });
 }
@@ -1775,9 +1843,17 @@ async function restoreIdentity(name: string): Promise<Identity> {
         await mutatingTx(id, '::actor::import_state', adaptData, lt);
       });
     } catch (err) {
-      log(`[${name}] failed to import saved state (continuing fresh):`, String(err));
+      log(`[${name}] FAILED TO IMPORT SAVED STATE — continuing with the reseeded identity; ` +
+        `surviving contacts (if the blob was partially migrated) self-heal via contact restore:`, String(err));
+      appendNotifyLog(id, { event: 'state_import_failed', error: String(err).slice(0, 300) });
+      try {
+        fs.renameSync(dataPath(dir), `${dataPath(dir)}.failed-${Date.now()}`);
+        log(`[${name}] unreadable state blob preserved as state_data.bin.failed-*`);
+      } catch { /* best effort */ }
     }
   }
+  // Eager restore: re-key degraded contacts + flush queues orphaned by a crash.
+  await contactRestoreSweep(id);
   // Make the SessionStart hook's offline view match the restored packet state.
   refreshUnread(id);
   return id;
@@ -2540,17 +2616,20 @@ function createMcpServer(getSessionId: () => string): McpServer {
       const { id, err } = boundOr();
       if (err) return err;
       try {
-        const { contacts, pending, roots } = withScope((lt) => ({
+        const { contacts, pending, roots, degraded } = withScope((lt) => ({
           contacts: renderContacts(readonlyTx(id!, '::a2a_messaging::list_contacts', lt)),
           pending: renderPending(readonlyTx(id!, '::actor::list_pending_introductions', lt)),
           roots: renderContactRoots(readonlyTx(id!, '::a2a_messaging::list_contact_roots', lt)),
+          degraded: renderDegraded(readonlyTx(id!, '::a2a_messaging::list_degraded_contacts', lt)),
         }));
+        const degradedByCid = new Map(degraded.map((d) => [d.cid, d]));
         const lines: string[] = [];
         lines.push(
           contacts.length === 0
             ? 'No contacts yet.'
             : `Contacts (${contacts.length}):\n${contacts
-                .map((c) => `• ${c.name} — ${c.container_id}${fmtContactRoot(roots[c.container_id])}`)
+                .map((c) => `• ${c.name} — ${c.container_id}${fmtContactRoot(roots[c.container_id])}` +
+                  `${degradedByCid.has(c.container_id) ? ` — ⚠ keys pending restore (${degradedByCid.get(c.container_id)!.queued} queued)` : ''}`)
                 .join('\n')}`,
         );
         if (pending.length > 0) {
@@ -2749,15 +2828,24 @@ function createMcpServer(getSessionId: () => string): McpServer {
           : { wire_id: reply_to_wire_id }
         : undefined;
       try {
-        const wireId = await withScopeAsync(async (lt) => {
+        const { wireId, deferred, queued } = await withScopeAsync(async (lt) => {
           const sent = await mutatingTx(id!, '::a2a_messaging::send_message', {
             contact,
             text,
             ...(reply_to ? { reply_to } : {}),
           }, lt);
-          return sent.Reduce('wire_id').Visualize();
+          const defAv = sent.Reduce('deferred');
+          return {
+            wireId: sent.Reduce('wire_id').Visualize(),
+            deferred: !defAv.IsNil(),
+            queued: defAv.IsNil() ? 0 : Number(sent.Reduce('queued').Visualize()),
+          };
         });
-        return textResult(`Message sent to "${contact}" (wire_id ${wireId}).`);
+        return textResult(deferred
+          ? `Message queued for "${contact}" (wire_id ${wireId}) — the contact's encryption keys are being ` +
+            `re-established after an upgrade (contact restore in progress); delivery is automatic once ` +
+            `restored (${queued} message${queued === 1 ? '' : 's'} queued).`
+          : `Message sent to "${contact}" (wire_id ${wireId}).`);
       } catch (e) {
         if (!/Unknown contact/.test(String(e))) {
           return textResult(`send_message failed: ${String(e)}`, true);
@@ -3102,6 +3190,7 @@ function startGcTimer(): void {
           } catch (e) {
             log(`gc(${id.name}) failed:`, String(e));
           }
+          await contactRestoreSweep(id);
         }
       } finally {
         gcRunning = false;
