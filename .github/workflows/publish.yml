@@ -1,162 +1,115 @@
-name: Publish packages
+name: CI
 
-# Builds + typechecks both workspaces on every PR/push, and on pushes to main
-# publishes the changed package(s) to npm. The two packages publish in a strict
-# order — @ours.network/mcp (server) BEFORE @ours.network/claude-code
-# (plugin) — so the plugin never references an unpublished core, and the plugin's
-# exact core dependency is re-pinned to the freshly published core version before
-# the plugin publishes (see bump-claude-code-version.sh PIN-SYNC).
+# Gates → Conventional-Commits version bump → publish @ours.network/mcp then
+# @ours.network/claude-code (strict order: the plugin's exact core dependency
+# is re-pinned to the freshly bumped core version before either publishes —
+# see scripts/bump-versions.sh PIN-SYNC).
 #
-# Prerequisites (one-time, GitHub repo settings):
-#   - Secret NPM_TOKEN: npm automation token with publish rights to the
-#     @adapt-toolkit scope (covers BOTH package names).
-#   - Workflow permissions: "Read and write" so the [skip ci] bump commits push
-#     back to main.
+# Prerequisites (one-time, GitHub repo settings → secrets):
+#   - NPM_TOKEN: npm automation token with publish rights to the
+#     @ours.network scope (covers BOTH packages).
+#   - VERSION_BUMP_APP_ID / VERSION_BUMP_APP_PRIVATE_KEY: the version-bump
+#     GitHub App (must be installed on this repo) so the bump commit can push
+#     past branch protection.
 
 on:
   push:
     branches: [main]
-    paths:
-      - 'packages/**'
-      - '.github/workflows/publish.yml'
-      - '.github/workflows/scripts/**'
   pull_request:
     branches: [main]
-    paths:
-      - 'packages/**'
-      - '.github/workflows/publish.yml'
-      - '.github/workflows/scripts/**'
+  workflow_dispatch:
 
-# Serialize releases on the same ref so a re-run can't race a fresh push.
+# Cancel superseded runs on the same ref so a burst of pushes doesn't queue a
+# full release per commit — only the latest ref state is gated and published.
 concurrency:
-  group: publish-${{ github.ref }}
-  cancel-in-progress: false
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # Gate: typecheck + build BOTH workspaces. Runs on PRs and pushes.
-  build:
+  gates:
     runs-on: ubuntu-latest
-    name: Build & typecheck
-    timeout-minutes: 10
+    name: Gates (typecheck · build · test)
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
+          cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
-      - name: Verify build output (only the compiled .muflo + bundles ship)
+      - name: Verify build output (compiled .muflo + bundles ship)
         run: |
           test -f packages/core/dist/index.js
           test -f packages/core/dist/cli.js
           ls packages/core/dist/mufl_code/*.muflo
           test -f packages/claude-code/dist/hooks/runner.js
-      - name: Test (regression suites; runs against the built dist)
-        run: npm test
+      - run: npm test
 
-  # Which package(s) changed in this push? Gates the two release jobs so a
-  # core-only change does not republish the plugin (and vice-versa).
-  changes:
+  # Bumps BOTH workspace versions in one [skip ci] commit (each from
+  # max(local, npm-published)), pins the plugin's core dependency, and pushes
+  # back to main via a GitHub App token. Gated on gates going green.
+  version-bump:
+    needs: gates
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    name: Detect changed packages
-    outputs:
-      core: ${{ steps.filter.outputs.core }}
-      claude_code: ${{ steps.filter.outputs.claude_code }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            core:
-              - 'packages/core/**'
-            claude_code:
-              - 'packages/claude-code/**'
-
-  # 1) Publish the server FIRST. Bumps from max(local, published), commits the
-  #    bump [skip ci], publishes, and exposes the published version downstream.
-  release-core:
-    needs: [build, changes]
-    if: needs.changes.outputs.core == 'true'
-    runs-on: ubuntu-latest
-    name: Release @ours.network/mcp
-    timeout-minutes: 15
+    name: Version bump
+    timeout-minutes: 5
     permissions:
       contents: write
     outputs:
-      version: ${{ steps.bump.outputs.version }}
       bumped: ${{ steps.bump.outputs.bumped }}
+      new-sha: ${{ steps.bump.outputs.new-sha }}
+      core-version: ${{ steps.bump.outputs.core-version }}
+      plugin-version: ${{ steps.bump.outputs.plugin-version }}
     steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.VERSION_BUMP_APP_ID }}
+          private-key: ${{ secrets.VERSION_BUMP_APP_PRIVATE_KEY }}
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 2
+          token: ${{ steps.app-token.outputs.token }}
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-      - run: npm ci
-      - id: bump
-        run: bash .github/workflows/scripts/bump-core-version.sh
-      - name: Publish to npm
-        if: steps.bump.outputs.bumped == 'true'
-        run: npm publish --workspace @ours.network/mcp
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Summary
-        if: always()
-        run: |
-          if [ "${{ steps.bump.outputs.bumped }}" = "true" ]; then
-            echo "Published @ours.network/mcp@${{ steps.bump.outputs.version }}." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "core: no version bump for this commit — nothing published." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          node-version: 20
+          cache: npm
+      - name: Run version bump
+        id: bump
+        run: bash .github/workflows/scripts/bump-versions.sh
 
-  # 2) Publish the plugin AFTER core. Runs when the plugin changed; gated so it
-  #    never runs if core publishing FAILED. PIN-SYNC re-points the exact core
-  #    dependency to release-core's just-published version (or npm latest when
-  #    core did not publish in this run) before bumping + publishing the plugin.
-  release-claude-code:
-    needs: [build, changes, release-core]
-    if: |
-      always() &&
-      needs.build.result == 'success' &&
-      needs.changes.outputs.claude_code == 'true' &&
-      needs.release-core.result != 'failure' &&
-      needs.release-core.result != 'cancelled'
+  # Publishes core then plugin from the post-bump SHA, so published versions
+  # always match the committed package.json files. Only runs when the bump
+  # produced a new version (re-publishing an existing version would 403).
+  npm-publish:
+    needs: [gates, version-bump]
+    if: needs.version-bump.outputs.bumped == 'true'
     runs-on: ubuntu-latest
-    name: Release @ours.network/claude-code
+    name: Publish to npm
     timeout-minutes: 15
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ needs.version-bump.outputs.new-sha }}
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: 20
+          cache: npm
+          registry-url: https://registry.npmjs.org
       - run: npm ci
-      - id: bump
-        run: bash .github/workflows/scripts/bump-claude-code-version.sh
+      - run: npm run build
+      - name: Publish @ours.network/mcp
+        run: npm publish --workspace @ours.network/mcp --access public
         env:
-          CORE_VERSION: ${{ needs.release-core.outputs.version }}
-      - name: Publish to npm
-        if: steps.bump.outputs.bumped == 'true'
-        run: npm publish --workspace @ours.network/claude-code
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish @ours.network/claude-code
+        run: npm publish --workspace @ours.network/claude-code --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Summary
-        if: always()
         run: |
-          if [ "${{ steps.bump.outputs.bumped }}" = "true" ]; then
-            echo "Published @ours.network/claude-code@${{ steps.bump.outputs.version }}." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "claude-code: no version bump for this commit — nothing published." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "Published @ours.network/mcp@${{ needs.version-bump.outputs.core-version }} and @ours.network/claude-code@${{ needs.version-bump.outputs.plugin-version }}." >> "$GITHUB_STEP_SUMMARY"

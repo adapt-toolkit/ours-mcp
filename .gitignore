@@ -10,10 +10,11 @@ node_modules/
 # so dist/ is never committed. Build locally with `npm run build`.
 dist/
 
-# Compiled MUFL packet — a regenerated build artifact (content-hash named),
-# produced from packages/core/mufl_code/ via scripts/compile-mufl.sh. The source
-# (.mu / .mufl / .mm) is the source of truth; the packet is never committed.
+# Compiled MUFL packets are built locally (scripts/compile-mufl.sh, needs the
+# adapt-toolkit) and COMMITTED — CI does not compile mufl; it ships the tracked
+# packet. Only stray packets outside packages/core/mufl_code/ are ignored.
 *.muflo
+!packages/core/mufl_code/*.muflo
 
 # Local node state directories created at runtime by the MCP server
 # (identity keypair + serialized packet snapshots). Per-process override via
