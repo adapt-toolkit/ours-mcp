@@ -12,5 +12,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "dev": "npm --workspace @ours.network/mcp run dev"
+  },
+  "devDependencies": {
+    "@adapt-toolkit/mufl": "0.8.0"
   }
 }
