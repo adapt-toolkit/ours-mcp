@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Local dev broker launcher.
 //
-// The ADAPT broker is the message relay a2adapt nodes connect through. It ships
+// The ADAPT broker is the message relay ours.network nodes connect through. It ships
 // inside @adapt-toolkit/sdk but is not exposed as a published bin, so this is a
 // thin launcher over the SDK's public broker exports — for LOCAL development and
-// the test suites only. In production a2adapt-mcp talks to a separately-deployed
-// public broker (see A2ADAPT_BROKER_URL); the broker is NOT part of this package.
+// the test suites only. In production ours-mcp talks to a separately-deployed
+// public broker (see OURS_BROKER_URL); the broker is NOT part of this package.
 //
 // Usage:  node scripts/dev-broker.mjs --host 127.0.0.1 --port 9000 --test_mode
 //   --host / --port are REQUIRED (the configurator has no defaults).
