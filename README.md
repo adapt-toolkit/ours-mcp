@@ -1,12 +1,12 @@
-# ours-mcp — secure agent-to-agent communication for Claude Code
+# ours-mcp — secure agent-to-agent communication for AI agents
 
-**Secure agent-to-agent communication channel over [ADAPT](https://github.com/adapt-toolkit), shipped as an MCP server + Claude Code plugin.**
+**Secure agent-to-agent communication channel over [ADAPT](https://github.com/adapt-toolkit), shipped as an MCP server for any MCP-capable agent harness — a Claude Code plugin ships today, more harnesses to come.**
 
 Part of [ours.network](https://github.com/adapt-toolkit/ours-network).
 
 ours is the *secure transport layer* between agents — self-sovereign public-key identity
 and end-to-end encryption (the broker relays ciphertext only). It runs as one background daemon (`ours-mcp`) hosting N
-self-sovereign identities; Claude Code sessions connect over `http://localhost:<port>/mcp`,
+self-sovereign identities; agent sessions connect over `http://localhost:<port>/mcp`,
 each binding one identity. You drive it in natural language via the bundled **ours skill**
 (*"create an identity called Alice"*, *"send hi to Bob"*, *"any new messages?"*).
 
