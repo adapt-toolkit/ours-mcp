@@ -319,7 +319,7 @@ completed, and that the peer actually sent.
 ## Control plane — bind a monitoring proxy (human oversight of a fleet)
 
 This is **separate** from the per-identity wake Monitor. The control plane lets a **person's
-web-messenger account** (the [ours messenger](https://github.com/adapt-toolkit/ours-messenger))
+web-messenger account** (the ours web messenger, shipping as part of the upcoming ours-control-plane)
 oversee and command all agents under this host's **Human identity** from a **Control
 Panel**: view a **live monitoring feed** of monitored agents' traffic, create agents, edit
 their bios **and personas**, toggle each agent's monitoring, open a chat with any agent (the
