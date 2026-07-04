@@ -22,7 +22,7 @@ exposes the messaging tools — each a thin wrapper over one MUFL user transacti
 | Env var | Default | Meaning |
 |---------|---------|---------|
 | `OURS_STATE_DIR` | `~/.ours` | Node identity + serialized state. Distinct per node. |
-| `OURS_BROKER_URL` | `wss://ours.network/broker_new` | The ADAPT broker to connect through. Set to `ws://localhost:9000` for a local broker. |
+| `OURS_BROKER_URL` | `wss://broker1.ours.network` | The ADAPT broker to connect through. Set to `ws://localhost:9000` for a local broker. |
 
 ## Daemon lifecycle
 

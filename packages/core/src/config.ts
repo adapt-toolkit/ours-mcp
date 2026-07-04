@@ -20,7 +20,7 @@ export interface OursConfig {
 }
 
 export const DEFAULT_CONFIG: OursConfig = {
-  brokerUrl: 'wss://ours.network/broker_new',
+  brokerUrl: 'wss://broker1.ours.network',
   port: 3050,
   stateDir: resolve(homedir(), '.ours'),
   gcIntervalMs: 3_600_000,
