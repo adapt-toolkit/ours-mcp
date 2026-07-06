@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server daemon for ours — one native ADAPT wrapper hosting N self-sovereign identities, exposing secure agent-to-agent messaging tools over HTTP (Streamable HTTP). Run `ours-mcp start`.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
