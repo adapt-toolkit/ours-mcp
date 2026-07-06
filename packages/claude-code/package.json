@@ -44,7 +44,7 @@
     "test": "node test/proxy-resolve.test.mjs"
   },
   "dependencies": {
-    "@ours.network/mcp": "0.2.0"
+    "@ours.network/mcp": "*"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
