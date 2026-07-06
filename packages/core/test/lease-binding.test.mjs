@@ -35,7 +35,10 @@ const isErr = (r) => r.isError === true || (Array.isArray(r.content) && /failed|
 const dir = mkdtempSync(join(tmpdir(), 'a2a-lease-'));
 const PORT = await freePort();
 const URL_ = `http://127.0.0.1:${PORT}/mcp`;
-const daemon = spawn('node', [CLI, 'serve'], { env: { ...process.env, OURS_TRANSPORT: 'http', OURS_PORT: String(PORT), OURS_STATE_DIR: dir, OURS_BROKER_URL: 'wss://invalid.local/none' }, stdio: 'ignore' });
+// This suite drives /mcp directly as synthetic connectors (no proxy, no API
+// token), so run the daemon in `open` visibility — auth is covered separately by
+// port-visibility.test.mjs.
+const daemon = spawn('node', [CLI, 'serve'], { env: { ...process.env, OURS_TRANSPORT: 'http', OURS_PORT: String(PORT), OURS_STATE_DIR: dir, OURS_BROKER_URL: 'wss://invalid.local/none', OURS_API_VISIBILITY: 'open' }, stdio: 'ignore' });
 try {
   for (let i = 0; i < 80; i++) { try { if ((await fetch(`http://127.0.0.1:${PORT}/version`)).ok) break; } catch {} await sleep(250); }
 

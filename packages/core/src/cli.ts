@@ -39,14 +39,22 @@ import {
   writeIdentityFile,
   buildIdentityFile,
   resolveIdentityFilePath,
+  resolveApiToken,
+  API_VISIBILITIES,
   IDENTITY_FILENAME,
   type OursConfig,
+  type ApiVisibility,
 } from './config';
 import { runProxy } from './proxy';
 
 const CONFIG = loadConfig();
 const STATE_DIR = CONFIG.stateDir;
 const PORT = CONFIG.port;
+// Bearer token for the daemon HTTP surface (Part B). Clients never mint it
+// (generate:false) — only the daemon does. owner mode: same-user reads the 0600
+// file; shared mode: OURS_API_TOKEN/config; open mode: null (no header sent).
+const API_TOKEN = resolveApiToken(CONFIG, { generate: false })?.token ?? null;
+const apiHeaders = (): Record<string, string> => (API_TOKEN ? { 'x-ours-api-token': API_TOKEN } : {});
 const BROKER_URL = CONFIG.brokerUrl;
 const PID_PATH = join(STATE_DIR, 'daemon.pid');
 const LOG_PATH = join(STATE_DIR, 'daemon.log');
@@ -324,6 +332,7 @@ async function cmdSetup(): Promise<void> {
     const stateDir = await ask('state dir', current.stateDir);
     const gcStr = await ask('GC interval (ms)', String(current.gcIntervalMs));
     const autoStartStr = await ask('proxy auto-starts daemon (true/false)', String(current.autoStart));
+    const visibilityStr = await ask('HTTP visibility (owner=same-user only / shared=cross-user w/ token / open=all local users)', current.apiVisibility);
 
     const port = parseInt(portStr, 10);
     if (!Number.isFinite(port) || port <= 0) {
@@ -336,7 +345,22 @@ async function cmdSetup(): Promise<void> {
       process.exit(1);
     }
     const autoStart = autoStartStr.toLowerCase() === 'true' || autoStartStr === '1';
-    next = { brokerUrl, port, stateDir: resolve(stateDir), gcIntervalMs, autoStart };
+    const apiVisibility = visibilityStr.trim().toLowerCase();
+    if (!API_VISIBILITIES.includes(apiVisibility as ApiVisibility)) {
+      err(`invalid visibility: ${visibilityStr} (expected one of ${API_VISIBILITIES.join(', ')})`);
+      process.exit(1);
+    }
+    // Preserve an existing apiToken (e.g. a shared secret) across setup; it's not
+    // prompted here to avoid echoing it to the terminal — edit config to change it.
+    next = {
+      brokerUrl,
+      port,
+      stateDir: resolve(stateDir),
+      gcIntervalMs,
+      autoStart,
+      apiVisibility: apiVisibility as ApiVisibility,
+      ...(current.apiToken ? { apiToken: current.apiToken } : {}),
+    };
   } finally {
     rl.close();
   }
@@ -346,7 +370,7 @@ async function cmdSetup(): Promise<void> {
   out(`wrote ${path} (mode 0600):`);
   out(JSON.stringify(next, null, 2));
 
-  const shadowed = (['OURS_BROKER_URL', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_GC_INTERVAL_MS', 'OURS_AUTOSTART'] as const)
+  const shadowed = (['OURS_BROKER_URL', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_GC_INTERVAL_MS', 'OURS_AUTOSTART', 'OURS_API_VISIBILITY', 'OURS_API_TOKEN'] as const)
     .filter((k) => process.env[k] !== undefined);
   if (shadowed.length) {
     out('');
@@ -513,11 +537,39 @@ async function runIdentitySurvey(): Promise<{
 // backlog is the SessionStart hook's job. Stdout carries events only — every
 // status line goes to stderr, since Monitor turns each stdout line into a
 // notification.
+// A content-free arrival event as it appears on notifications.log / the API.
+interface NotifyEvent { event?: string; from?: string; msg_id?: number | string; date?: string; queued?: number | string }
+
+// The ONE place watch formats an event → stdout. Both the API path and the file
+// fallback funnel through here so Claude Code's Monitor sees byte-identical lines
+// no matter which transport delivered them.
+function emitNotify(name: string, msg: NotifyEvent): void {
+  if (msg.event === 'local_contact_request') {
+    out(`[${name}] pending local introduction from ${msg.from ?? '?'} — respond_to_introduction to approve/reject`);
+  } else if (msg.event === 'pending_message') {
+    out(`[${name}] ${msg.from ?? '?'} queued a message awaiting introduction approval (${msg.queued ?? '?'} queued)`);
+  } else {
+    out(
+      `[${name}] new message from ${msg.from ?? '?'}` +
+        (msg.msg_id !== undefined ? ` (#${msg.msg_id})` : '') +
+        (msg.date ? `  (${msg.date})` : ''),
+    );
+  }
+}
+
+// A watcher that cannot watch must look BROKEN, not armed: print one clear line
+// and exit non-zero so a Monitor surfaces the failure instead of spinning deaf.
+function watchFailLoud(message: string): never {
+  err(`ours-mcp watch: ${message}`);
+  process.exit(1);
+}
+
 // Ask the running daemon where its state lives (GET /state-dir on the HTTP port),
 // so watch follows the daemon's STATE_DIR even under an override or when running
-// as a different user than the daemon owner. Falls back to the locally-resolved
-// STATE_DIR if the daemon is unreachable (not started yet / older build).
-async function resolveWatchDir(): Promise<string> {
+// as a different user than the daemon owner. Returns null when the daemon is
+// unreachable (not started / older build) — the caller then decides fallback.
+// /state-dir is unauthenticated in every visibility mode, so no token is needed.
+async function probeDaemonStateDir(): Promise<string | null> {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 1500);
@@ -526,26 +578,130 @@ async function resolveWatchDir(): Promise<string> {
     if (resp.ok) {
       const body = (await resp.json()) as { stateDir?: unknown };
       if (typeof body.stateDir === 'string' && body.stateDir) return resolve(body.stateDir);
+      return STATE_DIR;
     }
   } catch {
-    /* daemon down or pre-/state-dir build — fall back below */
+    /* daemon down or pre-/state-dir build */
   }
-  return STATE_DIR;
+  return null;
 }
 
-async function cmdWatch(which?: string): Promise<void> {
-  const watchDir = await resolveWatchDir();
-  const offsets = new Map<string, number>(); // notifications.log path -> bytes already emitted
+const NOTIFY_URL = (name: string) => `http://127.0.0.1:${PORT}/identities/${encodeURIComponent(name)}/notifications`;
 
+// Long-poll one identity's notification stream over the daemon API, forever.
+// A 401 is fatal (token set-but-rejected) — fail loud, per the brief. Transient
+// network errors (daemon restart) are retried with backoff, never silently
+// swapped for a file read that a cross-user watcher couldn't do anyway.
+async function watchIdentityViaApi(name: string): Promise<void> {
+  const fetchSince = async (since: string): Promise<{ cursor?: number; events?: NotifyEvent[] }> => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 35_000); // > the daemon's 25s hold
+    let resp: Response;
+    try {
+      resp = await fetch(`${NOTIFY_URL(name)}?since=${since}`, { headers: apiHeaders(), signal: ctrl.signal });
+    } finally {
+      clearTimeout(t);
+    }
+    if (resp.status === 401) {
+      watchFailLoud(
+        `daemon rejected the API token (401) for identity "${name}". ` +
+          'Set OURS_API_TOKEN to the daemon\'s token (shared mode) or run watch as the daemon owner (owner mode).',
+      );
+    }
+    if (!resp.ok) throw new Error(`daemon returned HTTP ${resp.status}`);
+    return (await resp.json()) as { cursor?: number; events?: NotifyEvent[] };
+  };
+
+  // Prime at the current tip — emit nothing for the existing backlog.
+  let cursor = (await fetchSince('tip')).cursor ?? 0;
+  let backoff = 0;
+  for (;;) {
+    try {
+      const body = await fetchSince(String(cursor));
+      backoff = 0;
+      if (Array.isArray(body.events)) for (const ev of body.events) emitNotify(name, ev);
+      if (typeof body.cursor === 'number') cursor = body.cursor;
+    } catch (e) {
+      // Transient (daemon bounce / abort). Retry with capped backoff; a 401
+      // already exited above, so this never masks an auth failure.
+      backoff = Math.min(backoff + 1000, 5000);
+      err(`ours-mcp watch: notifications stream for "${name}" hiccupped (${String((e as Error)?.message ?? e)}), retrying…`);
+      await sleep(backoff);
+    }
+  }
+}
+
+// Watch over the API. For a single identity we stream it directly; for "all",
+// we enumerate via GET /identities and re-enumerate periodically so identities
+// created mid-session get picked up (the file path used to notice new dirs).
+async function watchViaApi(which?: string): Promise<void> {
+  if (which) {
+    await watchIdentityViaApi(which);
+    return;
+  }
+  const watching = new Set<string>();
+  for (;;) {
+    try {
+      const resp = await fetch(`http://127.0.0.1:${PORT}/identities`, { headers: apiHeaders() });
+      if (resp.status === 401) {
+        watchFailLoud('daemon rejected the API token (401). Set OURS_API_TOKEN or run watch as the daemon owner.');
+      }
+      if (resp.ok) {
+        const body = (await resp.json()) as { identities?: Array<{ name?: unknown }> };
+        for (const ent of body.identities ?? []) {
+          const name = typeof ent?.name === 'string' ? ent.name : undefined;
+          if (name && !watching.has(name)) {
+            watching.add(name);
+            void watchIdentityViaApi(name); // runs until a 401 (exits) or forever
+          }
+        }
+      }
+    } catch {
+      /* transient enumeration error — try again next tick */
+    }
+    await sleep(3000);
+  }
+}
+
+const isPermLike = (e: unknown): boolean => {
+  const code = (e as NodeJS.ErrnoException)?.code;
+  return code === 'EACCES' || code === 'EPERM';
+};
+
+// FILE FALLBACK — only when the daemon API is unreachable. Any EACCES/EPERM (the
+// cross-user deaf-agent root cause) or a missing/unreadable watch target fails
+// LOUDLY with a non-zero exit — the old code swallowed these and spun forever.
+function watchViaFileFallback(watchDir: string, which?: string): void {
+  // Readiness probe up front: if we can't even list the watch dir (or the target
+  // identity's dir), we cannot watch — say so and exit, don't pretend to be armed.
+  try {
+    fs.readdirSync(watchDir);
+  } catch (e) {
+    watchFailLoud(
+      `cannot watch — the daemon API is unreachable AND ${watchDir} is not readable ` +
+        `(${(e as NodeJS.ErrnoException)?.code ?? e}). On a multi-user host, run watch as the ` +
+        'daemon owner, or enable the daemon API (start the daemon) so watch can stream over HTTP.',
+    );
+  }
+  if (which) {
+    try {
+      fs.readdirSync(join(watchDir, which));
+    } catch (e) {
+      watchFailLoud(
+        `cannot watch identity "${which}" — ${join(watchDir, which)} is not readable ` +
+          `(${(e as NodeJS.ErrnoException)?.code ?? e}). Is the daemon running and the name correct?`,
+      );
+    }
+  }
+
+  const offsets = new Map<string, number>(); // notifications.log path -> bytes already emitted
   const scan = (initial: boolean) => {
     let names: string[];
     try {
-      names = fs
-        .readdirSync(watchDir, { withFileTypes: true })
-        .filter((d) => d.isDirectory())
-        .map((d) => d.name);
-    } catch {
-      return; // watchDir may not exist yet — try again next tick
+      names = fs.readdirSync(watchDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+    } catch (e) {
+      if (isPermLike(e)) watchFailLoud(`lost read access to ${watchDir} (${(e as NodeJS.ErrnoException).code}) — cannot watch.`);
+      return; // ENOENT: dir vanished transiently — retry next tick
     }
     for (const name of names) {
       if (which && name !== which) continue;
@@ -553,14 +709,12 @@ async function cmdWatch(which?: string): Promise<void> {
       let size: number;
       try {
         size = fs.statSync(logPath).size;
-      } catch {
-        continue; // no notifications.log for this identity yet
+      } catch (e) {
+        if (isPermLike(e)) watchFailLoud(`cannot read ${logPath} (${(e as NodeJS.ErrnoException).code}) — cannot watch identity "${name}".`);
+        continue; // ENOENT: no notifications.log for this identity yet (benign)
       }
       let seen = offsets.get(logPath);
       if (seen === undefined) {
-        // A log already present at startup is existing backlog → skip to EOF
-        // (the SessionStart hook surfaces that). A log that first appears LATER
-        // belongs to a fresh identity created mid-session → emit from the start.
         seen = initial ? size : 0;
         offsets.set(logPath, seen);
         if (initial) continue;
@@ -576,45 +730,67 @@ async function cmdWatch(which?: string): Promise<void> {
         fs.readSync(fd, buf, 0, buf.length, seen);
         fs.closeSync(fd);
         chunk = buf.toString('utf8');
-      } catch {
+      } catch (e) {
+        if (isPermLike(e)) watchFailLoud(`cannot read ${logPath} (${(e as NodeJS.ErrnoException).code}) — cannot watch identity "${name}".`);
         continue;
       }
       offsets.set(logPath, size);
       for (const line of chunk.split('\n')) {
         if (!line.trim()) continue;
-        let msg: { event?: string; from?: string; msg_id?: number | string; date?: string; queued?: number | string };
         try {
-          msg = JSON.parse(line);
+          emitNotify(name, JSON.parse(line) as NotifyEvent);
         } catch {
-          continue;
-        }
-        if (msg.event === 'local_contact_request') {
-          out(`[${name}] pending local introduction from ${msg.from ?? '?'} — respond_to_introduction to approve/reject`);
-        } else if (msg.event === 'pending_message') {
-          out(`[${name}] ${msg.from ?? '?'} queued a message awaiting introduction approval (${msg.queued ?? '?'} queued)`);
-        } else {
-          out(
-            `[${name}] new message from ${msg.from ?? '?'}` +
-              (msg.msg_id !== undefined ? ` (#${msg.msg_id})` : '') +
-              (msg.date ? `  (${msg.date})` : ''),
-          );
+          /* skip malformed line */
         }
       }
     }
   };
 
-  err(
-    `ours-mcp watch: watching ${which ? `identity "${which}"` : 'all identities'} ` +
-      `under ${watchDir} (Ctrl-C to stop)`,
-  );
+  err(`ours-mcp watch: daemon API unreachable — falling back to file poll of ${watchDir} (Ctrl-C to stop)`);
   scan(true); // prime offsets at EOF — emit nothing for the existing backlog
   const timer = setInterval(() => scan(false), 1000);
-  const stop = () => {
-    clearInterval(timer);
-    process.exit(0);
-  };
+  const stop = () => { clearInterval(timer); process.exit(0); };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+}
+
+// Capability probe: does this daemon expose the notification API? Returns 'api'
+// (stream over HTTP), 'file' (old daemon without the endpoint → file fallback),
+// or fails loud on a rejected token (401 = set-but-wrong, per the brief). Uses
+// GET /identities — present iff the daemon supports the notification surface.
+async function probeNotifApi(): Promise<'api' | 'file'> {
+  try {
+    const resp = await fetch(`http://127.0.0.1:${PORT}/identities`, { headers: apiHeaders() });
+    if (resp.status === 401) {
+      watchFailLoud(
+        'daemon rejected the API token (401). Set OURS_API_TOKEN to the daemon\'s token ' +
+          '(shared mode) or run watch as the daemon owner (owner mode).',
+      );
+    }
+    if (resp.status === 404) return 'file'; // older daemon without the endpoint
+    if (resp.ok) return 'api';
+    return 'file';
+  } catch {
+    return 'file'; // daemon vanished between probes — let the fallback decide
+  }
+}
+
+async function cmdWatch(which?: string): Promise<void> {
+  const stop = () => process.exit(0);
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+
+  // Prefer the daemon HTTP API (works cross-user; the file lives under the
+  // daemon owner's 0700 home). Fall back to a file poll ONLY when the daemon is
+  // unreachable or too old to expose the endpoint — and make that fallback fail
+  // loud rather than spin deaf.
+  const daemonUp = (await probeDaemonStateDir()) !== null;
+  if (daemonUp && (await probeNotifApi()) === 'api') {
+    err(`ours-mcp watch: streaming ${which ? `identity "${which}"` : 'all identities'} from the daemon API on port ${PORT} (Ctrl-C to stop)`);
+    await watchViaApi(which);
+    return;
+  }
+  watchViaFileFallback(STATE_DIR, which);
 }
 
 const SYSTEMD_UNIT = 'ours.service';
@@ -861,6 +1037,7 @@ async function main(): Promise<void> {
         url: `http://127.0.0.1:${PORT}/mcp`,
         ensureDaemon: CONFIG.autoStart ? ensureDaemonRunning : undefined,
         stateDir: STATE_DIR,
+        apiToken: API_TOKEN ?? undefined,
       });
       break;
     case 'install-service':
