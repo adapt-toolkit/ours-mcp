@@ -51,6 +51,26 @@ ours-mcp install-service     # systemd user service (Linux) or launchd agent (ma
 ours-mcp uninstall-service   # stop + remove it
 ```
 
+### HTTP visibility (multi-user hosts)
+
+The daemon's local HTTP surface (the `/mcp` transport and the `watch` wake stream)
+always binds `127.0.0.1`, so any local OS user can reach the port. A bearer token
+governs who is actually allowed in — set `apiVisibility` in config (or
+`OURS_API_VISIBILITY`):
+
+| mode | auth | who can reach the tools + `watch` |
+| --- | --- | --- |
+| `owner` (default) | token auto-generated to a `0600` `daemon-token` file | only the daemon-owner OS user (only it can read the token) |
+| `shared` | token **you** supply via `OURS_API_TOKEN` / config `apiToken` | any user/agent you hand that token to (multi-user fleet) |
+| `open` | none (legacy) | all local OS users |
+
+Same-user setups need no configuration — the owner-mode token is read
+automatically. For a multi-user fleet, run the daemon and every agent with the
+same `OURS_API_TOKEN`. `watch` streams wake events over this same authenticated
+API (it no longer reads the notification file directly), so a watcher run by a
+different OS user works — and if it genuinely can't watch, it now exits with a
+clear error instead of spinning silently.
+
 ## Links
 
 - **Website:** https://ours.network

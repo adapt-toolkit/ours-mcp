@@ -95,6 +95,8 @@ export interface ProxyOptions {
   ensureDaemon?: () => Promise<void>;
   /** Daemon state dir (per-host); the session-restore store lives under it. Defaults to OURS_STATE_DIR or ~/.ours. */
   stateDir?: string;
+  /** Bearer token for the daemon HTTP surface (Part B). Undefined in `open` mode. */
+  apiToken?: string;
 }
 
 // Session-restore records older than this are pruned on startup, and a record
@@ -403,6 +405,11 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
         headers: {
           'x-ours-lease-token': leaseToken,
           'x-ours-client-pid': String(clientPid),
+          // API access token (Part B). Omitted in `open` mode (opts.apiToken
+          // undefined); in owner mode the same-user proxy read it from the
+          // 0600 file, in shared mode from OURS_API_TOKEN. A wrong/missing
+          // token under owner/shared surfaces as a 401 on connect.
+          ...(opts.apiToken ? { 'x-ours-api-token': opts.apiToken } : {}),
         },
       },
     });

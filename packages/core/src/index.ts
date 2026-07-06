@@ -80,9 +80,9 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { resolve, join, dirname, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomBytes, randomInt, randomUUID } from 'node:crypto';
+import { randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer as createHttpServer } from 'node:http';
-import type { IncomingMessage } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib';
 import * as fs from 'node:fs';
@@ -97,7 +97,14 @@ import type {
 import type { AdaptValue } from '@adapt-toolkit/sdk/backend';
 import { object_to_adapt_value } from '@adapt-toolkit/sdk/wrapper';
 import { AdaptObjectLifetime } from '@adapt-toolkit/sdk/common';
-import { loadConfig, buildIdentityFile, writeIdentityFile } from './config';
+import {
+  loadConfig,
+  buildIdentityFile,
+  writeIdentityFile,
+  resolveApiToken,
+  explicitApiToken,
+  apiTokenPath,
+} from './config';
 import { OURS_COMPAT_VERSION } from './protocol';
 import { mimeFromExt, sanitizeFilename } from './files.js';
 
@@ -116,10 +123,71 @@ const BROKER_URL = CONFIG.brokerUrl;
 const TRANSPORT = process.env.OURS_TRANSPORT ?? 'http';
 const PORT = CONFIG.port;
 const GC_INTERVAL_MS = CONFIG.gcIntervalMs;
+const API_VISIBILITY = CONFIG.apiVisibility;
 
 // stderr only — MCP speaks JSON-RPC over stdout.
 const log = (...parts: unknown[]) =>
   process.stderr.write(`ours: ${parts.join(' ')}\n`);
+
+// ----- HTTP access token (Part B: cross-user visibility) ---------------------
+// One bearer token gates the messaging + notification surface. Resolution and
+// mode semantics live in config.ts; here we fix the token at boot:
+//   open   → no token (auth disabled; all local users, legacy behavior).
+//   owner  → auto-generate to a 0600 owner-only file → same-user-only default.
+//   shared → REQUIRE an operator-supplied token (env/config) so the fleet can
+//            distribute it; refuse to start otherwise (fail closed, not open).
+// Liveness/introspection (/version, /info, /state-dir) stay unauthenticated in
+// every mode — they leak no messages and let `status`/portOpen probe the port.
+function resolveDaemonToken(): string | null {
+  if (API_VISIBILITY === 'open') return null;
+  if (API_VISIBILITY === 'shared') {
+    const explicit = explicitApiToken(CONFIG);
+    if (!explicit) {
+      throw new Error(
+        'apiVisibility=shared requires an operator-supplied token so it can be ' +
+          'distributed to cross-user agents — set OURS_API_TOKEN or "apiToken" in ' +
+          `config (${apiTokenPath(CONFIG)} is not used for shared mode). ` +
+          'Use apiVisibility=owner for a same-user-only auto-token, or =open to disable auth.',
+      );
+    }
+    return explicit;
+  }
+  // owner: env/config if present, else the persisted 0600 file (minted here).
+  return resolveApiToken(CONFIG, { generate: true })!.token;
+}
+const API_TOKEN = resolveDaemonToken();
+
+// Constant-time bearer check. Accepts `x-ours-api-token: <t>` or
+// `Authorization: Bearer <t>`. In open mode every request passes. A missing or
+// wrong token is a 401 (never a hang) — enforced by requireAuth() at the top of
+// each protected route.
+function tokenFromReq(req: IncomingMessage): string | undefined {
+  const direct = req.headers['x-ours-api-token'];
+  if (typeof direct === 'string' && direct) return direct;
+  const auth = req.headers['authorization'];
+  if (typeof auth === 'string') {
+    const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
+    if (m) return m[1];
+  }
+  return undefined;
+}
+function authOk(req: IncomingMessage): boolean {
+  if (API_TOKEN === null) return true; // open mode
+  const provided = tokenFromReq(req);
+  if (!provided) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(API_TOKEN);
+  // timingSafeEqual requires equal lengths; compare lengths first (the length
+  // itself is not secret) so a wrong-length token is a fast, safe reject.
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+// Reply 401 and return false when unauthorized; callers `if (!requireAuth(...)) return;`.
+function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
+  if (authOk(req)) return true;
+  res.writeHead(401, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'unauthorized' }));
+  return false;
+}
 
 // Identity names double as on-disk directory names and peer-visible display
 // names, so keep them simple and path-safe.
@@ -1411,9 +1479,43 @@ async function contactRestoreSweep(id: Identity): Promise<void> {
 }
 
 // ----- notifications.log + unread snapshot -----------------------------------
+// notifications.log stays the durable source of truth (survives restart; the
+// SessionStart hook reads the backlog). The long-poll endpoint reads the SAME
+// file — the daemon owns it, so there is no cross-user EACCES. This emitter is
+// only a low-latency WAKE signal: appending fires the per-identity waiters so a
+// held-open `/identities/<name>/notifications` request returns immediately
+// instead of waiting for its periodic re-stat.
+const notifyWaiters = new Map<string, Set<() => void>>();
+function fireNotifyWaiters(name: string): void {
+  const set = notifyWaiters.get(name);
+  if (!set || set.size === 0) return;
+  for (const w of [...set]) {
+    try { w(); } catch { /* a waiter's own cleanup — never let it break the writer */ }
+  }
+}
+// Resolve once when this identity gets a new notification, or after `ms`.
+function waitForNotify(name: string, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    let set = notifyWaiters.get(name);
+    if (!set) { set = new Set(); notifyWaiters.set(name, set); }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      set!.delete(fn);
+      if (set!.size === 0) notifyWaiters.delete(name);
+      clearTimeout(timer);
+      resolve();
+    };
+    const fn = finish;
+    const timer = setTimeout(finish, ms);
+    set.add(fn);
+  });
+}
+
 // Append a content-free arrival event (no body, ever). The event line is the
-// host wake signal (`ours-mcp watch` tails it), so anything an away agent
-// must react to — new mail, a pending local introduction — lands here.
+// host wake signal (`ours-mcp watch` streams it over HTTP), so anything an away
+// agent must react to — new mail, a pending local introduction — lands here.
 function appendNotifyLog(id: Identity, event: Record<string, unknown>): void {
   try {
     fs.mkdirSync(id.dir, { recursive: true });
@@ -1421,6 +1523,84 @@ function appendNotifyLog(id: Identity, event: Record<string, unknown>): void {
   } catch (err) {
     log(`[${id.name}] failed to append notifications.log:`, String(err));
   }
+  fireNotifyWaiters(id.name); // wake held-open long-poll streams for this identity
+}
+
+// Long-poll cap and re-check cadence for the notification stream. The cap keeps
+// a held-open request from lingering forever (a client re-issues on return); the
+// recheck picks up file appends this process did not originate (whoever writes
+// the log). Daemon-originated appends fire the emitter → returned instantly.
+const NOTIFY_LONGPOLL_MS = Number(process.env.OURS_NOTIFY_LONGPOLL_MS) > 0 ? Number(process.env.OURS_NOTIFY_LONGPOLL_MS) : 25_000;
+const NOTIFY_RECHECK_MS = 250;
+
+function notifyLogSize(logPath: string): number {
+  try { return fs.statSync(logPath).size; } catch { return 0; }
+}
+
+// Read complete notification lines in [from, to). Returns the parsed events and
+// the advanced byte cursor (end of the last complete line — a partial trailing
+// line, which appendFileSync never leaves but a rotation might, is not consumed).
+function readNotifyRange(logPath: string, from: number, to: number): { events: Record<string, unknown>[]; cursor: number } {
+  if (to <= from) return { events: [], cursor: from };
+  const buf = Buffer.alloc(to - from);
+  let read = 0;
+  try {
+    const fd = fs.openSync(logPath, 'r');
+    try { read = fs.readSync(fd, buf, 0, buf.length, from); } finally { fs.closeSync(fd); }
+  } catch {
+    return { events: [], cursor: from };
+  }
+  const slice = buf.subarray(0, read);
+  const lastNl = slice.lastIndexOf(0x0a);
+  if (lastNl === -1) return { events: [], cursor: from };
+  const events: Record<string, unknown>[] = [];
+  for (const line of slice.subarray(0, lastNl + 1).toString('utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try { events.push(JSON.parse(line) as Record<string, unknown>); } catch { /* skip malformed */ }
+  }
+  return { events, cursor: from + lastNl + 1 };
+}
+
+// Serve GET /identities/<name>/notifications. Reads the daemon-owned log (no
+// cross-user file access on the client side) and long-polls for new events.
+async function serveNotifications(req: IncomingMessage, res: ServerResponse, name: string, sinceParam: string | null): Promise<void> {
+  const logPath = notifyLogPath(join(STATE_DIR, name));
+  const send = (cursor: number, events: Record<string, unknown>[]) => {
+    if (res.writableEnded) return;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ cursor, events }));
+  };
+
+  // Prime: no cursor (or "tip") → current EOF, emit nothing. Mirrors the old
+  // "offsets start at end-of-file" behavior so a fresh watch skips the backlog.
+  if (sinceParam === null || sinceParam === 'tip') {
+    send(notifyLogSize(logPath), []);
+    return;
+  }
+  let since = parseInt(sinceParam, 10);
+  if (!Number.isFinite(since) || since < 0) {
+    if (!res.writableEnded) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'invalid since cursor' }));
+    }
+    return;
+  }
+
+  let aborted = false;
+  req.on('close', () => { aborted = true; });
+  const deadline = Date.now() + NOTIFY_LONGPOLL_MS;
+  while (!aborted) {
+    const size = notifyLogSize(logPath);
+    if (since > size) since = 0; // truncated/rotated → replay from the start
+    if (size > since) {
+      const { events, cursor } = readNotifyRange(logPath, since, size);
+      if (events.length > 0) { send(cursor, events); return; }
+      since = cursor; // only blank/partial bytes — advance and keep waiting
+    }
+    if (Date.now() >= deadline) break;
+    await waitForNotify(name, Math.min(NOTIFY_RECHECK_MS, deadline - Date.now()));
+  }
+  if (!aborted) send(notifyLogSize(logPath), []);
 }
 
 // Re-derive the unread snapshot from the packet (the single source of truth) and
@@ -3270,11 +3450,43 @@ async function main() {
       );
       return;
     }
+    // ----- notification wake stream (Part A) --------------------------------
+    // The daemon (which owns notifications.log) serves it over HTTP so a watcher
+    // — including one run by a DIFFERENT OS user — never touches the file. Token
+    // gated like the rest of the messaging surface. Long-poll: holds the request
+    // open until a new event lands (fired by appendNotifyLog) or a bounded
+    // timeout, so it is both low-latency and connection-cheap.
+    //   GET /identities                            → { identities:[{name}] }
+    //   GET /identities/<name>/notifications?since=<byteOffset|absent>
+    //       → { cursor:<byteOffset>, events:[<content-free event>] }
+    //   `since` absent (or "tip") primes at EOF (emit nothing — matches the
+    //   old offsets-start-at-EOF behavior); a byte offset streams from there.
+    if (req.method === 'GET' && url.pathname === '/identities') {
+      if (!requireAuth(req, res)) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ identities: [...identities.values()].map((i) => ({ name: i.name })) }));
+      return;
+    }
+    {
+      const m = /^\/identities\/([^/]+)\/notifications$/.exec(url.pathname);
+      if (req.method === 'GET' && m) {
+        if (!requireAuth(req, res)) return;
+        const name = decodeURIComponent(m[1]);
+        if (validateName(name) !== null) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid identity name' }));
+          return;
+        }
+        await serveNotifications(req, res, name, url.searchParams.get('since'));
+        return;
+      }
+    }
     if (url.pathname !== '/mcp') {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not found');
       return;
     }
+    if (!requireAuth(req, res)) return;
     try {
       if (req.method === 'POST') {
         const body = await readBody(req);
@@ -3363,7 +3575,7 @@ async function main() {
   httpServer.requestTimeout = 0;
 
   httpServer.listen(PORT, '127.0.0.1', () => {
-    log(`MCP server v${VERSION} ready (transport=http, port=${PORT}, identities=${identities.size}, state=${STATE_DIR}, broker=${BROKER_URL})`);
+    log(`MCP server v${VERSION} ready (transport=http, port=${PORT}, visibility=${API_VISIBILITY}, identities=${identities.size}, state=${STATE_DIR}, broker=${BROKER_URL})`);
   });
 
   const shutdown = async () => {
