@@ -6,9 +6,10 @@ a2adapt/Hermes bridge. Zero runtime dependencies — it drives `ours-mcp proxy` 
 
 ## Design — N parallel (observe → wake → drain) triples, one per identity
 
-1. **OBSERVE** (`lib/watch.sh`): one `ours-mcp watch <id>` per identity (non-binding, non-draining) →
+1. **OBSERVE** (`connector-watch.sh`): one `ours-mcp watch <id>` per identity (non-binding, non-draining) →
    on each line, **poke** the gateway webhook with the identity tag. Never binds or drains.
-2. **WAKE** (webhook): HMAC-SHA256-signed `POST` with `{"event":..,"identity":"<id>"}`. The connector
+2. **WAKE** (webhook): HMAC-SHA256-signed `POST` carrying the event (as an `X-GitHub-Event` header and an
+   `event_type` body field — the two channels Hermes matches routes on) plus `{"identity":"<id>"}`. The connector
    **defines** the contract (config-overridable); the harness gateway matches.
 3. **DRAIN** (per-identity sole-drainer): the gateway routes the wake to the subagent bound to `<id>`;
    its proxy calls `get_messages`. Sole-drainer holds per identity by construction — ours binding is
@@ -24,11 +25,13 @@ a2adapt/Hermes bridge. Zero runtime dependencies — it drives `ours-mcp proxy` 
 ## Webhook contract (config-overridable, both ends match)
 ```
 POST  <CONNECTOR_WEBHOOK_URL>
-body  {"event":"<CONNECTOR_EVENT>","identity":"<id>"}
+body  {"event_type":"<CONNECTOR_EVENT>","event":"<CONNECTOR_EVENT>","identity":"<id>"}
+hdr   X-GitHub-Event: <CONNECTOR_EVENT>            # event name, the way Hermes matches routes
 hdr   X-Hub-Signature-256: sha256=<hex HMAC-SHA256(body, CONNECTOR_HMAC_SECRET)>
-reply 202 accept · 401 bad signature · 400 unknown identity
+reply 200 accept · 401 bad signature · 400 unknown identity
 ```
-Wakes are coalesced per-identity.
+Wakes are coalesced per-identity. The reference gateway **refuses to start** unless
+`CONNECTOR_HMAC_SECRET` is set to a non-default value.
 
 ## Layout
 | path | role |

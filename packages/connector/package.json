@@ -37,7 +37,8 @@
     "setup": "node connector-identity-setup.mjs",
     "watch": "bash connector-watch.sh",
     "gateway": "node connector-reference-handler.mjs",
-    "inbox": "node connector-inbox-count.mjs"
+    "inbox": "node connector-inbox-count.mjs",
+    "test": "node --test"
   },
   "dependencies": {}
 }

@@ -8,7 +8,8 @@ packaging spec (pending); these are the transport-layer artifacts.
 ## Design — N parallel (observe → wake → drain) triples, one per identity
 1. **OBSERVE** (`connector-watch.sh`): one `ours-mcp watch <id_i>` per identity (non-binding,
    non-draining) → on each line, **poke** the gateway webhook with the identity tag. Never binds/drains.
-2. **WAKE** (webhook): HMAC-SHA256-signed `POST` with `{"event":..,"identity":"<id_i>"}`. The connector
+2. **WAKE** (webhook): HMAC-SHA256-signed `POST` carrying the event (`X-GitHub-Event` header + `event_type`
+   field, both matched by Hermes) and `{"identity":"<id_i>"}`. The connector
    **defines** the contract (config-overridable); the harness gateway matches.
 3. **DRAIN** (per-identity sole-drainer): the gateway routes the wake to the subagent bound to `<id_i>`;
    that subagent's proxy calls `get_messages`. **Sole-drainer holds per identity by construction** —
@@ -25,11 +26,13 @@ packaging spec (pending); these are the transport-layer artifacts.
 ## Webhook contract (config-overridable, both ends match)
 ```
 POST  <CONNECTOR_WEBHOOK_URL>
-body  {"event":"<CONNECTOR_EVENT>","identity":"<id>"}
+body  {"event_type":"<CONNECTOR_EVENT>","event":"<CONNECTOR_EVENT>","identity":"<id>"}
+hdr   X-GitHub-Event: <CONNECTOR_EVENT>            # event name, the way Hermes matches routes
 hdr   X-Hub-Signature-256: sha256=<hex HMAC-SHA256(body, CONNECTOR_HMAC_SECRET)>
-reply 202 accept · 401 bad signature · 400 unknown identity
+reply 200 accept · 401 bad signature · 400 unknown identity
 ```
-Wakes are **coalesced per-identity**.
+Wakes are **coalesced per-identity**. The reference gateway refuses to start unless
+`CONNECTOR_HMAC_SECRET` is set to a non-default value.
 
 ## Files
 | file | role |
@@ -37,7 +40,7 @@ Wakes are **coalesced per-identity**.
 | `connector.config.sh` | config: CLI, `CONNECTOR_IDENTITIES` (list), session-prefix, port, state-dir, broker, webhook URL/secret/event, hardening knobs |
 | `connector-watch.sh` | one observe→poke watcher per identity + drain-on-reconnect + retry |
 | `connector-identity-setup.mjs` | one-shot: create root + one leaf per identity, bind, bio/persona |
-| `connector-reference-handler.mjs` | reference gateway: HMAC-verify → 202 → route by identity → per-identity sole-drainer + backstop. Replace the drain block with each subagent's agent loop. |
+| `connector-reference-handler.mjs` | reference gateway: HMAC-verify → 200 → route by identity → per-identity sole-drainer + backstop. Replace the drain block with each subagent's agent loop. |
 | `connector-inbox-count.mjs` | per-identity non-consuming inbox check (ops/debug helper) |
 
 ## Usage

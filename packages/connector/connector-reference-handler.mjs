@@ -8,9 +8,11 @@
 // the only drainer of <id>. N identities = N independent sole-drained inboxes on ONE shared daemon.
 //
 // Contract (config-overridable, must match the connector):
-//   POST <CONNECTOR_WEBHOOK_URL>  body: {"event":"<CONNECTOR_EVENT>","identity":"<id>"}
+//   POST <CONNECTOR_WEBHOOK_URL>  body: {"event_type":"<CONNECTOR_EVENT>","event":"<CONNECTOR_EVENT>","identity":"<id>"}
+//   header: X-GitHub-Event: <CONNECTOR_EVENT>  (event name; the way Hermes matches routes)
 //   header: X-Hub-Signature-256: sha256=<hex HMAC-SHA256(body, CONNECTOR_HMAC_SECRET)>
-//   reply: <CONNECTOR_WEBHOOK_OK_CODE> (202) accept; 401 bad signature; 400 unknown identity.
+//   reply: <CONNECTOR_WEBHOOK_OK_CODE> (200) accept; 401 bad signature; 400 unknown identity.
+// Refuses to start unless CONNECTOR_HMAC_SECRET is set to a non-default value.
 // Wakes are COALESCED per-identity. A per-identity BACKSTOP sweep (list→drain-if-unread) covers
 // missed wakes (this side owns the bindings, so the backstop lives here, not in the watcher).
 import http from 'node:http';
@@ -22,8 +24,13 @@ process.on('uncaughtException', e => console.error('[gateway] uncaughtException:
 
 const WURL = new URL(process.env.CONNECTOR_WEBHOOK_URL || 'http://localhost:8644/webhooks/ours-wake');
 const URL_PATH = WURL.pathname, PORT = Number(WURL.port || 8644);
-const SECRET = process.env.CONNECTOR_HMAC_SECRET || 'CHANGE_ME_local_webhook_hmac';
-const OK = Number(process.env.CONNECTOR_WEBHOOK_OK_CODE || 202);
+const SECRET = process.env.CONNECTOR_HMAC_SECRET || '';
+if (!SECRET || SECRET === 'CHANGE_ME_local_webhook_hmac') {
+  console.error('[gateway] refusing to start: set CONNECTOR_HMAC_SECRET to a non-default value ' +
+    '(missing or the placeholder default is insecure — anyone could forge a wake).');
+  process.exit(1);
+}
+const OK = Number(process.env.CONNECTOR_WEBHOOK_OK_CODE || 200);
 const CLI = process.env.CONNECTOR_CLI || 'ours-mcp';
 const IDENTITIES = new Set((process.env.CONNECTOR_IDENTITIES || process.env.CONNECTOR_IDENTITY || 'Peer').split(/\s+/).filter(Boolean));
 const SPREFIX = process.env.CONNECTOR_SESSION_PREFIX || 'ours-connector';

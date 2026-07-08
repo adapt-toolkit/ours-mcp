@@ -22,8 +22,8 @@ export OURS_BROKER_URL="${OURS_BROKER_URL:-wss://broker1.ours.network}"  # broke
 # --- webhook (wake carries the identity; gateway routes to the right subagent) ---
 export CONNECTOR_WEBHOOK_URL="${CONNECTOR_WEBHOOK_URL:-http://localhost:8644/webhooks/ours-wake}"
 export CONNECTOR_HMAC_SECRET="${CONNECTOR_HMAC_SECRET:-CHANGE_ME_local_webhook_hmac}"  # HMAC-SHA256 shared secret
-export CONNECTOR_EVENT="${CONNECTOR_EVENT:-ours_wake}"           # JSON event name; body also carries {"identity":"<id>"}
-export CONNECTOR_WEBHOOK_OK_CODE="${CONNECTOR_WEBHOOK_OK_CODE:-202}"  # expected success HTTP code
+export CONNECTOR_EVENT="${CONNECTOR_EVENT:-ours_wake}"           # event name; sent as X-GitHub-Event header + body event_type/event, alongside {"identity":"<id>"}
+export CONNECTOR_WEBHOOK_OK_CODE="${CONNECTOR_WEBHOOK_OK_CODE:-200}"  # expected success HTTP code (Hermes webhook adapter acks 200; override if your gateway differs)
 
 # --- hardening knobs ---
 export CONNECTOR_BACKSTOP_SECS="${CONNECTOR_BACKSTOP_SECS:-420}" # per-identity missed-wake backstop poll interval (gateway-side)
