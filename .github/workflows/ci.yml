@@ -69,7 +69,6 @@ jobs:
       bumped: ${{ steps.bump.outputs.bumped }}
       new-sha: ${{ steps.bump.outputs.new-sha }}
       core-version: ${{ steps.bump.outputs.core-version }}
-      connector-version: ${{ steps.bump.outputs.connector-version }}
       plugin-version: ${{ steps.bump.outputs.plugin-version }}
       hermes-version: ${{ steps.bump.outputs.hermes-version }}
       openclaw-version: ${{ steps.bump.outputs.openclaw-version }}
@@ -116,17 +115,13 @@ jobs:
       - name: Compile MUFL packet
         run: scripts/compile-mufl.sh
       - run: npm run build
-      # Publish order = dependency order: core + connector first, then the plugins that
-      # pin them. `--if-present` is not a publish flag, so each is its own step; a plugin
+      # Publish order = dependency order: core first, then the plugins that
+      # pin it. `--if-present` is not a publish flag, so each is its own step; a plugin
       # whose version already exists on npm 403s, so re-runs after a partial publish would
       # fail — but the version-bump job only produces fresh versions, so every managed
       # package is new here.
       - name: Publish @ours.network/mcp
         run: npm publish --workspace @ours.network/mcp --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish @ours.network/connector
-        run: npm publish --workspace @ours.network/connector --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish @ours.network/claude-code
@@ -150,7 +145,6 @@ jobs:
           {
             echo "Published:"
             echo "- @ours.network/mcp@${{ needs.version-bump.outputs.core-version }}"
-            echo "- @ours.network/connector@${{ needs.version-bump.outputs.connector-version }}"
             echo "- @ours.network/claude-code@${{ needs.version-bump.outputs.plugin-version }}"
             echo "- @ours.network/hermes@${{ needs.version-bump.outputs.hermes-version }}"
             echo "- @ours.network/openclaw@${{ needs.version-bump.outputs.openclaw-version }}"

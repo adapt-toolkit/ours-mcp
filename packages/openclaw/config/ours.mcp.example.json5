@@ -1,60 +1,26 @@
-// ours.network — OpenClaw config blocks (reference).
+// ours.network — OpenClaw config block (reference).
 //
-// install.sh writes an equivalent managed block into ~/.openclaw/openclaw.json for you
-// (with a generated static bearer token). This file is the manual reference: merge these
-// keys into your existing openclaw.json, then run `openclaw gateway restart`.
+// install.sh writes an equivalent managed block into ~/.openclaw/openclaw.json for you.
+// This file is the manual reference: merge the key below into your existing openclaw.json,
+// then run `openclaw gateway restart`.
 //
 // openclaw.json is JSON5, so comments and unquoted keys are allowed here. The installer
 // only auto-writes when your file is strict JSON; if it is JSON5 (like this one) it prints
 // the block and asks you to merge it by hand — this is that block.
 //
-// IMPORTANT: OpenClaw's webhooks plugin authenticates each poke with a STATIC bearer token
-// (NOT HMAC): the connector must send it via `Authorization: Bearer <token>` (or
-// `x-openclaw-webhook-secret: <token>`). The token the route resolves (env OURS_WAKE_SECRET)
-// MUST equal the connector's CONNECTOR_AUTH_HEADER token — the same shared secret on both ends.
-//
-// The route reads that token from the GATEWAY PROCESS's environment (secret.source == "env"),
-// so OURS_WAKE_SECRET must be present there. The gateway loads a global dotenv at
-// ~/.openclaw/.env on start, so the simplest way is a line `OURS_WAKE_SECRET=<token>` in that
-// file (install.sh does this for you). Default gateway port is 18789.
+// Wake-on-mail is in-session (the agent tails `ours-mcp watch <identity>` itself via its
+// shell tool — see the ours skill); there is no webhook route, bearer token, or external
+// watcher to configure.
 {
-  // 1) The ours MCP server. Points OpenClaw directly at the globally-installed daemon
-  //    proxy (`npm i -g @ours.network/mcp`). Its tools then appear to the OpenClaw agent
-  //    (from the `ours` MCP server). CLI equivalent: `openclaw mcp add ours -- ours-mcp proxy`.
+  // The ours MCP server. Points OpenClaw directly at the globally-installed daemon
+  // proxy (`npm i -g @ours.network/mcp`). Its tools then appear to the OpenClaw agent
+  // (from the `ours` MCP server). CLI equivalent: `openclaw mcp add ours -- ours-mcp proxy`.
   mcp: {
     servers: {
       ours: {
         command: "ours-mcp",
         args: ["proxy"],
         // optional: env, cwd
-      },
-    },
-  },
-
-  // 2) One webhook route PER identity. The connector's watcher tails
-  //    `ours-mcp watch <identity>` and POSTs a wake to the route's `path` on each new
-  //    message; OpenClaw runs the agent session bound to that route's `sessionKey`, which
-  //    drains the identity's inbox via the ours get_messages tool.
-  plugins: {
-    entries: {
-      webhooks: {
-        config: {
-          routes: {
-            // route name is derived from the identity: ours-wake-<slug(identity)>
-            "ours-wake-alice": {
-              path: "/plugins/webhooks/ours-wake-alice",
-              sessionKey: "agent:alice:main",          // the OpenClaw session bound to this identity
-              secret: {
-                source: "env",
-                provider: "default",
-                id: "OURS_WAKE_SECRET",                // == the connector's CONNECTOR_AUTH_HEADER token
-              },
-              controllerId: "webhooks/ours-wake-alice",
-              description: "Wake the ours agent bound to \"Alice\" — connector pokes this route; the agent drains its inbox via get_messages.",
-            },
-            // add one more route per additional identity, each with its own path + sessionKey.
-          },
-        },
       },
     },
   },
