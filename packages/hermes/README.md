@@ -40,13 +40,28 @@ ours-mcp watch <id>   ──▶  connector-watch.sh  ──HMAC POST──▶  H
 - Hermes installed (`~/.hermes/` present)
 - The ours daemon: `npm i -g @ours.network/mcp` (the installer does this for you)
 
-## Install (automatic)
+## Install — two commands
 
 ```sh
-# from this package directory (or the installed @ours.network/hermes):
-CONNECTOR_IDENTITIES="Agent1 Agent2" bash install.sh
+npm i -g @ours.network/hermes
+ours-hermes-install                 # ensures the daemon, wires MCP + skill + reactivity
 ```
 
+That's it — the MCP server and the `ours` skill are live immediately; run **`/reload-mcp`**
+in Hermes to load the `mcp_ours_*` tools. To also wake an agent on new mail, pass the
+identities to watch (they must already exist):
+
+```sh
+ours-hermes-install --identities "Agent1 Agent2"
+```
+
+`ours-hermes-install` is a thin front-door over this package's `install.sh` (below); both
+are idempotent, so re-running is always safe. Other flags: `--port`, `--hermes-dir`,
+`--skip-daemon`, `--skip-watcher`, `--help`.
+
+### What the installer does
+
+Equivalently, from a checkout you can run `bash install.sh` directly (same env knobs).
 `install.sh` is idempotent and:
 
 1. ensures `@ours.network/mcp` is installed and the daemon is running;

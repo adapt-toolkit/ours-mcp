@@ -1,0 +1,21 @@
+{
+  "name": "@ours.network/installer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One-shot ours.network installer (curl | bash): installs the daemon and sets up the selected agent harnesses (Claude Code / Codex / Hermes / OpenClaw). Hosted as ours.network/install.sh; not published to npm.",
+  "type": "module",
+  "license": "FSL-1.1-Apache-2.0",
+  "author": "Adapt Toolkit",
+  "homepage": "https://github.com/adapt-toolkit/ours-mcp/tree/main/packages/installer#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adapt-toolkit/ours-mcp.git",
+    "directory": "packages/installer"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

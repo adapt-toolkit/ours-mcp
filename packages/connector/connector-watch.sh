@@ -18,11 +18,13 @@ poke(){  # $1 = identity — HMAC-signed POST, retry/backoff
   # also travels as an X-GitHub-Event header, the other channel Hermes matches routes on.
   body="{\"event_type\":\"${CONNECTOR_EVENT}\",\"event\":\"${CONNECTOR_EVENT}\",\"identity\":\"${idn}\"}"
   h=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$CONNECTOR_HMAC_SECRET" | awk '{print $NF}')
+  # Optional additive static-token header (e.g. OpenClaw); HMAC signature is always sent too.
+  local auth=(); [ -n "${CONNECTOR_AUTH_HEADER:-}" ] && auth=(-H "$CONNECTOR_AUTH_HEADER")
   for d in $CONNECTOR_POKE_BACKOFF; do
     [ "$d" -gt 0 ] && sleep "$d"
     code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CONNECTOR_WEBHOOK_URL" \
       -H 'Content-Type: application/json' -H "X-GitHub-Event: ${CONNECTOR_EVENT}" \
-      -H "X-Hub-Signature-256: sha256=$h" -d "$body" 2>/dev/null)
+      -H "X-Hub-Signature-256: sha256=$h" "${auth[@]}" -d "$body" 2>/dev/null)
     [ "$code" = "$CONNECTOR_WEBHOOK_OK_CODE" ] && return 0
   done
   echo "[connector:$idn] WARN poke failed (last http=${code:-none}); gateway backstop will retry"; return 1

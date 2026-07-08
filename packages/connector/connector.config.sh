@@ -24,6 +24,12 @@ export CONNECTOR_WEBHOOK_URL="${CONNECTOR_WEBHOOK_URL:-http://localhost:8644/web
 export CONNECTOR_HMAC_SECRET="${CONNECTOR_HMAC_SECRET:-CHANGE_ME_local_webhook_hmac}"  # HMAC-SHA256 shared secret
 export CONNECTOR_EVENT="${CONNECTOR_EVENT:-ours_wake}"           # event name; sent as X-GitHub-Event header + body event_type/event, alongside {"identity":"<id>"}
 export CONNECTOR_WEBHOOK_OK_CODE="${CONNECTOR_WEBHOOK_OK_CODE:-200}"  # expected success HTTP code (Hermes webhook adapter acks 200; override if your gateway differs)
+# Optional ADDITIVE auth header for gateways that authenticate a poke with a STATIC token instead of
+# (or in addition to) the HMAC signature — e.g. OpenClaw's webhooks plugin, which accepts either
+# "Authorization: Bearer <token>" or "x-openclaw-webhook-secret: <token>". Set the full header line
+# (name: value). Empty = HMAC only (Hermes default, unchanged). The X-Hub-Signature-256 HMAC header
+# is ALWAYS sent regardless of this knob, so Hermes and any HMAC gateway are unaffected.
+export CONNECTOR_AUTH_HEADER="${CONNECTOR_AUTH_HEADER:-}"
 
 # --- hardening knobs ---
 export CONNECTOR_BACKSTOP_SECS="${CONNECTOR_BACKSTOP_SECS:-420}" # per-identity missed-wake backstop poll interval (gateway-side)

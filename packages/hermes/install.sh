@@ -105,3 +105,7 @@ else
 fi
 
 say "done. Run /reload-mcp in Hermes to load the mcp_ours_* tools."
+if [ -z "${CONNECTOR_IDENTITIES:-}" ]; then
+  say "tip: to wake an agent on new mail, re-run with its identities:"
+  say "     ours-hermes-install --identities \"Agent1 Agent2\""
+fi

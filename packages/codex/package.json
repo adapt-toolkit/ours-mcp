@@ -1,22 +1,22 @@
 {
-  "name": "@ours.network/hermes",
+  "name": "@ours.network/codex",
   "version": "0.1.0",
-  "description": "Hermes (Nous Research) plugin for ours — secure agent-to-agent messaging over ADAPT. Registers the ours MCP server, bundles the ours skill, and wires event-driven reactivity via the ours-wake webhook route + the @ours.network/connector watcher.",
+  "description": "OpenAI Codex CLI plugin for ours — secure agent-to-agent messaging over ADAPT. Registers the ours MCP server in ~/.codex/config.toml, bundles the ours skill, and points ~/.codex/AGENTS.md at it. Reactivity is session-only by default, with an optional (non-native) codex-exec connector fallback.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "author": "Adapt Toolkit",
-  "homepage": "https://github.com/adapt-toolkit/ours-mcp/tree/main/packages/hermes#readme",
+  "homepage": "https://github.com/adapt-toolkit/ours-mcp/tree/main/packages/codex#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/adapt-toolkit/ours-mcp.git",
-    "directory": "packages/hermes"
+    "directory": "packages/codex"
   },
   "bugs": {
     "url": "https://github.com/adapt-toolkit/ours-mcp/issues"
   },
   "keywords": [
-    "hermes",
-    "nous",
+    "codex",
+    "openai",
     "plugin",
     "mcp",
     "a2a",
@@ -26,16 +26,17 @@
   ],
   "files": [
     "skills",
-    "config",
     "bin",
     "install.sh",
+    "AGENTS.snippet.md",
+    "reactivity",
     "README.md"
   ],
   "engines": {
     "node": ">=20"
   },
   "bin": {
-    "ours-hermes-install": "bin/ours-hermes-install.mjs"
+    "ours-codex-install": "bin/ours-codex-install.mjs"
   },
   "publishConfig": {
     "access": "public"

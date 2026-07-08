@@ -90,6 +90,47 @@ test('gateway: serves and acks 200 with a real secret + valid signature', async 
   }
 });
 
+test('config: CONNECTOR_AUTH_HEADER defaults to empty (HMAC-only, Hermes unchanged)', () => {
+  const out = execFileSync('bash', ['-c', `unset CONNECTOR_AUTH_HEADER; . '${CONFIG}'; printf '%s' "$CONNECTOR_AUTH_HEADER"`], { encoding: 'utf8' });
+  assert.equal(out, '');
+});
+
+test('watcher: adds the optional static-token header when CONNECTOR_AUTH_HEADER is set, still HMAC-signed', async () => {
+  const { server, port, firstPost } = await recordingServer(200);
+  const tmp = mkdtempSync(join(tmpdir(), 'conn-test-'));
+  const fakeCli = join(tmp, 'ours-mcp');
+  writeFileSync(fakeCli, '#!/bin/bash\nif [ "$1" = "watch" ]; then sleep 3; fi\nexit 0\n');
+  chmodSync(fakeCli, 0o755);
+  const secret = 'watcher-auth-secret';
+  const proc = spawn('bash', [WATCH], {
+    env: {
+      ...process.env,
+      CONNECTOR_CLI: fakeCli,
+      CONNECTOR_IDENTITIES: 'TestId',
+      CONNECTOR_HMAC_SECRET: secret,
+      CONNECTOR_EVENT: 'ours_wake',
+      CONNECTOR_WEBHOOK_URL: `http://localhost:${port}/webhooks/ours-wake`,
+      CONNECTOR_POKE_BACKOFF: '0',
+      CONNECTOR_WEBHOOK_OK_CODE: '200',
+      CONNECTOR_AUTH_HEADER: 'Authorization: Bearer openclaw-token-123',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    const req = await Promise.race([firstPost, sleep(8000).then(() => null)]);
+    assert.ok(req, 'watcher should POST a poke to the gateway');
+    // The additive static-token header must be present (OpenClaw's bearer auth)...
+    assert.equal(req.headers['authorization'], 'Bearer openclaw-token-123', 'must forward the optional auth header');
+    // ...AND the HMAC signature must still be sent (default path untouched).
+    const want = 'sha256=' + crypto.createHmac('sha256', secret).update(req.body).digest('hex');
+    assert.equal(req.headers['x-hub-signature-256'], want, 'HMAC-SHA256 still sent alongside the auth header');
+  } finally {
+    proc.kill('SIGKILL');
+    server.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('watcher: pokes with X-GitHub-Event + event_type, HMAC-signed', async () => {
   const { server, port, firstPost } = await recordingServer(200);
   const tmp = mkdtempSync(join(tmpdir(), 'conn-test-'));

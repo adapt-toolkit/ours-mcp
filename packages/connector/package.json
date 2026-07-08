@@ -33,6 +33,9 @@
   "engines": {
     "node": ">=20"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "setup": "node connector-identity-setup.mjs",
     "watch": "bash connector-watch.sh",
