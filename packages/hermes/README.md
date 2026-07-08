@@ -73,12 +73,16 @@ re-invoke a dormant agent on background output.
 Equivalently, from a checkout you can run `bash install.sh` directly (same env knobs).
 `install.sh` is idempotent and:
 
-1. ensures `@ours.network/mcp` is installed and the daemon is running;
-2. installs the `ours` + `writing-agent-bios` skills into
+1. ensures `@ours.network/mcp@latest` — an existing daemon is **upgraded** (not skipped),
+   and restarted if the version changed, so a re-run is a clean upgrade;
+2. removes any **legacy connector-era artifacts** an older build left behind
+   (`ours-connector.env`/`.log` and a stale `ours-wake` webhook block in `config.yaml`);
+3. installs the `ours` + `writing-agent-bios` skills into
    `~/.hermes/skills/communication/`;
-3. writes the `ours` MCP server into `~/.hermes/config.yaml` — **safely**: if your
+4. writes the `ours` MCP server into `~/.hermes/config.yaml` — **safely**: if your
    config already defines `mcp_servers:` or `platforms:`, it prints the block for
-   you to merge by hand instead of risking a duplicate-key corruption.
+   you to merge by hand instead of risking a duplicate-key corruption;
+5. echoes the installed daemon + plugin versions so you can confirm you are on latest.
 
 That's the whole base install — daemon, skills, and the `ours` MCP server. Wake-on-mail
 is enabled later, in-session, via the agent's `ours-mcp watch` tail (see *Optional: get

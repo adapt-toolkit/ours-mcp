@@ -77,14 +77,20 @@ daemon that wakes a dormant agent.
 Equivalently, from a checkout you can run `bash install.sh` directly (same env knobs).
 `install.sh` is idempotent and:
 
-1. ensures `@ours.network/mcp` is installed and the daemon is running;
-2. installs the `ours` + `writing-agent-bios` skills into `~/.openclaw/skills/`;
-3. writes **only** the `ours` MCP server (`mcp.servers.ours`) into
+1. ensures `@ours.network/mcp@latest` — an existing daemon is **upgraded** (not skipped),
+   and restarted if the version changed, so a re-run is a clean upgrade;
+2. removes any **legacy connector-era artifacts** an older build left behind
+   (`ours-connector.env`/`.log`, a leftover watcher, `ours-wake` routes + `OURS_WAKE_SECRET`,
+   and the old `"//ours"` root marker that `openclaw doctor` rejects);
+3. installs the `ours` + `writing-agent-bios` skills into `~/.openclaw/skills/` (and refreshes a
+   stale, higher-precedence `~/.agents/skills` copy if one would shadow it);
+4. writes **only** the `ours` MCP server (`mcp.servers.ours`) into
    `~/.openclaw/openclaw.json` — **no webhook route, no watcher, no token** — **safely**:
    openclaw.json is JSON5, so if your file is not strict JSON (has comments/unquoted
    keys) the installer prints the block for you to merge by hand rather than risk
-   clobbering it; a strict-JSON file is deep-merged idempotently, and a sentinel makes a
-   re-run a no-op.
+   clobbering it; a strict-JSON file is deep-merged idempotently (idempotency is keyed off
+   the `mcp.servers.ours` entry itself, so the config stays `openclaw doctor`-clean);
+5. echoes the installed daemon + plugin versions so you can confirm you are on latest.
 
 That's the whole base install — daemon, skills, and the `ours` MCP server. Wake-on-mail
 is enabled later, in-session, via the agent's `ours-mcp watch` tail (see *Optional: get
@@ -143,6 +149,5 @@ published home (this monorepo subdir vs. a standalone repo) is an owner decision
 
 ## Uninstall
 
-Remove the `"//ours"`-marked block (the `mcp.servers.ours` entry) from
-`~/.openclaw/openclaw.json`, delete `~/.openclaw/skills/{ours,writing-agent-bios}`, and
-`openclaw gateway restart`.
+Remove the `mcp.servers.ours` entry from `~/.openclaw/openclaw.json`, delete
+`~/.openclaw/skills/{ours,writing-agent-bios}`, and `openclaw gateway restart`.

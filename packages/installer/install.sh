@@ -64,18 +64,21 @@ command -v "$NPM" >/dev/null 2>&1 || { say "npm is required but not found. Insta
 hr "ours.network installer"
 say "This will install the ours daemon and set up the agent harnesses you choose."
 
-# --- 1) daemon: install + start --------------------------------------------------------
+# --- 1) daemon: ensure @latest (upgrade, not install-if-missing) + restart on change ---
 hr "1) ours daemon (@ours.network/mcp)"
-if ! command -v ours-mcp >/dev/null 2>&1; then
-  say "installing @ours.network/mcp globally…"
-  "$NPM" i -g @ours.network/mcp
-else
-  say "ours-mcp already installed ($(command -v ours-mcp))."
-fi
-if ours-mcp status >/dev/null 2>&1; then
-  say "daemon already running."
-else
+# Re-running the installer is an UPGRADE: pull the daemon up to the newest published version even
+# when it is already present, then restart it only if the version actually changed so the RUNNING
+# daemon always ends on latest.
+DAEMON_BEFORE="$(ours-mcp --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+say "ensuring @ours.network/mcp@latest…"
+"$NPM" i -g @ours.network/mcp@latest
+DAEMON_AFTER="$(ours-mcp --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+if ! ours-mcp status >/dev/null 2>&1; then
   say "starting the daemon…"; ours-mcp start || say "could not auto-start; run 'ours-mcp start' if the tools error."
+elif [ -n "$DAEMON_BEFORE" ] && [ "$DAEMON_BEFORE" != "$DAEMON_AFTER" ]; then
+  say "daemon upgraded (v${DAEMON_BEFORE} → v${DAEMON_AFTER}) — restarting…"; ours-mcp restart || ours-mcp start || true
+else
+  say "daemon already current (v${DAEMON_AFTER:-unknown})."
 fi
 
 # --- 2) persistent service (optional) --------------------------------------------------
@@ -186,8 +189,10 @@ say "setting up: $SELECTED"
 # enabled later from inside the agent (bind an identity, then ask the ours skill to "wake me on
 # new mail"), never here.
 install_npm_harness(){  # $1 = harness (hermes|openclaw|codex)
-  local h="$1" pkg="@ours.network/$1" bin="ours-$1-install"
+  local h="$1" pkg="@ours.network/$1@latest" bin="ours-$1-install"
   hr "→ $h"
+  # @latest bypasses a stale global so a re-run upgrades the plugin (and its bundled skill), not
+  # just re-runs the old one. The harness bin then ensures the daemon @latest + cleans legacy bits.
   say "installing $pkg…"; "$NPM" i -g "$pkg"
   say "running $bin"
   "$bin"
@@ -226,6 +231,17 @@ done
 # --- done ------------------------------------------------------------------------------
 hr "Done"
 say "ours daemon: $(command -v ours-mcp)"
+# Version echo — confirm the user is on latest (daemon + each installed plugin).
+say "versions:"
+say "  daemon: $(ours-mcp --version 2>/dev/null | head -1 || echo 'unknown')"
+for h in $INSTALLED; do
+  case "$h" in
+    hermes|openclaw|codex)
+      say "  $h: $("$NPM" ls -g "@ours.network/$h" 2>/dev/null | grep -oE "@ours\.network/$h@[0-9][0-9.]*" | head -1 || echo "@ours.network/$h (not a global install)")";;
+    claude-code)
+      say "  claude-code: installed from the Claude Code in-app marketplace (version shown there)";;
+  esac
+done
 if [ -n "$INSTALLED" ]; then
   say "installed:"
   for h in $INSTALLED; do say "  ✓ $h"; done
