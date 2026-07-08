@@ -19,10 +19,16 @@ Codex:
    agent tails `ours-mcp watch <identity>` via its shell tool (or polls `get_messages`
    every ~5s, its primary since it's turn-based) and reacts while it's live.
 
+> **Fastest path:** the one-shot [ours.network installer](../installer/README.md) sets up the
+> daemon and Codex in one pass —
+> `curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash`
+> (activates once the `ours-mcp` repo is public). The two commands below are the works-today
+> standalone path.
+
 ## Install — two commands
 
 ```sh
-npm i -g @ours.network/codex
+npm i -g @ours.network/codex@latest
 ours-codex-install
 ```
 
@@ -89,7 +95,7 @@ is **live/working** — it is not a background daemon that wakes a dormant agent
 
 - Node.js ≥ 20
 - Codex CLI installed (`~/.codex/` present)
-- The ours daemon: `npm i -g @ours.network/mcp` (the installer does this for you)
+- The ours daemon: `npm i -g @ours.network/mcp@latest` (the installer does this for you)
 
 ## Install (manual)
 

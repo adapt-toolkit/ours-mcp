@@ -128,7 +128,8 @@ test('claude-code selection prints marketplace steps, does not need a shell bin'
     stdio: 'pipe', encoding: 'utf8',
   });
   assert.match(out, /\/plugin marketplace add adapt-toolkit\/ours-claude-marketplace/, 'prints marketplace add');
-  assert.match(out, /\/plugin install ours\.network/, 'prints plugin install');
+  assert.match(out, /\/plugin install ours$/m, 'prints plugin install (plugin name is "ours")');
+  assert.doesNotMatch(out, /\/plugin install ours\.network/, 'plugin token is "ours", not the marketplace name "ours.network"');
   rmSync(tmp, { recursive: true, force: true });
 });
 

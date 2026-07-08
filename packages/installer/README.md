@@ -50,7 +50,7 @@ directly (each is exactly two commands):
 |---|---|
 | Hermes | `npm i -g @ours.network/hermes` · `ours-hermes-install` |
 | Codex | `npm i -g @ours.network/codex` · `ours-codex-install` |
-| Claude Code | `/plugin marketplace add adapt-toolkit/ours-claude-marketplace` · `/plugin install ours.network` (in-app) |
+| Claude Code | `/plugin marketplace add adapt-toolkit/ours-claude-marketplace` · `/plugin install ours` (in-app) |
 
 Claude Code installs from its in-app marketplace rather than a shell bin, so the unified
 installer sets up the daemon and prints those two in-Claude-Code commands.
