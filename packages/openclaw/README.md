@@ -20,20 +20,34 @@ to OpenClaw:
 
 ```sh
 npm i -g @ours.network/openclaw
-ours-openclaw-install                 # ensures the daemon, wires MCP + skill + reactivity
+ours-openclaw-install                 # ensures the daemon, wires the MCP server + skill only
 ```
 
 That's it — the MCP server and the `ours` skill are live immediately; run
-**`openclaw gateway restart`** to load the ours MCP tools and the webhook routes. To
-also wake an agent on new mail, pass the identities to watch (they must already exist):
-
-```sh
-ours-openclaw-install --identities "Agent1 Agent2"
-```
+**`openclaw gateway restart`** to load the ours MCP tools. The base install asks **zero**
+questions about identities or wake-on-mail — those are set up later, in-session, via the
+`ours` skill.
 
 `ours-openclaw-install` is a thin front-door over this package's `install.sh` (below);
 both are idempotent, so re-running is always safe. Other flags: `--port`,
 `--openclaw-dir`, `--skip-daemon`, `--skip-watcher`, `--help`.
+
+### Optional: get woken on new mail
+
+Wake-on-mail is enabled **in-session**, not by the installer. Once ours is installed:
+
+1. In your OpenClaw agent, **bind (or create) an identity** via the `ours` skill.
+2. Ask the `ours` skill to **"wake me on new mail"**. The skill writes that identity's
+   webhook route and starts a background watcher — the ours reactivity connector — that
+   wakes the agent whenever that identity receives mail.
+3. Because a new route is added, enabling wake needs a **one-time**
+   `openclaw gateway restart` to load it. The skill **discloses this and asks you to
+   confirm** before running it.
+
+The installer never sets this up; the base install writes no route and starts no watcher.
+(Advanced / not recommended: a hidden `--identities "Agent1 Agent2"` escape hatch on
+`ours-openclaw-install` can pre-write routes + start watchers at install time, but the
+in-session flow is the supported path.)
 
 ## Reactivity — how an OpenClaw agent wakes on new mail
 
@@ -81,18 +95,23 @@ Equivalently, from a checkout you can run `bash install.sh` directly (same env k
 
 1. ensures `@ours.network/mcp` is installed and the daemon is running;
 2. installs the `ours` + `writing-agent-bios` skills into `~/.openclaw/skills/`;
-3. writes the `ours` MCP server (`mcp.servers.ours`) + a per-identity webhook route
-   (`plugins.entries.webhooks.config.routes.*`) into `~/.openclaw/openclaw.json` (with
-   a generated static bearer token) — **safely**: openclaw.json is JSON5, so if your
-   file is not strict JSON (has comments/unquoted keys) the installer prints the block
-   for you to merge by hand rather than risk clobbering it; a strict-JSON file is
-   deep-merged idempotently, and a sentinel makes a re-run a no-op;
+3. writes **only** the `ours` MCP server (`mcp.servers.ours`) into
+   `~/.openclaw/openclaw.json` — **no webhook route, no watcher** — **safely**:
+   openclaw.json is JSON5, so if your file is not strict JSON (has comments/unquoted
+   keys) the installer prints the block for you to merge by hand rather than risk
+   clobbering it; a strict-JSON file is deep-merged idempotently, and a sentinel makes a
+   re-run a no-op;
 4. records the shared token + connector env in `~/.openclaw/ours-connector.env`, **and
-   upserts `OURS_WAKE_SECRET` into the gateway's dotenv `~/.openclaw/.env`** so the routes'
-   `secret: {source: "env", id: "OURS_WAKE_SECRET"}` resolves in the gateway process (see
-   below), then starts the per-identity reactivity watcher.
+   upserts `OURS_WAKE_SECRET` into the gateway's dotenv `~/.openclaw/.env`** so a route's
+   `secret: {source: "env", id: "OURS_WAKE_SECRET"}` will resolve in the gateway process
+   (see below) once a route exists.
 
-Then run **`openclaw gateway restart`** so it loads the ours MCP tools and routes.
+The per-identity webhook route and its watcher are **not** written by the base install —
+they're added **in-session**, when the agent enables wake for its bound identity via the
+`ours` skill (which then prompts for the one-time `openclaw gateway restart`; see *Optional:
+get woken on new mail* above).
+
+Then run **`openclaw gateway restart`** so it loads the ours MCP tools.
 
 #### The gateway secret (`OURS_WAKE_SECRET`)
 

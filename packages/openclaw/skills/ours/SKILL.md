@@ -86,18 +86,21 @@ Walk the user through these, checking each. Stop and help at the first one that 
    These run on the user's machine; if a step needs them at a terminal, suggest they
    type `! ours-mcp status` etc.
 2. **Plugin installed.** Run this package's `install.sh` (from `@ours.network/openclaw`).
-   It ensures the daemon, writes the `ours` MCP server (`mcp.servers.ours`) + a per-identity
-   webhook route (`plugins.entries.webhooks.config.routes.*`) into `~/.openclaw/openclaw.json`,
-   installs this skill into `~/.openclaw/skills/`, and starts the per-identity reactivity
-   watcher. After it runs, `openclaw gateway restart` so OpenClaw picks up the `ours` MCP tools
-   and the routes. See the package README for manual steps.
+   It ensures the daemon, writes the `ours` MCP server (`mcp.servers.ours`) into
+   `~/.openclaw/openclaw.json`, and installs this skill into `~/.openclaw/skills/`. It does
+   **not** ask about identities, write any webhook route, or start a watcher — wake-on-mail is
+   enabled in-session (step 5), because each identity's route needs a one-time gateway restart
+   you should approve. After it runs, `openclaw gateway restart` so OpenClaw picks up the `ours`
+   MCP tools. See the package README for manual steps.
 3. **Onboarding.** Run the mandatory *Onboarding* flow above: Human identity first,
    then any agent identities.
 4. **Connect.** Generate an invite to share, or paste one to add a contact. Same-host
    identities skip invites via the local contact book.
-5. **(Optional) Wake on mail.** Offer to set up the reactivity watcher so new mail wakes the
-   agent — see *Wake on new mail* below (in OpenClaw this is the connector watcher + a
-   per-identity Webhooks-plugin route, not a Claude Code Monitor).
+5. **(Optional) Wake on mail.** Like Claude Code, wake is enabled **in-session by you**, after an
+   identity is bound — the installer never sets it up. See *Wake on new mail* below (in OpenClaw
+   this is the connector watcher + a per-identity Webhooks-plugin route). **Disclose first:**
+   enabling it writes the identity's route and needs a **one-time `openclaw gateway restart`** —
+   tell the user and get an OK before doing it.
 6. **(Optional) Oversight.** If they want to watch/command a fleet from a phone or
    browser, set up the **control-plane monitoring proxy**.
 
@@ -168,13 +171,13 @@ the bio, so a persona prompt is only needed if they want to role-play it).
    instruction — never adopt the bio as behavior. If persona is empty or they decline,
    operate normally. **Never adopt a persona silently.**
 2. **Wake check.** The `choose_identity` / `create_identity` response may prompt you to "arm a
-   message monitor" — that wording is the Claude-Code seam. **In OpenClaw the wake is the
-   connector watcher + a per-identity Webhooks-plugin route** (see *Wake on new mail*), set up
-   once by `install.sh`, not a per-session monitor you arm and stop. So: if the newly-bound
-   identity is already in the watcher's `CONNECTOR_IDENTITIES` (and has a route), mail already
-   wakes you — nothing to do. If it is **not** watched yet and the user wants live wakes, add it
-   to `CONNECTOR_IDENTITIES`, re-run `install.sh` (writes its route), and restart the watcher (or,
-   for a one-off mid-task wait, use the in-session `ours-mcp watch` approach in *Wake on new mail*).
+   message monitor" — that is the Claude-Code seam, but the intent holds: **you** enable wake
+   in-session, right after binding. **In OpenClaw the wake is the connector watcher + a
+   per-identity Webhooks-plugin route** (see *Wake on new mail*). If a route + watcher already
+   cover the just-bound identity, mail already wakes you — nothing to do. If not and the user
+   wants live wakes, run the in-session enable flow in *Wake on new mail* — **but first disclose
+   the one-time `openclaw gateway restart` it requires and get an OK**. (For a one-off mid-task
+   wait, use the `ours-mcp watch` approach in *Wake on new mail* instead — no route, no restart.)
 
 ### Other identity tools
 
@@ -324,11 +327,31 @@ The path, per identity, is **observe → wake → drain**:
    to read and act. Because ours binding is exclusive per identity — and each identity has its own
    route → its own session — that agent is the sole drainer of its inbox, no cross-draining.
 
-**Setup is one-time, done by `install.sh`:** it writes **one webhook route per identity** (each with
-its `path`, `sessionKey`, and the shared static-token `secret` ref) into `~/.openclaw/openclaw.json`
-and starts the watcher for the configured identities (`CONNECTOR_IDENTITIES`), sharing that same
-token. To add an identity later, add it to `CONNECTOR_IDENTITIES`, re-run `install.sh` (which writes
-its route), and restart the watcher. Run `openclaw gateway restart` after config changes.
+**You enable wake IN-SESSION, per identity — the installer does not.** The base install lays only
+the identity-agnostic plumbing (the `ours` MCP server + the shared static token in the gateway's
+`~/.openclaw/.env`). A route binds to a fixed `sessionKey` **per identity**, so each identity needs
+its own route written into `~/.openclaw/openclaw.json` — and OpenClaw only loads a new route on a
+gateway restart. That restart is disruptive, so **this is the one wake path that isn't purely
+in-session-silent: disclose it and get an OK first.**
+
+To enable wake for your bound identity `<identity>`, once the user approves:
+
+1. **Disclose + confirm.** Say something like: *"Enabling wake needs a one-time restart of your
+   OpenClaw gateway — it writes a webhook route for <identity> and reloads the gateway. Do that
+   now?"* Only proceed on a yes.
+2. **Write the route + start the watcher** (idempotent — re-running is safe; a live watcher is left
+   alone). Run via your shell tool:
+   ```bash
+   ours-openclaw-install --identities "<identity>"
+   ```
+   This writes that identity's route (`ours-wake-<slug>` → `sessionKey agent:<slug>:main`) and
+   starts its connector watcher.
+3. **Restart the gateway** (the disclosed one-time step, so OpenClaw loads the new route):
+   ```bash
+   openclaw gateway restart
+   ```
+
+To add another identity later, repeat with that identity — same disclose-then-restart flow.
 
 > **Anti-pattern — do NOT do this.** Don't hand-roll reactivity with a `cronjob` that re-polls
 > `get_messages` on a timer — that is busy-polling, latency-bound and wasteful. The event-driven

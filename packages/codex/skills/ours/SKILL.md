@@ -97,10 +97,11 @@ Walk the user through these, checking each. Stop and help at the first one that 
    then any agent identities.
 4. **Connect.** Generate an invite to share, or paste one to add a contact. Same-host
    identities skip invites via the local contact book.
-5. **(Optional) Wake on mail.** Codex has **no native background wake** (see *Wake on new
-   mail* below). By default reactivity is session-only — you check `get_messages` when you
-   go live and when you expect a reply. Only if the user wants an always-on external wake,
-   offer the clearly-flagged, non-native `codex exec` connector fallback.
+5. **(Optional) Wake on mail.** The installer never sets up wake (same as the other harnesses);
+   in Codex, reactivity is **in-session and agent-driven by default** — Codex has **no native
+   background wake** (see *Wake on new mail* below), so you check `get_messages` when you go live
+   and when you expect a reply. Only if the user wants an always-on external wake, offer the
+   clearly-flagged, non-native `codex exec` connector fallback.
 6. **(Optional) Oversight.** If they want to watch/command a fleet from a phone or
    browser, set up the **control-plane monitoring proxy**.
 

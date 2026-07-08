@@ -8,14 +8,16 @@
 // It resolves this package's own install.sh (which ensures the ours daemon, registers
 // the `ours` MCP server under mcp.servers + per-identity webhook routes in
 // ~/.openclaw/openclaw.json, installs the skills, and starts the reactivity watcher)
-// and runs it — no env-var gymnastics. The MCP server + skill install immediately; live
-// wake-on-mail is enabled by passing --identities (you watch identities that already
-// exist, so this is opt-in rather than guessed). Everything is idempotent, so re-running
-// is safe.
+// and runs it — no env-var gymnastics. The MCP server + skill install immediately. Wake-on-mail
+// is NOT set up here: the agent enables it in-session (bind an identity, then the ours skill
+// writes that identity's route + does a one-time gateway restart, with the user's OK, and starts
+// the watcher). Everything is idempotent, so re-running is safe.
+//
+// (Power-user escape hatch, not the story and never prompted: --identities "A B" writes routes +
+// starts watchers at install time for identities that already exist. Prefer the in-session flow.)
 //
 // Usage:
-//   ours-openclaw-install [--identities "Agent1 Agent2"] [--port 18789]
-//                         [--openclaw-dir DIR] [--skip-daemon] [--skip-watcher]
+//   ours-openclaw-install [--port 18789] [--openclaw-dir DIR] [--skip-daemon] [--skip-watcher]
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -42,8 +44,12 @@ function help() {
 
   ours-openclaw-install [options]
 
+Sets up the daemon + the ours MCP server + the skill. It asks nothing about identities or
+wake-on-mail: you enable wake in-session from your agent (bind an identity, then ask the ours
+skill to "wake me on new mail" — it writes that identity's route and does a one-time gateway
+restart, with your OK).
+
 Options:
-  -i, --identities "A B"    ours identities to watch for wake-on-mail (space-separated)
       --port <n>            OpenClaw gateway port (default 18789)
       --openclaw-dir <dir>  OpenClaw config+skills root (default ~/.openclaw)
       --skip-daemon         do not install/start the ours daemon

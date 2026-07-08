@@ -3,8 +3,10 @@
 #   1. ensure the ours daemon (@ours.network/mcp) is installed + running
 #   2. install the ours + writing-agent-bios skills into ~/.hermes/skills/
 #   3. write the `ours` MCP server + the `ours-wake` webhook route into
-#      ~/.hermes/config.yaml (idempotent, never corrupts existing YAML)
-#   4. start the per-identity reactivity watcher (connector) sharing one HMAC secret
+#      ~/.hermes/config.yaml (idempotent, never corrupts existing YAML) — this is the identity-
+#      agnostic wake PLUMBING; the watcher that uses it is started in-session by the agent
+#   4. (only with the optional --identities escape hatch) start the reactivity watcher now; the
+#      DEFAULT install starts no watcher — wake is enabled in-session via the ours skill
 #
 # Idempotent: safe to re-run. Test/CI knobs (all optional):
 #   HERMES_DIR                 config+skills root         (default ~/.hermes)
@@ -71,11 +73,17 @@ if [ -z "${OURS_WAKE_SECRET:-}" ] || [ "${OURS_WAKE_SECRET:-}" = "CHANGE_ME_loca
 fi
 mkdir -p "$HERMES_DIR"
 umask 077
+# Record the connector location so the agent can start the watcher IN-SESSION (the default wake
+# path) without re-discovering it — the ours skill sources this file and runs
+# "$CONNECTOR_DIR/connector-watch.sh" for its own bound identity.
+CONN_DIR="$(find_connector 2>/dev/null || true)"
 cat > "$ENV_FILE" <<EOF
-# ours.network connector env (managed by install.sh). Sourced to start the watcher.
+# ours.network connector env (managed by install.sh). Sourced by the ours skill to start the
+# in-session reactivity watcher (and by the optional --identities install-time watcher).
 export CONNECTOR_HMAC_SECRET="$OURS_WAKE_SECRET"
 export CONNECTOR_WEBHOOK_URL="http://localhost:$OURS_WEBHOOK_PORT/webhooks/ours-wake"
 export CONNECTOR_EVENT="ours_wake"
+export CONNECTOR_DIR="$CONN_DIR"
 export CONNECTOR_IDENTITIES="${CONNECTOR_IDENTITIES:-}"
 EOF
 say "wrote connector env: $ENV_FILE"
@@ -88,11 +96,14 @@ OURS_WAKE_SECRET="$OURS_WAKE_SECRET" CONNECTOR_IDENTITIES="${CONNECTOR_IDENTITIE
   }
 
 # --- 5) watcher ---
+# By DEFAULT the base install does NOT start a watcher — wake-on-mail is enabled in-session by the
+# agent (bind an identity, then the ours skill starts the watcher for it). The CONNECTOR_IDENTITIES
+# path below is an optional power-user escape hatch (ours-hermes-install --identities "…").
 if [ "${OURS_INSTALL_SKIP_WATCHER:-}" = "1" ]; then
   say "skipping watcher start (OURS_INSTALL_SKIP_WATCHER=1)"
 elif [ -z "${CONNECTOR_IDENTITIES:-}" ]; then
-  say "no CONNECTOR_IDENTITIES set — not starting the watcher. Start it later with:"
-  say "  CONNECTOR_IDENTITIES=\"Agent1 Agent2\" bash $SELFDIR/install.sh"
+  say "wake-on-mail is set up in-session, not here: bind an identity in your agent, then ask the"
+  say "ours skill to \"wake me on new mail\" (it starts the watcher for that identity)."
 elif CONN="$(find_connector)"; then
   if pgrep -f "connector-watch.sh" >/dev/null 2>&1; then
     say "a connector watcher is already running — leaving it (restart it to pick up new identities)"
@@ -107,6 +118,6 @@ fi
 
 say "done. Run /reload-mcp in Hermes to load the mcp_ours_* tools."
 if [ -z "${CONNECTOR_IDENTITIES:-}" ]; then
-  say "tip: to wake an agent on new mail, re-run with its identities:"
-  say "     ours-hermes-install --identities \"Agent1 Agent2\""
+  say "next: in your agent, bind (or create) an identity and ask the ours skill to \"wake me on"
+  say "      new mail\" — it starts a background watcher that wakes you when that identity gets mail."
 fi

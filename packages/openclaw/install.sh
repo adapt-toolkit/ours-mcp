@@ -2,11 +2,12 @@
 # Install the ours.network plugin into OpenClaw:
 #   1. ensure the ours daemon (@ours.network/mcp) is installed + running
 #   2. install the ours + writing-agent-bios skills into ~/.openclaw/skills/
-#   3. write the `ours` MCP server (mcp.servers.ours) + a per-identity webhook route
-#      (plugins.entries.webhooks.config.routes.*) into ~/.openclaw/openclaw.json
-#      (idempotent; never clobbers an existing JSON5 config)
-#   4. start the per-identity reactivity watcher (connector), which pokes each
-#      OpenClaw route with a STATIC bearer token (CONNECTOR_AUTH_HEADER)
+#   3. write the `ours` MCP server (mcp.servers.ours) into ~/.openclaw/openclaw.json
+#      (idempotent; never clobbers an existing JSON5 config). The per-identity webhook route
+#      (plugins.entries.webhooks.config.routes.*) is added later, in-session, when the agent
+#      enables wake for its bound identity — the DEFAULT base install writes NO route.
+#   4. (only with the optional --identities escape hatch) write that identity's route + start its
+#      reactivity watcher now; otherwise the watcher is started in-session by the ours skill
 #
 # Idempotent: safe to re-run. Test/CI knobs (all optional):
 #   OPENCLAW_DIR               config+skills root         (default ~/.openclaw)
@@ -144,8 +145,12 @@ start_watcher_for(){   # $1 = identity, $2 = connector dir
 if [ "${OURS_INSTALL_SKIP_WATCHER:-}" = "1" ]; then
   say "skipping watcher start (OURS_INSTALL_SKIP_WATCHER=1)"
 elif [ -z "${CONNECTOR_IDENTITIES:-}" ]; then
-  say "no CONNECTOR_IDENTITIES set — not starting any watcher. Start it later with:"
-  say "  ours-openclaw-install --identities \"Agent1 Agent2\""
+  # DEFAULT: no identities → no route, no watcher. Wake is enabled in-session by the agent, which
+  # (with the user's OK for the one-time gateway restart) runs this installer with its own bound
+  # identity. The CONNECTOR_IDENTITIES path below is that same helper, driven by the skill.
+  say "wake-on-mail is set up in-session, not here: bind an identity in your agent, then ask the"
+  say "ours skill to \"wake me on new mail\" — it writes that identity's route, restarts the"
+  say "gateway once (with your OK), and starts the watcher."
 elif CONN="$(find_connector)"; then
   say "starting one reactivity watcher per identity: $CONNECTOR_IDENTITIES"
   for id in $CONNECTOR_IDENTITIES; do start_watcher_for "$id" "$CONN"; done
@@ -153,8 +158,8 @@ else
   say "could not locate @ours.network/connector — set CONNECTOR_DIR and re-run to start the watchers"
 fi
 
-say "done. Run \`openclaw gateway restart\` to load the ours MCP tools + webhook routes."
+say "done. Run \`openclaw gateway restart\` to load the ours MCP tools."
 if [ -z "${CONNECTOR_IDENTITIES:-}" ]; then
-  say "tip: to wake an agent on new mail, re-run with its identities:"
-  say "     ours-openclaw-install --identities \"Agent1 Agent2\""
+  say "next: in your agent, bind (or create) an identity and ask the ours skill to \"wake me on"
+  say "      new mail\" — it enables wake for that identity (one-time gateway restart, with your OK)."
 fi

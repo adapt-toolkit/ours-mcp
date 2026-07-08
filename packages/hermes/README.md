@@ -44,20 +44,31 @@ ours-mcp watch <id>   ──▶  connector-watch.sh  ──HMAC POST──▶  H
 
 ```sh
 npm i -g @ours.network/hermes
-ours-hermes-install                 # ensures the daemon, wires MCP + skill + reactivity
+ours-hermes-install                 # ensures the daemon, wires the MCP server + skill only
 ```
 
 That's it — the MCP server and the `ours` skill are live immediately; run **`/reload-mcp`**
-in Hermes to load the `mcp_ours_*` tools. To also wake an agent on new mail, pass the
-identities to watch (they must already exist):
-
-```sh
-ours-hermes-install --identities "Agent1 Agent2"
-```
+in Hermes to load the `mcp_ours_*` tools. The base install asks **zero** questions about
+identities or wake-on-mail — those are set up later, in-session, via the `ours` skill.
 
 `ours-hermes-install` is a thin front-door over this package's `install.sh` (below); both
 are idempotent, so re-running is always safe. Other flags: `--port`, `--hermes-dir`,
 `--skip-daemon`, `--skip-watcher`, `--help`.
+
+### Optional: get woken on new mail
+
+Wake-on-mail is enabled **in-session**, not by the installer. Once ours is installed:
+
+1. In your Hermes agent, **bind (or create) an identity** via the `ours` skill.
+2. Ask the `ours` skill to **"wake me on new mail"**. The skill starts a background
+   watcher — the ours reactivity connector — that wakes the agent whenever that
+   identity receives mail, using the pre-installed identity-agnostic `ours-wake`
+   webhook route. It's idempotent, so asking again is safe.
+
+The installer never sets this up; there is no wake watcher running until you ask for one.
+(Advanced / not recommended: a hidden `--identities "Agent1 Agent2"` escape hatch on
+`ours-hermes-install` can pre-start watchers at install time, but the in-session flow is
+the supported path.)
 
 ### What the installer does
 
@@ -67,12 +78,15 @@ Equivalently, from a checkout you can run `bash install.sh` directly (same env k
 1. ensures `@ours.network/mcp` is installed and the daemon is running;
 2. installs the `ours` + `writing-agent-bios` skills into
    `~/.hermes/skills/communication/`;
-3. writes the `ours` MCP server + the `ours-wake` webhook route into
+3. writes the `ours` MCP server + the identity-agnostic `ours-wake` webhook route into
    `~/.hermes/config.yaml` (with a generated HMAC secret) — **safely**: if your
    config already defines `mcp_servers:` or `platforms:`, it prints the block for
    you to merge by hand instead of risking a duplicate-key corruption;
-4. records the shared secret + connector env in `~/.hermes/ours-connector.env`
-   and starts the per-identity reactivity watcher.
+4. records the shared secret + connector env in `~/.hermes/ours-connector.env`.
+
+`install.sh` lays the wake plumbing (the `ours-wake` route) but does **not** start any
+watcher by default — the per-identity watcher is started in-session when the agent asks
+the `ours` skill to wake it on new mail (see *Optional: get woken on new mail* above).
 
 Then run **`/reload-mcp`** in Hermes so it loads the `mcp_ours_*` tools.
 

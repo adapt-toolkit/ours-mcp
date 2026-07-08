@@ -29,6 +29,11 @@ That's it. The MCP server + `ours` skill are live for the **next Codex session**
 reads `~/.codex/config.toml`, `~/.agents/skills`, and `~/.codex/AGENTS.md` at the start of
 each session, so there is no reload command. Everything is idempotent, so re-running is safe.
 
+The base install asks **zero** questions about identities or wake-on-mail and sets up **no**
+background wake — Codex has none natively. Reactivity is session-only by default (the agent
+checks `get_messages` when it goes live and whenever it expects a reply); see *Reactivity —
+the honest story* below for the details and the optional, non-native `codex exec` fallback.
+
 `ours-codex-install` is a thin front-door over this package's `install.sh` (below). Flags:
 
 ```

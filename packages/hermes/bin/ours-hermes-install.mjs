@@ -7,14 +7,16 @@
 //
 // It resolves this package's own install.sh (which ensures the ours daemon, registers
 // the `ours` MCP server + the `ours-wake` webhook route in ~/.hermes/config.yaml,
-// installs the skills, and starts the reactivity watcher) and runs it — no env-var
-// gymnastics. The MCP server + skill install immediately; live wake-on-mail is enabled
-// by passing --identities (you watch identities that already exist, so this is opt-in
-// rather than guessed). Everything is idempotent, so re-running is safe.
+// installs the skills) and runs it — no env-var gymnastics. The MCP server + skill install
+// immediately. Wake-on-mail is NOT set up here: the agent enables it in-session (bind an
+// identity, then the ours skill starts the watcher for it). Everything is idempotent, so
+// re-running is safe.
+//
+// (Power-user escape hatch, not the story and never prompted: --identities "A B" starts the
+// watcher at install time for identities that already exist. Prefer the in-session flow.)
 //
 // Usage:
-//   ours-hermes-install [--identities "Agent1 Agent2"] [--port 8644]
-//                       [--hermes-dir DIR] [--skip-daemon] [--skip-watcher]
+//   ours-hermes-install [--port 8644] [--hermes-dir DIR] [--skip-daemon] [--skip-watcher]
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -41,8 +43,11 @@ function help() {
 
   ours-hermes-install [options]
 
+Sets up the daemon + the ours MCP server + the skill. It asks nothing about identities or
+wake-on-mail: you enable wake in-session from your agent (bind an identity, then ask the ours
+skill to "wake me on new mail").
+
 Options:
-  -i, --identities "A B"   ours identities to watch for wake-on-mail (space-separated)
       --port <n>           Hermes webhook port (default 8644)
       --hermes-dir <dir>   Hermes config+skills root (default ~/.hermes)
       --skip-daemon        do not install/start the ours daemon

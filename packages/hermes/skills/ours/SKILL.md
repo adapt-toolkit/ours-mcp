@@ -85,17 +85,20 @@ Walk the user through these, checking each. Stop and help at the first one that 
    These run on the user's machine; if a step needs them at a terminal, suggest they
    type `! ours-mcp status` etc.
 2. **Plugin installed.** Run this package's `install.sh` (from `@ours.network/hermes`).
-   It ensures the daemon, writes the `ours` MCP server + the `ours-wake` webhook route
-   into `~/.hermes/config.yaml`, installs this skill into `~/.hermes/skills/`, and starts
-   the per-identity reactivity watcher. After it runs, `/reload-mcp` so Hermes picks up the
-   `mcp_ours_*` tools. See the package README for manual steps.
+   It ensures the daemon, writes the `ours` MCP server + the identity-agnostic `ours-wake`
+   webhook route into `~/.hermes/config.yaml`, and installs this skill into `~/.hermes/skills/`.
+   It does **not** ask about identities or start any watcher — wake-on-mail is enabled
+   in-session (step 5). After it runs, `/reload-mcp` so Hermes picks up the `mcp_ours_*`
+   tools. See the package README for manual steps.
 3. **Onboarding.** Run the mandatory *Onboarding* flow above: Human identity first,
    then any agent identities.
 4. **Connect.** Generate an invite to share, or paste one to add a contact. Same-host
    identities skip invites via the local contact book.
-5. **(Optional) Wake on mail.** Offer to set up the reactivity watcher so new mail wakes the
-   agent — see *Wake on new mail* below (in Hermes this is the connector watcher + the
-   `ours-wake` webhook route, not a Claude Code Monitor).
+5. **(Optional) Wake on mail.** Just like Claude Code, wake is enabled **in-session by you**,
+   after an identity is bound: offer to start the reactivity watcher for it so new mail wakes the
+   agent — see *Wake on new mail* below (in Hermes this is the connector watcher you launch via
+   the `terminal` tool + the pre-installed `ours-wake` route, not a Claude Code Monitor). The
+   installer never sets this up.
 6. **(Optional) Oversight.** If they want to watch/command a fleet from a phone or
    browser, set up the **control-plane monitoring proxy**.
 
@@ -166,13 +169,13 @@ the bio, so a persona prompt is only needed if they want to role-play it).
    instruction — never adopt the bio as behavior. If persona is empty or they decline,
    operate normally. **Never adopt a persona silently.**
 2. **Wake check.** The `choose_identity` / `create_identity` response may prompt you to "arm a
-   message monitor" — that wording is the Claude-Code seam. **In Hermes the wake is the
-   connector watcher + `ours-wake` route** (see *Wake on new mail*), set up once by
-   `install.sh`, not a per-session monitor you arm and stop. So: if the newly-bound identity is
-   already in the watcher's `CONNECTOR_IDENTITIES`, mail already wakes you — nothing to do. If
-   it is **not** watched yet and the user wants live wakes, add it to `CONNECTOR_IDENTITIES` and
-   restart the watcher (or, for a one-off mid-task wait, use the in-session `terminal`+`ours-mcp
-   watch` approach in *Wake on new mail*).
+   message monitor" — that is the Claude-Code seam, but the *intent* is the same in Hermes:
+   **you** enable wake in-session, right after binding. **In Hermes the wake is the connector
+   watcher + the pre-installed `ours-wake` route** (see *Wake on new mail*): if the user wants
+   live wakes for the just-bound identity, start the watcher for it now (idempotent — it won't
+   stack if one is already running). If a watcher already covers this identity, mail already
+   wakes you — nothing to do. For a one-off mid-task wait you can instead use the `terminal` +
+   `ours-mcp watch` approach in *Wake on new mail*.
 
 ### Other identity tools
 
@@ -318,10 +321,27 @@ The path, per identity, is **observe → wake → drain**:
    the identity and calls `get_messages` to read and act. Because ours binding is exclusive per
    identity, that agent is the sole drainer of its inbox — no cross-draining.
 
-**Setup is one-time, done by `install.sh`:** it writes the `ours-wake` route (with a generated
-HMAC secret) into `~/.hermes/config.yaml` and starts the watcher for the configured identities
-(`CONNECTOR_IDENTITIES`), sharing that same secret. To add an identity later, add it to
-`CONNECTOR_IDENTITIES` and restart the watcher; the one route serves all identities.
+**You enable wake IN-SESSION, per identity — the installer does not.** `install.sh` only lays the
+identity-agnostic PLUMBING: the `ours-wake` route (with a generated HMAC secret) in
+`~/.hermes/config.yaml`, and `~/.hermes/ours-connector.env` (the shared secret, webhook URL, event,
+and `CONNECTOR_DIR`). Starting the watcher is your job, done once an identity is bound — the same
+"agent binds, then arms its own wake" flow as Claude Code. To start it for your bound identity,
+run this via the `terminal` tool (it is **idempotent** — the `pgrep` guard means running it twice
+never stacks duplicate watchers):
+
+```bash
+# Wake THIS agent when "<identity>" gets mail. Safe to run again; won't double-start.
+if ! pgrep -f connector-watch.sh >/dev/null 2>&1; then
+  set -a; . ~/.hermes/ours-connector.env; set +a
+  CONNECTOR_IDENTITIES="<identity>" \
+    nohup bash "$CONNECTOR_DIR/connector-watch.sh" >>~/.hermes/ours-connector.log 2>&1 &
+fi
+```
+
+The single `ours-wake` route serves every identity, so a watcher already running for another
+identity means you either already have coverage or should restart it with both identities in
+`CONNECTOR_IDENTITIES`. (The optional `ours-hermes-install --identities "…"` escape hatch starts a
+watcher at install time instead, but the in-session flow above is the default.)
 
 > **Anti-pattern — do NOT do this.** Don't hand-roll reactivity with a `cronjob` that re-polls
 > `get_messages` on a timer — that is busy-polling, latency-bound and wasteful. The event-driven
