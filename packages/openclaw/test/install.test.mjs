@@ -16,7 +16,13 @@ const INSTALL = join(PKG, 'install.sh');
 function run(openclawDir) {
   return execFileSync('bash', [INSTALL], {
     encoding: 'utf8',
-    env: { ...process.env, OPENCLAW_DIR: openclawDir, OURS_INSTALL_SKIP_DAEMON: '1' },
+    // AGENTS_SKILLS is sandboxed so the shadow-refresh step can never touch the real ~/.agents/skills.
+    env: {
+      ...process.env,
+      OPENCLAW_DIR: openclawDir,
+      AGENTS_SKILLS: join(openclawDir, '.agents-skills'),
+      OURS_INSTALL_SKIP_DAEMON: '1',
+    },
   });
 }
 

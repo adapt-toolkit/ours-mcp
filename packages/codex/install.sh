@@ -27,17 +27,28 @@ SKILLS_DIR="${SKILLS_DIR:-$HOME/.agents/skills}"
 
 say(){ printf 'ours-install: %s\n' "$1"; }
 
-# --- 1) daemon ---
-if [ "${OURS_INSTALL_SKIP_DAEMON:-}" != "1" ]; then
-  if ! command -v ours-mcp >/dev/null 2>&1; then
-    say "installing @ours.network/mcp globally (npm i -g)…"
-    npm i -g @ours.network/mcp
+# Ensure the ours daemon is on @latest (UPGRADE, not install-if-missing): an already-present
+# daemon must still be pulled up to the newest published version. Record the CLI version
+# before/after; start if not running, restart only if the version actually changed.
+ensure_daemon_latest(){
+  if [ "${OURS_INSTALL_SKIP_DAEMON:-}" = "1" ]; then say "skipping daemon step (OURS_INSTALL_SKIP_DAEMON=1)"; return 0; fi
+  local before after
+  before="$(ours-mcp --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  say "ensuring @ours.network/mcp@latest…"
+  npm i -g @ours.network/mcp@latest
+  after="$(ours-mcp --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  if ! ours-mcp status >/dev/null 2>&1; then
+    say "starting the ours daemon…"; ours-mcp start || say "could not auto-start; run 'ours-mcp start' if the tools error."
+  elif [ -n "$before" ] && [ "$before" != "$after" ]; then
+    say "daemon upgraded (v${before} → v${after}) — restarting…"; ours-mcp restart || ours-mcp start || true
+  else
+    say "daemon already current (v${after:-unknown})."
   fi
-  if ! ours-mcp status >/dev/null 2>&1; then say "starting the ours daemon…"; ours-mcp start || true; fi
-  say "daemon: $(command -v ours-mcp)"
-else
-  say "skipping daemon step (OURS_INSTALL_SKIP_DAEMON=1)"
-fi
+  say "daemon: $(command -v ours-mcp) (v${after:-unknown})"
+}
+
+# --- 1) daemon (ensure @latest + restart on change) ---
+ensure_daemon_latest
 
 # --- 2) skills (USER scope: ~/.agents/skills/<name>/) ---
 mkdir -p "$SKILLS_DIR"
@@ -55,5 +66,11 @@ CODEX_CONFIG="$CODEX_CONFIG" node "$SELFDIR/bin/codex-config-install.mjs"
 CODEX_AGENTS="$CODEX_AGENTS" node "$SELFDIR/bin/codex-agents-install.mjs"
 
 say "done. The ours MCP server + skill are live for the next Codex session."
+# --- version echo: show the user they are on latest ---
+if [ "${OURS_INSTALL_SKIP_DAEMON:-}" != "1" ]; then
+  say "versions:"
+  say "  daemon: $(ours-mcp --version 2>/dev/null | head -1 || echo 'unknown')"
+  say "  plugin: $(npm ls -g @ours.network/codex 2>/dev/null | grep -oE '@ours\.network/codex@[0-9][0-9.]*' | head -1 || echo '@ours.network/codex (not a global install)')"
+fi
 say "next: bind (or create) an identity, then the ours skill tails ours-mcp watch (or polls"
 say "      get_messages) in-session so you react to new mail while you work."
