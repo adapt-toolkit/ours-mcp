@@ -22,8 +22,7 @@ Codex:
 > **Fastest path:** the one-shot [ours.network installer](../installer/README.md) sets up the
 > daemon and Codex in one pass —
 > `curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash`
-> (activates once the `ours-mcp` repo is public). The two commands below are the works-today
-> standalone path.
+> or use the two-command npm path below.
 
 ## Install — two commands
 

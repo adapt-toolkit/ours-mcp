@@ -29,10 +29,7 @@ pick — **Claude Code · Codex · Hermes**:
 curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash
 ```
 
-*(Activates once the `ours-mcp` repo is public. Until then use the per-harness npm path below —
-it works today.)*
-
-### Works today — npm, per harness
+### Alternative — manual install via npm
 
 ```sh
 npm i -g @ours.network/mcp@latest    # the daemon
