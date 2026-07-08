@@ -68,6 +68,10 @@ The installer never sets this up; nothing watches for mail until the agent start
 in-session tail. Note this reacts while the agent is live/working — Hermes does not
 re-invoke a dormant agent on background output.
 
+> Claude Code has the most tested, reliable wake-on-mail monitor; Hermes support is newer
+> and may have rough edges — please report anything off:
+> https://github.com/adapt-toolkit/ours-mcp/issues
+
 ### What the installer does
 
 Equivalently, from a checkout you can run `bash install.sh` directly (same env knobs).

@@ -1,0 +1,74 @@
+// Unit tests for the installer's pure decision logic (no I/O, no subprocess) — fast + hermetic.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  canonHarnesses, suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
+  DEFAULT_PORT, DEFAULT_BROKER, RESERVED_PORTS,
+} from '../lib/logic.mjs';
+
+test('canonHarnesses: names/numbers/all, de-duped and order-preserving; OpenClaw is gone', () => {
+  assert.deepEqual(canonHarnesses('codex hermes').names, ['codex', 'hermes']);
+  assert.deepEqual(canonHarnesses('2,3').names, ['codex', 'hermes']);
+  assert.deepEqual(canonHarnesses('cc codex codex').names, ['claude-code', 'codex']);
+  assert.deepEqual(canonHarnesses('all').names, ['claude-code', 'codex', 'hermes']);
+  assert.deepEqual(canonHarnesses('none').names, []);
+  // OpenClaw support was removed — the token is unknown now, never a selection.
+  const r = canonHarnesses('openclaw hermes');
+  assert.deepEqual(r.names, ['hermes']);
+  assert.deepEqual(r.unknown, ['openclaw']);
+});
+
+test('suggestPort: keeps a free port, avoids reserved 3051, and skips taken ports', () => {
+  const free = () => false;
+  assert.equal(suggestPort(3050, free), 3050, 'free desired kept');
+  assert.equal(suggestPort(3051, free), 3060, 'reserved 3051 → first free alternate ≥3060');
+  assert.notEqual(suggestPort(3051, free), 3051, 'never returns the reserved port');
+  // 3050 taken → alternate from 3060 up; 3060 taken too → 3061.
+  const taken = (p) => p === 3050 || p === 3060;
+  assert.equal(suggestPort(3050, taken), 3061);
+  assert.ok(!RESERVED_PORTS.includes(suggestPort(3051, () => true)) || suggestPort(3051, () => true) === 3051 /* exhausted */);
+});
+
+test('parsePort: validates range, falls back otherwise', () => {
+  assert.deepEqual(parsePort('3060'), { ok: true, port: 3060 });
+  assert.deepEqual(parsePort('  8080 '), { ok: true, port: 8080 });
+  assert.deepEqual(parsePort('nope', 3050), { ok: false, port: 3050 });
+  assert.deepEqual(parsePort('70000', 3050), { ok: false, port: 3050 });
+  assert.deepEqual(parsePort('0', 3050), { ok: false, port: 3050 });
+});
+
+test('validateBroker: accepts ws/wss, flags junk, treats empty as keep-default', () => {
+  assert.deepEqual(validateBroker('wss://broker1.ours.network'), { ok: true, value: 'wss://broker1.ours.network', empty: false });
+  assert.equal(validateBroker('ws://localhost:9000').ok, true);
+  assert.equal(validateBroker('http://nope').ok, false);
+  assert.deepEqual(validateBroker('   '), { ok: true, value: '', empty: true });
+});
+
+test('mergeConfig: patches only given keys, preserves the rest, trailing newline', () => {
+  const out = mergeConfig({ stateDir: '/x', port: 3050 }, { port: 3060, brokerUrl: 'wss://b' });
+  const obj = JSON.parse(out);
+  assert.equal(obj.stateDir, '/x', 'unrelated key preserved');
+  assert.equal(obj.port, 3060, 'patched');
+  assert.equal(obj.brokerUrl, 'wss://b', 'added');
+  assert.ok(out.endsWith('\n'), 'trailing newline');
+  // undefined patch values are ignored, not written.
+  assert.equal(JSON.parse(mergeConfig({}, { port: undefined })).port, undefined);
+});
+
+test('parseVersion / parseStatus: pull versions + resolved broker/port out of CLI output', () => {
+  assert.equal(parseVersion('ours-mcp v0.9.9'), '0.9.9');
+  assert.equal(parseVersion('nothing here'), '');
+  const st = parseStatus([
+    'ours-mcp: running',
+    '  url:    http://localhost:3070/mcp (reachable)',
+    '  broker: wss://broker1.ours.network',
+  ].join('\n'));
+  assert.equal(st.broker, 'wss://broker1.ours.network');
+  assert.equal(st.port, 3070);
+  assert.deepEqual(parseStatus('ours-mcp: stopped'), { broker: null, port: null });
+});
+
+test('defaults mirror the daemon core config', () => {
+  assert.equal(DEFAULT_PORT, 3050);
+  assert.equal(DEFAULT_BROKER, 'wss://broker1.ours.network');
+});

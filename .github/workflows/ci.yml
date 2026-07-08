@@ -71,7 +71,6 @@ jobs:
       core-version: ${{ steps.bump.outputs.core-version }}
       plugin-version: ${{ steps.bump.outputs.plugin-version }}
       hermes-version: ${{ steps.bump.outputs.hermes-version }}
-      openclaw-version: ${{ steps.bump.outputs.openclaw-version }}
       codex-version: ${{ steps.bump.outputs.codex-version }}
     steps:
       - name: Generate app token
@@ -132,10 +131,6 @@ jobs:
         run: npm publish --workspace @ours.network/hermes --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish @ours.network/openclaw
-        run: npm publish --workspace @ours.network/openclaw --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish @ours.network/codex
         run: npm publish --workspace @ours.network/codex --access public
         env:
@@ -147,6 +142,5 @@ jobs:
             echo "- @ours.network/mcp@${{ needs.version-bump.outputs.core-version }}"
             echo "- @ours.network/claude-code@${{ needs.version-bump.outputs.plugin-version }}"
             echo "- @ours.network/hermes@${{ needs.version-bump.outputs.hermes-version }}"
-            echo "- @ours.network/openclaw@${{ needs.version-bump.outputs.openclaw-version }}"
             echo "- @ours.network/codex@${{ needs.version-bump.outputs.codex-version }}"
           } >> "$GITHUB_STEP_SUMMARY"

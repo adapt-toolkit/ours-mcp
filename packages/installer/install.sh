@@ -1,257 +1,91 @@
 #!/usr/bin/env bash
-# ours.network — one-shot installer.  Hosted on git and meant to be run as:
+# ours.network — installer bootstrap. Meant to be run as:
 #
 #     curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash
 #
-# (A pretty https://ours.network/install.sh redirect to this file is a future optional
-#  convenience; the git raw URL above is the canonical source.)
+# This file is a THIN bootstrap: it checks that Node.js is present (and prints friendly, per-OS
+# guidance if it isn't), then hands off to the real experience — a Node installer (install.mjs)
+# with an ASCII banner, colours, plain-language explanations, and interactive broker/port/harness
+# prompts. All the actual work (daemon @latest + restart, persistent service, broker/port config,
+# harness plugins, legacy cleanup, version echo) lives in the Node installer.
 #
-# It is the capstone over the per-harness installers: it installs + starts the ours
-# daemon, offers to install it as a persistent service, then lets you multi-select which
-# agent harnesses to wire up (Claude Code / Codex / Hermes / OpenClaw) and runs each one's
-# plugin installer for you. No manual "now do X, now press start" follow-up.
+# Piped as `curl … | bash` there is no install.mjs on disk next to us, so we download the small
+# installer file set into a temp dir and run it. Run from a clone, we use the local files.
 #
-# Piped as `curl … | bash`, the script's stdin is the pipe, so all interactive prompts are
-# read from the controlling terminal (/dev/tty). When there is no tty (true headless / CI),
-# it falls back to environment variables — see "Non-interactive" below — and otherwise makes
-# safe do-nothing choices rather than blocking.
-#
-# The base install is deliberately dead-simple: daemon + MCP server + skill per harness. It
-# asks ZERO questions about identities or wake-on-mail — those are set up later from inside the
-# agent (bind an identity, then ask the ours skill to "wake me on new mail"), never here.
-#
-# Non-interactive env overrides (all optional):
-#   OURS_HARNESSES="codex hermes openclaw"   harnesses to set up (space/comma list;
-#                                            names: claude-code codex hermes openclaw; or "all")
+# Non-interactive env overrides (all optional) — consumed by the Node installer:
+#   OURS_HARNESSES="codex hermes"            harnesses to set up (space/comma; or "all"/"none")
 #   OURS_SERVICE=yes|no                      install the daemon as a persistent service
+#   OURS_BROKER="wss://broker1.ours.network" broker address (default: keep the daemon's current)
+#   OURS_PORT=3050                           daemon HTTP port (default: keep the daemon's current)
 #   OURS_ASSUME_YES=1                        accept defaults; never prompt (implies no tty needed)
 #   OURS_NPM="npm"                           npm binary to use
+#   OURS_INSTALLER_MJS=/path/install.mjs     run this Node installer directly (dev/testing)
+#   OURS_INSTALLER_BASE=<url>                base URL to download the installer file set from
 set -euo pipefail
 
-NPM="${OURS_NPM:-npm}"
 say(){ printf 'ours: %s\n' "$1"; }
-hr(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-# --- terminal-aware prompt: read from /dev/tty so `curl | bash` still works ------------
-# Probe by actually OPENING /dev/tty read-write, not by `[ -r/-w ]`: the device node is
-# world rw (crw-rw-rw-), so the permission test PASSES even with no controlling terminal
-# (true headless / CI), and we'd then try to prompt on an unopenable /dev/tty and die. An
-# open() of /dev/tty with no controlling terminal fails (ENXIO), so this only sets TTY when
-# a terminal is genuinely there; otherwise we fall back to env vars / safe do-nothing.
-TTY=""
-if { : <>/dev/tty; } 2>/dev/null; then TTY=/dev/tty; fi
-
-# ask <prompt> <default> -> echoes the answer (default when non-interactive / empty input)
-ask(){
-  local prompt="$1" def="${2:-}" ans=""
-  if [ -n "${OURS_ASSUME_YES:-}" ] || [ -z "$TTY" ]; then printf '%s' "$def"; return 0; fi
-  printf '%s' "$prompt" > "$TTY"
-  IFS= read -r ans < "$TTY" || ans=""
-  [ -z "$ans" ] && ans="$def"
-  printf '%s' "$ans"
-}
-# yes/no helper (default shown in the prompt caps)
-ask_yn(){
-  local prompt="$1" def="${2:-n}" hint="[y/N]" a
-  [ "$def" = "y" ] && hint="[Y/n]"
-  a="$(ask "$prompt $hint " "$def")"
-  case "$a" in [Yy]*) return 0;; *) return 1;; esac
-}
-
-# --- 0) prerequisites ------------------------------------------------------------------
-command -v "$NPM" >/dev/null 2>&1 || { say "npm is required but not found. Install Node.js ≥ 20 first: https://nodejs.org"; exit 1; }
-
-hr "ours.network installer"
-say "This will install the ours daemon and set up the agent harnesses you choose."
-
-# --- 1) daemon: ensure @latest (upgrade, not install-if-missing) + restart on change ---
-hr "1) ours daemon (@ours.network/mcp)"
-# Re-running the installer is an UPGRADE: pull the daemon up to the newest published version even
-# when it is already present, then restart it only if the version actually changed so the RUNNING
-# daemon always ends on latest.
-DAEMON_BEFORE="$(ours-mcp --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-say "ensuring @ours.network/mcp@latest…"
-"$NPM" i -g @ours.network/mcp@latest
-DAEMON_AFTER="$(ours-mcp --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-if ! ours-mcp status >/dev/null 2>&1; then
-  say "starting the daemon…"; ours-mcp start || say "could not auto-start; run 'ours-mcp start' if the tools error."
-elif [ -n "$DAEMON_BEFORE" ] && [ "$DAEMON_BEFORE" != "$DAEMON_AFTER" ]; then
-  say "daemon upgraded (v${DAEMON_BEFORE} → v${DAEMON_AFTER}) — restarting…"; ours-mcp restart || ours-mcp start || true
-else
-  say "daemon already current (v${DAEMON_AFTER:-unknown})."
-fi
-
-# --- 2) persistent service (optional) --------------------------------------------------
-hr "2) persistent service (survives reboot)"
-svc="${OURS_SERVICE:-}"
-if [ -z "$svc" ]; then
-  if ask_yn "Install the ours daemon as a persistent service so it survives reboot?" "n"; then svc=yes; else svc=no; fi
-fi
-if [ "$svc" = "yes" ]; then
-  say "installing the persistent service…"
-  ours-mcp install-service || say "service install failed (non-fatal); you can retry 'ours-mcp install-service' later."
-else
-  say "skipping the persistent service (start it on demand with 'ours-mcp start')."
-fi
-
-# --- 3) select harnesses ---------------------------------------------------------------
-hr "3) agent harnesses"
-# Normalize a selection string (numbers, names, or "all") into canonical harness names.
-canon_harnesses(){
-  local raw="$1" out=""
-  raw="$(printf '%s' "$raw" | tr ',' ' ' | tr '[:upper:]' '[:lower:]')"
-  for tok in $raw; do
-    case "$tok" in
-      all|a)               out="claude-code codex hermes openclaw"; break;;
-      1|claude-code|claude|cc) out="$out claude-code";;
-      2|codex)             out="$out codex";;
-      3|hermes)            out="$out hermes";;
-      4|openclaw)          out="$out openclaw";;
-      none|skip|0)         : ;;
-      *)                   say "  (ignoring unknown harness '$tok')" >&2;;
-    esac
-  done
-  # de-dupe, preserve order
-  printf '%s\n' $out | awk '!seen[$0]++' | tr '\n' ' '
-}
-
-# Interactive checkbox multi-select drawn on the controlling terminal. ↑/↓ (or k/j) move,
-# Space toggles, Enter confirms, a/n select-all / none, q cancels (selects nothing). ALL UI is
-# written to $TTY and keys are read from $TTY, so only the resulting space-separated harness
-# names reach stdout — safe to capture with $(...). Callers gate on $TTY (headless uses
-# OURS_HARNESSES instead). Args are "name=Label" specs.
-checkbox_select(){
-  local names=() labels=() sel=()
-  local spec
-  for spec in "$@"; do names+=("${spec%%=*}"); labels+=("${spec#*=}"); sel+=(0); done
-  local n=${#names[@]} i cur=0 drawn=0
-
-  redraw(){
-    [ "$drawn" = 1 ] && printf '\033[%dA' "$n" > "$TTY"   # rewind over the previous frame
-    drawn=1
-    for ((i=0; i<n; i++)); do
-      local box='[ ]'; [ "${sel[$i]}" = 1 ] && box='[x]'
-      local point='  '; [ "$i" = "$cur" ] && point='> '
-      printf '\r\033[K  %s%s %s\n' "$point" "$box" "${labels[$i]}" > "$TTY"
-    done
-  }
-
-  printf '  Choose harnesses to set up — %s move, %s toggle, %s confirm (a=all, n=none):\n' \
-    $'\033[1m↑/↓\033[0m' $'\033[1mSpace\033[0m' $'\033[1mEnter\033[0m' > "$TTY"
-  redraw
-  local key rest
-  while :; do
-    IFS= read -rsn1 key < "$TTY" || break
-    case "$key" in
-      $'\e')  # escape sequence: grab the rest of an arrow key (already buffered)
-        IFS= read -rsn2 -t 0.1 rest < "$TTY" || rest=''
-        case "$rest" in
-          '[A'|'OA') cur=$(( (cur - 1 + n) % n ));;
-          '[B'|'OB') cur=$(( (cur + 1) % n ));;
-        esac ;;
-      k|K) cur=$(( (cur - 1 + n) % n ));;
-      j|J) cur=$(( (cur + 1) % n ));;
-      ' ') sel[$cur]=$(( 1 - sel[$cur] ));;
-      a|A) for ((i=0; i<n; i++)); do sel[$i]=1; done;;
-      n|N) for ((i=0; i<n; i++)); do sel[$i]=0; done;;
-      q|Q) for ((i=0; i<n; i++)); do sel[$i]=0; done; break;;
-      '') break;;   # Enter
-    esac
-    redraw
-  done
-  local out=''
-  for ((i=0; i<n; i++)); do [ "${sel[$i]}" = 1 ] && out="$out ${names[$i]}"; done
-  printf '%s' "${out# }"
-}
-
-if [ -n "${OURS_HARNESSES:-}" ]; then
-  SELECTED="$(canon_harnesses "$OURS_HARNESSES")"
-elif [ -n "$TTY" ]; then
-  SELECTED="$(canon_harnesses "$(checkbox_select \
-    'claude-code=Claude Code' 'codex=Codex' 'hermes=Hermes' 'openclaw=OpenClaw')")"
-else
-  say "no terminal and no OURS_HARNESSES set — skipping harness setup (daemon is installed)."
-  SELECTED=""
-fi
-SELECTED="$(printf '%s' "$SELECTED" | sed -E 's/^ +| +$//g')"
-
-if [ -z "$SELECTED" ]; then
-  hr "Done"
-  say "Daemon is set up. No harness selected — re-run any time, or install one directly:"
-  say "  npm i -g @ours.network/{hermes,openclaw,codex} && ours-<harness>-install"
+# --- 1) Node.js check + friendly guidance ------------------------------------------------------
+# The Node installer needs Node.js ≥ 20. If it's missing, don't fail cryptically: explain what
+# Node is and how to get it for this OS, point at nodejs.org, and exit cleanly (0) so a piped run
+# ends gracefully rather than with a scary non-zero error.
+if ! command -v node >/dev/null 2>&1; then
+  os="$(uname -s 2>/dev/null || echo unknown)"
+  printf '\n'
+  say "ours needs Node.js (version 20 or newer) to run its installer — it isn't installed yet."
+  say "Node.js is a common, free runtime; here's how to get it:"
+  case "$os" in
+    Darwin)
+      say "  • macOS (Homebrew):  brew install node"
+      say "  • or nvm:            https://github.com/nvm-sh/nvm  then  nvm install --lts" ;;
+    Linux)
+      say "  • Debian/Ubuntu:     https://github.com/nodesource/distributions  (NodeSource)"
+      say "  • or nvm:            https://github.com/nvm-sh/nvm  then  nvm install --lts" ;;
+    *)
+      say "  • Windows/WSL:       install Node.js in WSL, or from https://nodejs.org" ;;
+  esac
+  say "  • Or download the installer for any OS: https://nodejs.org"
+  say "Once Node.js is installed, re-run this command and you're set."
+  printf '\n'
   exit 0
 fi
-say "setting up: $SELECTED"
 
-# --- 4) run each selected harness's installer ------------------------------------------
-# The base install is intentionally identity-free: each harness installer sets up the daemon,
-# the ours MCP server, and the skill only — no identity or wake questions. Wake-on-mail is
-# enabled later from inside the agent (bind an identity, then ask the ours skill to "wake me on
-# new mail"), never here.
-install_npm_harness(){  # $1 = harness (hermes|openclaw|codex)
-  local h="$1" pkg="@ours.network/$1@latest" bin="ours-$1-install"
-  hr "→ $h"
-  # @latest bypasses a stale global so a re-run upgrades the plugin (and its bundled skill), not
-  # just re-runs the old one. The harness bin then ensures the daemon @latest + cleans legacy bits.
-  say "installing $pkg…"; "$NPM" i -g "$pkg"
-  say "running $bin"
-  "$bin"
-}
-
-FAILED=""; INSTALLED=""
-for h in $SELECTED; do
-  case "$h" in
-    hermes|openclaw|codex)
-      # These install automatically. On success, print a clear ✓ line; the final summary lists them.
-      if install_npm_harness "$h"; then
-        say "✓ $h installed and working."
-        INSTALLED="$INSTALLED $h"
-      else
-        FAILED="$FAILED $h"; say "✗ $h setup failed (continuing)."
-      fi
-      ;;
-    claude-code)
-      hr "→ claude-code"
-      # Claude Code plugins install from its in-app marketplace, not a shell bin — the installer
-      # cannot do it for you. Print the two commands and STOP so they can't scroll past unseen;
-      # wait for an explicit continue on the tty (headless just prints and proceeds).
-      say "Claude Code installs its plugin from its in-app marketplace — the installer can't do"
-      say "this part for you. Inside your Claude Code session, run these TWO commands:"
-      printf '\n    /plugin marketplace add adapt-toolkit/ours-claude-marketplace\n    /plugin install ours.network\n\n'
-      say "(The daemon this installer set up is what that plugin talks to.)"
-      if [ -n "$TTY" ] && [ -z "${OURS_ASSUME_YES:-}" ]; then
-        printf '  Copy the 2 commands above and run them inside Claude Code, then press Enter to continue… ' > "$TTY"
-        IFS= read -r _ < "$TTY" || true
-      fi
-      INSTALLED="$INSTALLED claude-code"
-      ;;
-  esac
-done
-
-# --- done ------------------------------------------------------------------------------
-hr "Done"
-say "ours daemon: $(command -v ours-mcp)"
-# Version echo — confirm the user is on latest (daemon + each installed plugin).
-say "versions:"
-say "  daemon: $(ours-mcp --version 2>/dev/null | head -1 || echo 'unknown')"
-for h in $INSTALLED; do
-  case "$h" in
-    hermes|openclaw|codex)
-      say "  $h: $("$NPM" ls -g "@ours.network/$h" 2>/dev/null | grep -oE "@ours\.network/$h@[0-9][0-9.]*" | head -1 || echo "@ours.network/$h (not a global install)")";;
-    claude-code)
-      say "  claude-code: installed from the Claude Code in-app marketplace (version shown there)";;
-  esac
-done
-if [ -n "$INSTALLED" ]; then
-  say "installed:"
-  for h in $INSTALLED; do say "  ✓ $h"; done
+# --- 2) locate the Node installer --------------------------------------------------------------
+# Preference order: explicit override (dev/testing) → local sibling (clone) → download (piped).
+MJS=""
+if [ -n "${OURS_INSTALLER_MJS:-}" ] && [ -f "${OURS_INSTALLER_MJS}" ]; then
+  MJS="${OURS_INSTALLER_MJS}"
+else
+  # dirname of THIS script (empty/curl → not a real path, sibling check simply misses).
+  SELF="${BASH_SOURCE[0]:-$0}"
+  DIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd || true)"
+  if [ -n "$DIR" ] && [ -f "$DIR/install.mjs" ]; then
+    MJS="$DIR/install.mjs"
+  fi
 fi
-if [ -n "$FAILED" ]; then say "note: failed to fully set up:$FAILED — re-run or install those directly."; fi
-say "Reload each harness (Hermes/OpenClaw: 'openclaw gateway restart' / '/reload-mcp'; Codex: next session) to load the ours tools."
-hr "Optional: get woken on new mail"
-say "This install does NOT set up wake-on-mail — you enable it in-session from inside your agent."
-say "Open the ours skill in your harness, bind (or create) an identity, then ask it to \"wake me on"
-say "new mail\": the agent tails \`ours-mcp watch\` (the same stream Claude Code's Monitor uses) and"
-say "reacts to each message as it arrives. (In Claude Code this runs non-blocking in the background;"
-say "in Hermes/OpenClaw/Codex the watch blocks the session — press ESCAPE to interrupt.) See each"
-say "plugin's README \"Optional: get woken on new mail\"."
+
+CLEANUP=""
+if [ -z "$MJS" ]; then
+  # Piped run: download the (small, stable) installer file set, preserving the lib/ layout.
+  BASE="${OURS_INSTALLER_BASE:-https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer}"
+  fetch(){ if command -v curl >/dev/null 2>&1; then curl -fsSL "$1"; else wget -qO- "$1"; fi; }
+  TMP="$(mktemp -d)"; CLEANUP="$TMP"
+  mkdir -p "$TMP/lib"
+  say "fetching the ours installer…"
+  for f in install.mjs lib/ui.mjs lib/logic.mjs lib/prompt.mjs; do
+    if ! fetch "$BASE/$f" > "$TMP/$f" 2>/dev/null; then
+      say "could not download the installer ($BASE/$f). Check your connection and retry."
+      rm -rf "${TMP:?}"; exit 1
+    fi
+  done
+  MJS="$TMP/install.mjs"
+fi
+
+# --- 3) run the Node installer -----------------------------------------------------------------
+# Keep it in the foreground so its /dev/tty prompts reach the user. Clean up any temp download.
+set +e
+node "$MJS"
+rc=$?
+set -e
+[ -n "$CLEANUP" ] && rm -rf "${CLEANUP:?}"
+exit "$rc"

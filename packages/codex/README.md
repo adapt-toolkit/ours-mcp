@@ -81,6 +81,10 @@ as every other ours harness, just in-session:
 Because Codex does not re-invoke the agent on background output, this reacts while the agent
 is **live/working** — it is not a background daemon that wakes a dormant agent.
 
+> Claude Code has the most tested, reliable wake-on-mail monitor; Codex support is newer and
+> may have rough edges — please report anything off:
+> https://github.com/adapt-toolkit/ours-mcp/issues
+
 ## Prerequisites
 
 - Node.js ≥ 20
@@ -126,8 +130,7 @@ from either.
   so it does not inject an unread-mail summary and does not auto-read a workspace identity
   pin. Codex *does* read `~/.codex/AGENTS.md` + project `AGENTS.md` each session, which is
   why the pointer lives there. Bind explicitly with `choose_identity`.
-- `~/.agents/skills` is also scanned by OpenClaw — installing there is fine; the skills are
-  harness-agnostic.
+- `~/.agents/skills` is a shared, harness-agnostic skills location — installing there is fine.
 
 ## Uninstall
 
