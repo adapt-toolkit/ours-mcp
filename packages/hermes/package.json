@@ -1,0 +1,50 @@
+{
+  "name": "@ours.network/hermes",
+  "version": "0.1.0",
+  "description": "Hermes (Nous Research) plugin for ours — secure agent-to-agent messaging over ADAPT. Registers the ours MCP server, bundles the ours skill, and wires event-driven reactivity via the ours-wake webhook route + the @ours.network/connector watcher.",
+  "type": "module",
+  "license": "FSL-1.1-Apache-2.0",
+  "author": "Adapt Toolkit",
+  "homepage": "https://github.com/adapt-toolkit/ours-mcp/tree/main/packages/hermes#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adapt-toolkit/ours-mcp.git",
+    "directory": "packages/hermes"
+  },
+  "bugs": {
+    "url": "https://github.com/adapt-toolkit/ours-mcp/issues"
+  },
+  "keywords": [
+    "hermes",
+    "nous",
+    "plugin",
+    "mcp",
+    "a2a",
+    "adapt",
+    "messaging",
+    "ours.network"
+  ],
+  "files": [
+    "skills",
+    "config",
+    "bin",
+    "install.sh",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "ours-hermes-install": "bin/ours-hermes-install.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "install-plugin": "bash install.sh",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@ours.network/connector": "0.1.0"
+  }
+}

@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 #
-# Bumps BOTH workspace versions (@ours.network/mcp and @ours.network/claude-code)
-# in one [skip ci] commit, re-pins the plugin's exact core dependency to the new
-# core version, refreshes the lockfile, and pushes. Each package bumps from
-# max(local, npm-published) so a locally published version can never collide.
+# Bumps every publishable @ours.network workspace version in one [skip ci] commit, re-pins
+# each plugin's exact internal dependency to the freshly bumped version, refreshes the
+# lockfile, and pushes. Each package bumps from max(local, npm-published) so a locally
+# published version can never collide.
+#
+# Managed packages (publish order = dependency order):
+#   @ours.network/mcp        packages/core         (no internal deps)
+#   @ours.network/connector  packages/connector    (no internal deps)
+#   @ours.network/claude-code packages/claude-code (pins @ours.network/mcp)
+#   @ours.network/hermes     packages/hermes       (pins @ours.network/connector)
+#   @ours.network/openclaw   packages/openclaw     (pins @ours.network/connector)
+#   @ours.network/codex      packages/codex        (pins @ours.network/connector)
+# (packages/installer is private → never bumped or published.)
 #
 # Bump level comes from the HEAD commit subject (Conventional Commits):
 #   feat: minor · fix: patch · !/BREAKING: major
@@ -12,10 +21,16 @@
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-CORE_PKG=packages/core/package.json
-PLUGIN_PKG=packages/claude-code/package.json
-CORE_NAME="@ours.network/mcp"
-PLUGIN_NAME="@ours.network/claude-code"
+
+# name|json-path|pin-dep (pin-dep empty = none). Order matters: publish/bump in this order.
+MANAGED=(
+  "@ours.network/mcp|packages/core/package.json|"
+  "@ours.network/connector|packages/connector/package.json|"
+  "@ours.network/claude-code|packages/claude-code/package.json|@ours.network/mcp"
+  "@ours.network/hermes|packages/hermes/package.json|@ours.network/connector"
+  "@ours.network/openclaw|packages/openclaw/package.json|@ours.network/connector"
+  "@ours.network/codex|packages/codex/package.json|@ours.network/connector"
+)
 
 emit() { [[ -n "${GITHUB_OUTPUT:-}" ]] && printf '%s\n' "$1" >> "$GITHUB_OUTPUT" || true; }
 log()  { printf '[bump] %s\n' "$*"; }
@@ -73,32 +88,52 @@ patch_version() { # <pkg-json> <old> <new>
     || { echo "[bump] failed to patch version in $1" >&2; exit 1; }
 }
 
-core_old=$(jq -r .version "$CORE_PKG");   core_new=$(next_for "$CORE_PKG" "$CORE_NAME")
-plug_old=$(jq -r .version "$PLUGIN_PKG"); plug_new=$(next_for "$PLUGIN_PKG" "$PLUGIN_NAME")
-log "core:   $core_old -> $core_new"
-log "plugin: $plug_old -> $plug_new"
+pin_dep() { # <pkg-json> <dep-name> <dep-new-version>
+  sed -i -E "s|(\"${2}\"\\s*:\\s*\")[^\"]+(\")|\\1${3}\\2|" "$1"
+  grep -qF "\"${2}\": \"${3}\"" "$1" \
+    || { echo "[bump] failed to pin ${2}@${3} in $1" >&2; exit 1; }
+}
 
-patch_version "$CORE_PKG" "$core_old" "$core_new"
-patch_version "$PLUGIN_PKG" "$plug_old" "$plug_new"
+# Pass 1: compute + apply the version bump for every managed package. Remember new versions.
+declare -A NEWV
+summary=""
+files=(package-lock.json)
+for entry in "${MANAGED[@]}"; do
+  IFS='|' read -r name path _pin <<<"$entry"
+  old=$(jq -r .version "$path"); new=$(next_for "$path" "$name")
+  log "$name: $old -> $new"
+  patch_version "$path" "$old" "$new"
+  NEWV["$name"]="$new"
+  files+=("$path")
+  short=${name#@ours.network/}
+  summary+="${short} v${new}, "
+done
 
-# PIN-SYNC: the plugin depends on the exact core version it was released with.
-sed -i -E "s|(\"${CORE_NAME}\"\\s*:\\s*\")[^\"]+(\")|\\1${core_new}\\2|" "$PLUGIN_PKG"
-grep -qF "\"${CORE_NAME}\": \"${core_new}\"" "$PLUGIN_PKG" \
-  || { echo "[bump] failed to pin ${CORE_NAME}@${core_new} in $PLUGIN_PKG" >&2; exit 1; }
+# Pass 2: PIN-SYNC — each plugin depends on the exact internal version it ships with.
+for entry in "${MANAGED[@]}"; do
+  IFS='|' read -r name path pin <<<"$entry"
+  [[ -z "$pin" ]] && continue
+  pin_dep "$path" "$pin" "${NEWV[$pin]}"
+  log "pinned ${pin}@${NEWV[$pin]} in ${name}"
+done
 
 npm install --package-lock-only --ignore-scripts >/dev/null
 
 git config user.name  "ours-ci-version-bump[bot]"
 git config user.email "ours-ci-version-bump[bot]@users.noreply.github.com"
-git add "$CORE_PKG" "$PLUGIN_PKG" package-lock.json
+git add "${files[@]}"
 git diff --cached --quiet && no_bump "no changes after patch"
 
-git commit -m "chore(release): mcp v${core_new}, claude-code v${plug_new} [skip ci]
+git commit -m "chore(release): ${summary%, } [skip ci]
 
 Triggered by $(git rev-parse --short HEAD): $(printf '%s' "$subject" | head -c 200)"
 git push origin "HEAD:${GITHUB_REF_NAME:-main}"
 
 emit "bumped=true"
 emit "new-sha=$(git rev-parse HEAD)"
-emit "core-version=${core_new}"
-emit "plugin-version=${plug_new}"
+emit "core-version=${NEWV[@ours.network/mcp]}"
+emit "connector-version=${NEWV[@ours.network/connector]}"
+emit "plugin-version=${NEWV[@ours.network/claude-code]}"
+emit "hermes-version=${NEWV[@ours.network/hermes]}"
+emit "openclaw-version=${NEWV[@ours.network/openclaw]}"
+emit "codex-version=${NEWV[@ours.network/codex]}"

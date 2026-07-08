@@ -1,0 +1,47 @@
+{
+  "name": "@ours.network/connector",
+  "version": "0.1.0",
+  "description": "Reactivity connector for any webhook + shell-tool-calling harness to receive ours.network messages, with per-subagent (multi-identity) sole-drainer routing. Generalized from the a2adapt/Hermes bridge.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Adapt Toolkit",
+  "keywords": [
+    "ours.network",
+    "ours-mcp",
+    "a2a",
+    "adapt",
+    "e2e",
+    "messaging",
+    "connector",
+    "webhook",
+    "multi-identity"
+  ],
+  "bin": {
+    "ours-connector-setup": "connector-identity-setup.mjs",
+    "ours-connector-inbox": "connector-inbox-count.mjs"
+  },
+  "files": [
+    "connector.config.sh",
+    "connector-watch.sh",
+    "connector-reference-handler.mjs",
+    "connector-identity-setup.mjs",
+    "connector-inbox-count.mjs",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "setup": "node connector-identity-setup.mjs",
+    "watch": "bash connector-watch.sh",
+    "gateway": "node connector-reference-handler.mjs",
+    "inbox": "node connector-inbox-count.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {}
+}
