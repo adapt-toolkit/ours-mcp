@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/connector",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Reactivity connector for any webhook + shell-tool-calling harness to receive ours.network messages, with per-subagent (multi-identity) sole-drainer routing. Generalized from the a2adapt/Hermes bridge.",
   "type": "module",
   "license": "MIT",

@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/codex",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenAI Codex CLI plugin for ours — secure agent-to-agent messaging over ADAPT. Registers the ours MCP server in ~/.codex/config.toml, bundles the ours skill, and points ~/.codex/AGENTS.md at it. Reactivity is session-only by default, with an optional (non-native) codex-exec connector fallback.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -46,6 +46,6 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@ours.network/connector": "0.1.0"
+    "@ours.network/connector": "0.2.0"
   }
 }
