@@ -40,7 +40,9 @@ test('install.sh sets up skills + the ours MCP server (no route/secret); second 
     const cfg = JSON.parse(cfgText); // must be valid strict JSON
     assert.equal(cfg.mcp.servers.ours.command, 'ours-mcp', 'ours MCP server present');
     assert.deepEqual(cfg.mcp.servers.ours.args, ['proxy']);
-    assert.ok(cfgText.includes('ours.network plugin'), 'managed sentinel present');
+    // No synthetic root markers — OpenClaw's strict schema rejects unrecognized root keys, so the
+    // config must be `openclaw doctor`-clean (idempotency is keyed off mcp.servers.ours itself).
+    assert.deepEqual(Object.keys(cfg).filter((k) => k.startsWith('//')), [], 'no `//` root keys');
     assert.equal(cfg.plugins, undefined, 'no webhook routes written');
 
     // the connector/gateway approach is gone: no connector env, no gateway .env secret
@@ -48,14 +50,13 @@ test('install.sh sets up skills + the ours MCP server (no route/secret); second 
     assert.ok(!existsSync(join(O, '.env')), 'no gateway dotenv secret written');
     assert.doesNotMatch(cfgText, /ours-wake|sessionKey|secret/, 'no route/secret in config');
 
-    // second run: idempotent — sentinel appears once
+    // second run: idempotent — config is byte-for-byte unchanged and still doctor-clean
     run(O);
     const cfgText2 = readFileSync(join(O, 'openclaw.json'), 'utf8');
-    assert.equal(
-      (cfgText2.match(/ours\.network plugin \(managed block\)/g) || []).length,
-      1,
-      'block not duplicated',
-    );
+    assert.equal(cfgText2, cfgText, 'config unchanged on re-run (idempotent)');
+    const cfg2 = JSON.parse(cfgText2);
+    assert.equal(cfg2.mcp.servers.ours.command, 'ours-mcp', 'our server still present');
+    assert.deepEqual(Object.keys(cfg2).filter((k) => k.startsWith('//')), [], 'still no `//` root keys');
   } finally {
     rmSync(O, { recursive: true, force: true });
   }

@@ -8,30 +8,32 @@
 //   - file empty/missing            -> write a fresh minimal JSON with our keys
 //   - file is STRICT JSON (parses)  -> deep-merge our keys idempotently, pretty-print back
 //   - file is JSON5 / unparseable   -> print the block and ask the user to merge by hand
-//   - our sentinel already present  -> noop (idempotent)
-// A sentinel key ("//ours" marker) inside the config makes a second run a no-op.
+//   - mcp.servers.ours already ours -> noop (idempotent)
+//
+// IDEMPOTENCY IS KEYED OFF THE REAL `mcp.servers.ours` ENTRY — never a synthetic marker. An
+// earlier build stamped a `"//ours"` sentinel at the config ROOT, but OpenClaw's strict schema
+// REJECTS unrecognized root keys (`openclaw doctor`: "Invalid config: <root>: Unrecognized key:
+// //ours"). So we (a) never write it, and (b) STRIP any pre-existing `//ours` on every rewrite so
+// a config an old installer broke self-heals to doctor-clean on upgrade.
 //
 // Reactivity needs NO config here: wake-on-mail is the agent tailing `ours-mcp watch` in-session
 // (see the ours skill) — there is no webhook route, secret, gateway, or per-identity session.
 //
-// Pure functions (planConfigInstall / renderConfig / buildOursConfig) are unit-tested;
-// main() does the file IO. Zero dependencies.
+// Pure functions (planConfigInstall / renderConfig / buildOursConfig / hasOursServer) are
+// unit-tested; main() does the file IO. Zero dependencies.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-// Sentinel marker: a stable string we stamp into the managed config so a second run recognizes
-// its own prior write (in both parsed objects and raw text).
-export const SENTINEL = 'ours.network plugin (managed block)';
+// The legacy root marker an older installer wrote. OpenClaw's strict schema rejects it, so we
+// only ever REMOVE it (never write it) — kept as a named constant for the strip step + tests.
+export const LEGACY_ROOT_MARKER = '//ours';
 
-// Build the ours config fragment as a plain object: just the MCP server. This is what we
-// deep-merge into a strict-JSON config, and (pretty-printed) what we write to a fresh file /
-// print for a manual merge.
+// Build the ours config fragment: JUST the MCP server, pointing at the globally-installed daemon
+// proxy. No synthetic markers — nothing that OpenClaw's schema would reject.
 export function buildOursConfig() {
   return {
-    // sentinel: makes a re-run a provable no-op and marks the block for uninstall.
-    '//ours': SENTINEL,
     mcp: {
       servers: {
         ours: {
@@ -41,6 +43,15 @@ export function buildOursConfig() {
       },
     },
   };
+}
+
+// Is OUR mcp server already registered in a PARSED config? This is the idempotency signal.
+export function hasOursServer(cfg) {
+  return !!(
+    cfg && typeof cfg === 'object' &&
+    cfg.mcp && cfg.mcp.servers && cfg.mcp.servers.ours &&
+    cfg.mcp.servers.ours.command === 'ours-mcp'
+  );
 }
 
 // Deep-merge src into dst (objects merged recursively; scalars/arrays overwrite). Returns
@@ -59,10 +70,15 @@ function deepMerge(dst, src) {
 }
 
 // Render the full config text to write, given the (possibly empty) existing text and our
-// fragment. Only called on the `write` and `merge` paths; pretty-printed strict JSON.
+// fragment. Only called on the `write` and `merge` paths; pretty-printed strict JSON. Strips the
+// legacy `//ours` root marker so an old, doctor-rejected config self-heals on upgrade.
 export function renderConfig(existingText, fragment) {
   const t = (existingText ?? '').trim();
   const base = t ? JSON.parse(t) : {};
+  if (base && typeof base === 'object' && !Array.isArray(base) &&
+      Object.prototype.hasOwnProperty.call(base, LEGACY_ROOT_MARKER)) {
+    delete base[LEGACY_ROOT_MARKER]; // heal: OpenClaw's strict schema rejects this root key
+  }
   const merged = deepMerge(base, fragment);
   return JSON.stringify(merged, null, 2) + '\n';
 }
@@ -72,14 +88,26 @@ export function renderConfig(existingText, fragment) {
 export function planConfigInstall(text) {
   const t = (text ?? '').trim();
   if (!t) return { action: 'write', reason: 'no existing config' };
-  if (t.includes(SENTINEL)) return { action: 'noop', reason: 'ours block already present' };
+  let parsed;
   try {
-    JSON.parse(t);
+    parsed = JSON.parse(t);
   } catch {
     // JSON5 / comments / unquoted keys — a strict rewrite would drop them. Hand it off.
     return { action: 'manual', reason: 'openclaw.json is not strict JSON (JSON5/comments); merge by hand to avoid clobbering it' };
   }
-  return { action: 'merge', reason: 'strict JSON without our block; safe to deep-merge' };
+  // Idempotent ONLY when our real MCP server is present AND there is no legacy `//ours` root key
+  // left to heal — otherwise deep-merge (which adds our server and/or strips the bad marker).
+  const hasLegacy = parsed && typeof parsed === 'object' &&
+    Object.prototype.hasOwnProperty.call(parsed, LEGACY_ROOT_MARKER);
+  if (hasOursServer(parsed) && !hasLegacy) {
+    return { action: 'noop', reason: 'mcp.servers.ours already present' };
+  }
+  return {
+    action: 'merge',
+    reason: hasLegacy
+      ? 'strict JSON with a legacy //ours marker; deep-merge + strip the marker'
+      : 'strict JSON without our mcp server; safe to deep-merge',
+  };
 }
 
 function main() {

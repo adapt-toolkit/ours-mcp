@@ -114,6 +114,9 @@ test('legacy connector cleanup: connector files, gateway .env secret, and ours-w
     const cfg = JSON.parse(readFileSync(join(O, 'openclaw.json'), 'utf8'));
     assert.equal(cfg.plugins?.entries?.webhooks?.config?.routes?.['ours-wake-agent1'], undefined, 'ours-wake route removed');
     assert.equal(cfg.mcp.servers.ours.command, 'ours-mcp', 'mcp.servers.ours kept');
+    // legacy //ours root marker (which OpenClaw's strict schema rejects) is healed away
+    assert.equal(cfg['//ours'], undefined, 'legacy //ours root marker stripped');
+    assert.deepEqual(Object.keys(cfg).filter((k) => k.startsWith('//')), [], 'config is doctor-clean (no `//` root keys)');
   } finally {
     rmSync(D, { recursive: true, force: true });
   }

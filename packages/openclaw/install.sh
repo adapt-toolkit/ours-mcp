@@ -61,20 +61,23 @@ legacy_cleanup(){
     grep -v '^OURS_WAKE_SECRET=' "$OPENCLAW_DIR/.env" > "$tmp" || true
     mv "$tmp" "$OPENCLAW_DIR/.env" && say "removed legacy OURS_WAKE_SECRET from $OPENCLAW_DIR/.env"
   fi
-  # Remove ONLY the legacy ours-wake* webhook routes from openclaw.json; keep mcp.servers.ours
-  # (the current block) intact. Strict-JSON only — a JSON5/comment config is left untouched.
+  # Remove the legacy connector-era bits from openclaw.json — the ours-wake* webhook routes AND
+  # the `//ours` ROOT marker an old installer stamped (OpenClaw's strict schema rejects it:
+  # `openclaw doctor` → "Unrecognized key: //ours"). Keep mcp.servers.ours (the current block)
+  # intact. Strict-JSON only — a JSON5/comment config is left untouched (handled by config-install).
   if [ -f "$OPENCLAW_CONFIG" ]; then
     node -e '
       const fs=require("fs"); const f=process.argv[1];
       let raw; try{raw=fs.readFileSync(f,"utf8");}catch{process.exit(0);}
       let cfg; try{cfg=JSON.parse(raw);}catch{process.exit(0);}
+      let changed=false;
+      if(cfg&&typeof cfg==="object"&&Object.prototype.hasOwnProperty.call(cfg,"//ours")){delete cfg["//ours"];changed=true;}
       const w=cfg.plugins&&cfg.plugins.entries&&cfg.plugins.entries.webhooks;
       const routes=w&&w.config&&w.config.routes;
-      let changed=false;
       if(routes&&typeof routes==="object"){
         for(const k of Object.keys(routes)) if(k.indexOf("ours-wake")===0){delete routes[k];changed=true;}
       }
-      if(changed){fs.writeFileSync(f,JSON.stringify(cfg,null,2)+"\n");console.log("ours-install: removed legacy ours-wake route(s) from "+f);}
+      if(changed){fs.writeFileSync(f,JSON.stringify(cfg,null,2)+"\n");console.log("ours-install: healed legacy openclaw.json (removed //ours marker and/or ours-wake route(s)) in "+f);}
     ' "$OPENCLAW_CONFIG" || true
   fi
 }
