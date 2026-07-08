@@ -93,7 +93,7 @@ function removeClaudeCode() {
   say("Claude Code's plugin lives in its in-app marketplace — the uninstaller can't remove it.");
   say('Inside your Claude Code session, run:');
   line('');
-  line('    /plugin uninstall ours.network');
+  line('    /plugin uninstall ours');
   line('    /plugin marketplace remove adapt-toolkit/ours-claude-marketplace');
   line('');
 }
