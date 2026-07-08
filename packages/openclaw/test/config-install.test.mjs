@@ -12,10 +12,11 @@ import {
   renderConfig,
   buildOursConfig,
   routeNameFor,
+  missingRoutes,
   SENTINEL,
 } from '../bin/openclaw-config-install.mjs';
 
-const FRAGMENT = buildOursConfig({ webhookPort: 8644, identities: ['Alice', 'Bob'] });
+const FRAGMENT = buildOursConfig({ webhookPort: 18789, identities: ['Alice', 'Bob'] });
 
 test('empty / whitespace config -> write', () => {
   assert.equal(planConfigInstall('').action, 'write');
@@ -31,6 +32,27 @@ test('already-installed config (sentinel present) -> noop', () => {
   const cfg = renderConfig('', FRAGMENT);
   assert.ok(cfg.includes(SENTINEL));
   assert.equal(planConfigInstall(cfg).action, 'noop');
+});
+
+test('re-run with the SAME identities stays a noop (idempotent)', () => {
+  const fragment = buildOursConfig({ identities: ['Alice'] });
+  const installed = renderConfig('', fragment); // sentinel + Alice route
+  assert.equal(planConfigInstall(installed, fragment).action, 'noop');
+  assert.deepEqual(missingRoutes(JSON.parse(installed), fragment), []);
+});
+
+test('re-run with a NEW identity merges the missing route (not a blanket noop)', () => {
+  const installed = renderConfig('', buildOursConfig({ identities: ['Alice'] }));
+  const grown = buildOursConfig({ identities: ['Alice', 'Bob'] });
+  // sentinel is present, but Bob's route is missing → must merge, not noop.
+  assert.deepEqual(missingRoutes(JSON.parse(installed), grown), [routeNameFor('Bob')]);
+  assert.equal(planConfigInstall(installed, grown).action, 'merge');
+  // and the merge actually adds Bob while preserving Alice + the sentinel.
+  const out = renderConfig(installed, grown);
+  const parsed = JSON.parse(out);
+  assert.ok(parsed.plugins.entries.webhooks.config.routes[routeNameFor('Alice')], 'Alice preserved');
+  assert.ok(parsed.plugins.entries.webhooks.config.routes[routeNameFor('Bob')], 'Bob added on re-run');
+  assert.equal(parsed['//ours'], SENTINEL, 'sentinel preserved');
 });
 
 test('JSON5 / comments (not strict JSON) -> manual (never clobber)', () => {

@@ -315,7 +315,7 @@ The path, per identity, is **observe → wake → drain**:
    non-draining). It tails that identity's `notifications.log` and emits one **body-free** line
    per *new* message.
 2. **WAKE** — on each line the watcher sends a `POST` (application/json) to that identity's
-   OpenClaw route `path` (`http://localhost:8644/plugins/webhooks/ours-wake-<identity>`),
+   OpenClaw route `path` (`http://localhost:18789/plugins/webhooks/ours-wake-<identity>`),
    authenticated by a **static bearer token** — `Authorization: Bearer <token>` (or
    `x-openclaw-webhook-secret: <token>`), **not** HMAC. The connector sends that token via its
    `CONNECTOR_AUTH_HEADER` knob; it also still sends its HMAC header, which OpenClaw simply ignores.

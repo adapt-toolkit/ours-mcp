@@ -45,7 +45,7 @@ function sessionKeyFor(identity) {
 // Build the ours config fragment as a plain object: the MCP server + one webhooks route per
 // identity. This is what we deep-merge into a strict-JSON config, and (pretty-printed) what
 // we write to a fresh file / print for a manual merge.
-export function buildOursConfig({ webhookPort = 8644, identities = [] } = {}) {
+export function buildOursConfig({ webhookPort = 18789, identities = [] } = {}) {
   const routes = {};
   for (const id of identities) {
     const name = routeNameFor(id);
@@ -104,17 +104,40 @@ export function renderConfig(existingText, fragment) {
   return JSON.stringify(merged, null, 2) + '\n';
 }
 
-// Decide how to install given the current config text. Never returns a plan that could
-// corrupt / silently clobber a user's JSON5 file.
-export function planConfigInstall(text) {
+// Which of the fragment's webhook routes are NOT yet present in the parsed config. Used to
+// keep route creation idempotent across re-runs: a re-run with a NEW identity adds a route,
+// so the sentinel alone must not short-circuit to a no-op (that would leave the watcher poking
+// a route OpenClaw never registered → 404 forever). Returns [] when nothing is missing.
+export function missingRoutes(parsedConfig, fragment) {
+  const want = fragment?.plugins?.entries?.webhooks?.config?.routes || {};
+  const have = parsedConfig?.plugins?.entries?.webhooks?.config?.routes || {};
+  return Object.keys(want).filter((name) => !(name in have));
+}
+
+// Decide how to install given the current config text (and, optionally, the fragment we intend
+// to install so we can reconcile per-identity routes on re-run). Never returns a plan that
+// could corrupt / silently clobber a user's JSON5 file.
+export function planConfigInstall(text, fragment) {
   const t = (text ?? '').trim();
   if (!t) return { action: 'write', reason: 'no existing config' };
-  if (t.includes(SENTINEL)) return { action: 'noop', reason: 'ours block already present' };
+  const hasSentinel = t.includes(SENTINEL);
+  // Without a fragment to reconcile against, keep the legacy short-circuit: sentinel ⇒ noop.
+  if (hasSentinel && !fragment) return { action: 'noop', reason: 'ours block already present' };
+  let parsed;
   try {
-    JSON.parse(t);
+    parsed = JSON.parse(t);
   } catch {
     // JSON5 / comments / unquoted keys — a strict rewrite would drop them. Hand it off.
+    // (Even if our sentinel is present, we cannot safely rewrite JSON5 to add routes.)
     return { action: 'manual', reason: 'openclaw.json is not strict JSON (JSON5/comments); merge by hand to avoid clobbering it' };
+  }
+  if (hasSentinel) {
+    // Our block is installed. A plain re-run is a no-op, BUT a re-run with new identities
+    // introduces routes that aren't in the config yet — deep-merge those in (idempotent for
+    // routes that already exist).
+    const missing = missingRoutes(parsed, fragment);
+    if (missing.length) return { action: 'merge', reason: `ours block present; adding ${missing.length} missing route(s): ${missing.join(', ')}` };
+    return { action: 'noop', reason: 'ours block already present; all identity routes exist' };
   }
   return { action: 'merge', reason: 'strict JSON without our block; safe to deep-merge' };
 }
@@ -126,11 +149,11 @@ function main() {
     process.exit(2);
   }
   const identities = (process.env.CONNECTOR_IDENTITIES || '').split(/\s+/).filter(Boolean);
-  const webhookPort = Number(process.env.OURS_WEBHOOK_PORT || 8644);
+  const webhookPort = Number(process.env.OURS_WEBHOOK_PORT || 18789);
   const cfgPath = process.env.OPENCLAW_CONFIG || join(homedir(), '.openclaw', 'openclaw.json');
   const existing = existsSync(cfgPath) ? readFileSync(cfgPath, 'utf8') : '';
   const fragment = buildOursConfig({ webhookPort, identities });
-  const plan = planConfigInstall(existing);
+  const plan = planConfigInstall(existing, fragment);
 
   if (plan.action === 'noop') {
     console.log(`ours: openclaw.json already has the ours block (${cfgPath}); nothing to do.`);

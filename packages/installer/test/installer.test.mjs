@@ -87,6 +87,28 @@ test('installs the persistent service when OURS_SERVICE=yes', () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
+test('truly-headless (no controlling tty, no OURS_HARNESSES) does the safe skip, not exit 1', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
+  const bin = join(tmp, 'bin');
+  execFileSync('mkdir', ['-p', bin]);
+  const log = join(tmp, 'calls.log');
+  writeFileSync(log, '');
+  fakeBins(bin, ['npm', 'ours-mcp'], { daemonRunning: true });
+
+  // `setsid` detaches from the controlling terminal, so /dev/tty cannot be opened — the true
+  // headless/CI case. With no OURS_HARNESSES and no OURS_ASSUME_YES the installer must reach
+  // the documented "no terminal … skipping harness setup" branch and exit 0, NOT crash trying
+  // to prompt on an unopenable /dev/tty. `--wait` so we get the child's real exit status.
+  const out = execFileSync('setsid', ['--wait', 'bash', INSTALL], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log },
+    stdio: 'pipe', encoding: 'utf8',
+  }); // execFileSync throws if exit code is non-zero — a regression would fail here.
+  assert.match(out, /no terminal and no OURS_HARNESSES set/, 'must take the documented safe-skip branch');
+  const calls = readFileSync(log, 'utf8');
+  assert.doesNotMatch(calls, /ours-\w+-install/, 'no harness installer should run headless');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
 test('claude-code selection prints marketplace steps, does not need a shell bin', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
   const bin = join(tmp, 'bin');

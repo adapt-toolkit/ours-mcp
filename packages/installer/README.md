@@ -1,11 +1,14 @@
 # @ours.network/installer
 
 The one-shot **ours.network** installer — the capstone over the per-harness plugin
-installers. Hosted at `ours.network/install.sh` and meant to be run as:
+installers. Hosted on git and meant to be run as:
 
 ```sh
-curl -fsSL https://ours.network/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash
 ```
+
+(A short `https://ours.network/install.sh` redirect to the same file is a future optional
+convenience — the git raw URL above is the canonical source.)
 
 It:
 

@@ -13,7 +13,7 @@
 #   CONNECTOR_DIR              path to @ours.network/connector (auto-detected)
 #   CONNECTOR_IDENTITIES       space-separated identities to watch
 #   OURS_WAKE_SECRET           shared static bearer token (generated if unset)
-#   OURS_WEBHOOK_PORT          OpenClaw gateway port      (default 8644)
+#   OURS_WEBHOOK_PORT          OpenClaw gateway port      (default 18789)
 #   OURS_INSTALL_SKIP_DAEMON=1 skip daemon install/start
 #   OURS_INSTALL_SKIP_WATCHER=1 skip starting the watcher
 set -euo pipefail
@@ -23,7 +23,9 @@ OPENCLAW_DIR="${OPENCLAW_DIR:-$HOME/.openclaw}"
 OPENCLAW_CONFIG="$OPENCLAW_DIR/openclaw.json"
 SKILLS_DEST="$OPENCLAW_DIR/skills"
 ENV_FILE="$OPENCLAW_DIR/ours-connector.env"
-OURS_WEBHOOK_PORT="${OURS_WEBHOOK_PORT:-8644}"
+# OpenClaw's gateway default port is 18789 (resolution: --port → OPENCLAW_GATEWAY_PORT →
+# gateway.port → 18789, per docs.openclaw.ai). OURS_WEBHOOK_PORT overrides it here.
+OURS_WEBHOOK_PORT="${OURS_WEBHOOK_PORT:-18789}"
 
 say(){ printf 'ours-install: %s\n' "$1"; }
 
@@ -64,11 +66,12 @@ done
 # connector's CONNECTOR_AUTH_HEADER. (The connector still sends its HMAC header too; OpenClaw
 # ignores it.)
 if [ -z "${OURS_WAKE_SECRET:-}" ] && [ -f "$ENV_FILE" ]; then
-  # shellcheck source=/dev/null
-  . "$ENV_FILE"
-  # the env file records the token as OURS_WAKE_SECRET — reuse it so the routes and the
-  # watcher never drift apart across re-runs.
-  OURS_WAKE_SECRET="${OURS_WAKE_SECRET:-}"
+  # Reuse ONLY the persisted token so the routes and the watcher never drift apart across
+  # re-runs. Extract it in a SUBSHELL so sourcing the env file cannot clobber the current
+  # environment — the file also `export`s OURS_WEBHOOK_PORT (from the prior run), and a naive
+  # `. "$ENV_FILE"` would overwrite a re-run's CLI-provided --port. The file records the token
+  # as OURS_WAKE_SECRET.
+  OURS_WAKE_SECRET="$(. "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${OURS_WAKE_SECRET:-}")"
 fi
 if [ -z "${OURS_WAKE_SECRET:-}" ] || [ "${OURS_WAKE_SECRET:-}" = "CHANGE_ME_local_webhook_hmac" ]; then
   OURS_WAKE_SECRET="$(openssl rand -hex 32)"
@@ -96,6 +99,21 @@ export CONNECTOR_EVENT="ours_wake"
 export OURS_WEBHOOK_PORT="$OURS_WEBHOOK_PORT"
 EOF
 say "wrote connector env: $ENV_FILE"
+
+# --- 3b) put OURS_WAKE_SECRET into the GATEWAY's environment ---------------------------------
+# The webhook routes reference the token via secret {source:"env", id:"OURS_WAKE_SECRET"}, which
+# resolves from the GATEWAY process's environment — NOT from the watcher env above. OpenClaw's
+# gateway loads a global dotenv at ~/.openclaw/.env ($OPENCLAW_STATE_DIR/.env) into its process
+# env (per docs.openclaw.ai: "Global .env at ~/.openclaw/.env … recommended for provider keys"),
+# so we upsert OURS_WAKE_SECRET there. Without this the route's source:env secret can never
+# resolve and every wake would fail auth. Idempotent: replace only our line, keep the user's.
+GATEWAY_ENV="$OPENCLAW_DIR/.env"
+touch "$GATEWAY_ENV"; chmod 600 "$GATEWAY_ENV"
+_gw_tmp="$(mktemp "$OPENCLAW_DIR/.env.XXXXXX")"
+grep -v '^OURS_WAKE_SECRET=' "$GATEWAY_ENV" 2>/dev/null > "$_gw_tmp" || true
+printf 'OURS_WAKE_SECRET=%s\n' "$OURS_WAKE_SECRET" >> "$_gw_tmp"
+mv "$_gw_tmp" "$GATEWAY_ENV"; chmod 600 "$GATEWAY_ENV"
+say "set OURS_WAKE_SECRET in the gateway env: $GATEWAY_ENV (loaded on 'openclaw gateway restart')"
 
 # --- 4) openclaw.json (idempotent, safe merge) ---
 OURS_WAKE_SECRET="$OURS_WAKE_SECRET" CONNECTOR_IDENTITIES="${CONNECTOR_IDENTITIES:-}" \

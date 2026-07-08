@@ -12,6 +12,11 @@
 // (NOT HMAC): the connector must send it via `Authorization: Bearer <token>` (or
 // `x-openclaw-webhook-secret: <token>`). The token the route resolves (env OURS_WAKE_SECRET)
 // MUST equal the connector's CONNECTOR_AUTH_HEADER token — the same shared secret on both ends.
+//
+// The route reads that token from the GATEWAY PROCESS's environment (secret.source == "env"),
+// so OURS_WAKE_SECRET must be present there. The gateway loads a global dotenv at
+// ~/.openclaw/.env on start, so the simplest way is a line `OURS_WAKE_SECRET=<token>` in that
+// file (install.sh does this for you). Default gateway port is 18789.
 {
   // 1) The ours MCP server. Points OpenClaw directly at the globally-installed daemon
   //    proxy (`npm i -g @ours.network/mcp`). Its tools then appear to the OpenClaw agent

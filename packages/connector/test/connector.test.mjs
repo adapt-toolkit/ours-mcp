@@ -26,6 +26,17 @@ const DEFAULT_SECRET = 'CHANGE_ME_local_webhook_hmac';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// The watcher (connector-watch.sh) forks one backgrounded `watch_identity` subshell per
+// identity, each running an infinite observe loop. SIGKILLing only the top-level bash orphans
+// those subshells; they inherit the test's stdio pipes and keep them open, so `node --test`
+// never sees EOF and hangs to the CI timeout. Spawning the watcher `detached: true` makes it a
+// process-group leader (its subshells inherit the group), so killing the whole group here
+// reaps every descendant and lets node exit cleanly.
+function killGroup(proc) {
+  try { process.kill(-proc.pid, 'SIGKILL'); } catch { /* group already gone */ }
+  try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+}
+
 // A one-shot recording HTTP server: answers GET readiness probes, records the
 // first POST (headers + body) and replies with `okCode`.
 function recordingServer(okCode = 200) {
@@ -115,6 +126,7 @@ test('watcher: adds the optional static-token header when CONNECTOR_AUTH_HEADER 
       CONNECTOR_AUTH_HEADER: 'Authorization: Bearer openclaw-token-123',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
   });
   try {
     const req = await Promise.race([firstPost, sleep(8000).then(() => null)]);
@@ -125,7 +137,7 @@ test('watcher: adds the optional static-token header when CONNECTOR_AUTH_HEADER 
     const want = 'sha256=' + crypto.createHmac('sha256', secret).update(req.body).digest('hex');
     assert.equal(req.headers['x-hub-signature-256'], want, 'HMAC-SHA256 still sent alongside the auth header');
   } finally {
-    proc.kill('SIGKILL');
+    killGroup(proc);
     server.close();
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -151,6 +163,7 @@ test('watcher: pokes with X-GitHub-Event + event_type, HMAC-signed', async () =>
       CONNECTOR_WEBHOOK_OK_CODE: '200',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
   });
   try {
     const req = await Promise.race([firstPost, sleep(8000).then(() => null)]);
@@ -166,7 +179,7 @@ test('watcher: pokes with X-GitHub-Event + event_type, HMAC-signed', async () =>
     const want = 'sha256=' + crypto.createHmac('sha256', secret).update(req.body).digest('hex');
     assert.equal(req.headers['x-hub-signature-256'], want, 'HMAC-SHA256 over the exact body');
   } finally {
-    proc.kill('SIGKILL');
+    killGroup(proc);
     server.close();
     rmSync(tmp, { recursive: true, force: true });
   }

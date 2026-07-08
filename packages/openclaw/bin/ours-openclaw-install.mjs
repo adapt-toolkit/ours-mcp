@@ -14,7 +14,7 @@
 // is safe.
 //
 // Usage:
-//   ours-openclaw-install [--identities "Agent1 Agent2"] [--port 8644]
+//   ours-openclaw-install [--identities "Agent1 Agent2"] [--port 18789]
 //                         [--openclaw-dir DIR] [--skip-daemon] [--skip-watcher]
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -44,7 +44,7 @@ function help() {
 
 Options:
   -i, --identities "A B"    ours identities to watch for wake-on-mail (space-separated)
-      --port <n>            OpenClaw gateway port (default 8644)
+      --port <n>            OpenClaw gateway port (default 18789)
       --openclaw-dir <dir>  OpenClaw config+skills root (default ~/.openclaw)
       --skip-daemon         do not install/start the ours daemon
       --skip-watcher        do not start the reactivity watcher

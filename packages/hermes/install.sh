@@ -58,11 +58,12 @@ done
 
 # --- 3) shared secret (persist so route + watcher always match) ---
 if [ -z "${OURS_WAKE_SECRET:-}" ] && [ -f "$ENV_FILE" ]; then
-  # shellcheck source=/dev/null
-  . "$ENV_FILE"
-  # the env file records the secret as CONNECTOR_HMAC_SECRET — reuse it so the route
-  # and the watcher never drift apart across re-runs.
-  OURS_WAKE_SECRET="${OURS_WAKE_SECRET:-${CONNECTOR_HMAC_SECRET:-}}"
+  # Reuse ONLY the persisted secret so the route and the watcher never drift apart across
+  # re-runs. Extract it in a SUBSHELL so sourcing the env file cannot clobber the current
+  # environment — the file also `export`s CONNECTOR_IDENTITIES (from the prior run), and a
+  # naive `. "$ENV_FILE"` would overwrite a re-run's CLI-provided --identities, silently
+  # no-op'ing the watcher. The env file records the secret as CONNECTOR_HMAC_SECRET.
+  OURS_WAKE_SECRET="$(. "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${CONNECTOR_HMAC_SECRET:-}")"
 fi
 if [ -z "${OURS_WAKE_SECRET:-}" ] || [ "${OURS_WAKE_SECRET:-}" = "CHANGE_ME_local_webhook_hmac" ]; then
   OURS_WAKE_SECRET="$(openssl rand -hex 32)"

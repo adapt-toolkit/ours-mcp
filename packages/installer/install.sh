@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# ours.network — one-shot installer.  Hostable and meant to be run as:
+# ours.network — one-shot installer.  Hosted on git and meant to be run as:
 #
-#     curl -fsSL https://ours.network/install.sh | bash
+#     curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash
+#
+# (A pretty https://ours.network/install.sh redirect to this file is a future optional
+#  convenience; the git raw URL above is the canonical source.)
 #
 # It is the capstone over the per-harness installers: it installs + starts the ours
 # daemon, offers to install it as a persistent service, then lets you multi-select which
@@ -27,8 +30,13 @@ say(){ printf 'ours: %s\n' "$1"; }
 hr(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # --- terminal-aware prompt: read from /dev/tty so `curl | bash` still works ------------
+# Probe by actually OPENING /dev/tty read-write, not by `[ -r/-w ]`: the device node is
+# world rw (crw-rw-rw-), so the permission test PASSES even with no controlling terminal
+# (true headless / CI), and we'd then try to prompt on an unopenable /dev/tty and die. An
+# open() of /dev/tty with no controlling terminal fails (ENXIO), so this only sets TTY when
+# a terminal is genuinely there; otherwise we fall back to env vars / safe do-nothing.
 TTY=""
-if [ -r /dev/tty ] && [ -w /dev/tty ]; then TTY=/dev/tty; fi
+if { : <>/dev/tty; } 2>/dev/null; then TTY=/dev/tty; fi
 
 # ask <prompt> <default> -> echoes the answer (default when non-interactive / empty input)
 ask(){
