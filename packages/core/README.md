@@ -27,7 +27,7 @@ exposes the messaging tools — each a thin wrapper over one MUFL user transacti
 ## Daemon lifecycle
 
 This package is the **single owner of the daemon lifecycle**. `ours-mcp start`
-runs one long-lived HTTP daemon per host (default port 3030) that hosts every
+runs one long-lived HTTP daemon per host (default port 3050) that hosts every
 identity's packet, the broker socket, and file locks — a shared singleton that
 cannot be run per session. Each session instead runs a thin `ours-mcp proxy`
 (stdio ⇄ the daemon's HTTP endpoint), which auto-starts the daemon if it is down.
