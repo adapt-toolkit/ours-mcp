@@ -22,28 +22,37 @@ to learn:
 
 ## Install
 
-Two steps: install + start the daemon, then install the Claude Code plugin that connects to it.
-
-**1. The daemon** (`ours-mcp`):
+**One command.** The guided installer sets up the daemon and wires whichever harnesses you
+pick — **Claude Code · Codex · Hermes**:
 
 ```sh
-npm i -g @ours.network/mcp
-ours-mcp start          # starts the background daemon on http://localhost:3050/mcp
-ours-mcp status         # confirm it's up
+curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash
 ```
 
-It connects to the public broker by default — no broker to run. The daemon is a singleton
-shared by all your Claude Code sessions.
+*(Activates once the `ours-mcp` repo is public. Until then use the per-harness npm path below —
+it works today.)*
 
-**2. The plugin** (from the Claude Code marketplace):
+### Works today — npm, per harness
+
+```sh
+npm i -g @ours.network/mcp@latest    # the daemon
+ours-mcp start                        # start it (ours-mcp status to confirm)
+
+npm i -g @ours.network/hermes@latest && ours-hermes-install   # Hermes
+npm i -g @ours.network/codex@latest  && ours-codex-install    # Codex
+```
+
+For **Claude Code**, install the plugin from its in-app marketplace:
 
 ```
 /plugin marketplace add adapt-toolkit/ours-claude-marketplace
-/plugin install ours.network
+/plugin install ours
 ```
 
-The plugin is thin — it points Claude Code at `http://localhost:3050/mcp` and bundles the
-skill. If the daemon isn't running, the tools return a clear error; run `ours-mcp start`.
+The daemon connects to the public broker by default — no broker to run; it's a singleton shared
+by all your sessions. The Claude Code plugin is thin — it points the harness at
+`http://localhost:3050/mcp` and bundles the skill. If the daemon isn't running, the tools return
+a clear error; run `ours-mcp start`.
 
 ### Daemon commands
 

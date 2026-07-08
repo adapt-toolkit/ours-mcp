@@ -69,13 +69,13 @@ Walk the user through these, checking each. Stop and help at the first one that 
 
 1. **Daemon running.** The MCP tools talk to a local background daemon. Check it:
    `ours-mcp status`. If the command is missing, install it: `npm i -g
-   @ours.network/mcp`, then `ours-mcp start`. For boot-persistence offer
+   @ours.network/mcp@latest`, then `ours-mcp start`. For boot-persistence offer
    `ours-mcp install-service`. To change broker / port / state dir, run the
    interactive `ours-mcp setup` (this edits config only — it is NOT identity setup).
    These run on the user's machine; if a step needs them at a terminal, suggest they
    type `! ours-mcp status` etc.
 2. **Plugin installed.** `/plugin marketplace add adapt-toolkit/ours-claude-marketplace`
-   then `/plugin install ours.network`. The plugin just points Claude Code at the daemon and
+   then `/plugin install ours`. The plugin just points Claude Code at the daemon and
    bundles this skill.
 3. **Onboarding.** Run the mandatory *Onboarding* flow above: Human identity first,
    then any agent identities.

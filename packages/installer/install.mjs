@@ -203,7 +203,7 @@ function main() {
       say('this part for you. Inside your Claude Code session, run these TWO commands:');
       line('');
       line('    /plugin marketplace add adapt-toolkit/ours-claude-marketplace');
-      line('    /plugin install ours.network');
+      line('    /plugin install ours');
       line('');
       say('(The daemon this installer set up is what that plugin talks to.)');
       if (interactive) askLine(write, ttyFd, '  Run the 2 commands inside Claude Code, then press Enter to continue… ', '');

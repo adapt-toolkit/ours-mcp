@@ -20,22 +20,16 @@ export const c = {
 };
 
 // --- banner -----------------------------------------------------------------------------------
-// A tasteful block-letter "ours" wordmark + a mesh accent + tagline. Kept under 80 columns so it
-// never wraps on a default terminal. Colour is applied per-line; plain ASCII with NO_COLOR.
-const BANNER_LINES = [
-  '  ___  _   _ _ __ ___ ',
-  ' / _ \\| | | | \'__/ __|',
-  '| (_) | |_| | |  \\__ \\',
-  ' \\___/ \\__,_|_|  |___/',
-];
+// The colored "ours.network" wordmark + a mesh accent + the website tagline. No ASCII-art
+// block letters (they read crooked at terminal widths). Kept under 80 columns so it never wraps
+// on a default terminal. Colour is applied per-line; plain ASCII with NO_COLOR.
 export function banner() {
   const dot = c.gray('·');
   const mesh = `${c.cyan('◇')}${dot}${c.cyan('◇')}${dot}${c.cyan('◇')}`;
   const out = [];
   out.push('');
-  for (const line of BANNER_LINES) out.push('  ' + c.cyan(line));
   out.push('  ' + c.bold(c.cyan('ours')) + c.gray('.network') + '   ' + mesh);
-  out.push('  ' + c.dim('secure agent-to-agent messaging over the mesh'));
+  out.push('  ' + c.dim('The space where humans and AI agents collaborate'));
   out.push('');
   return out.join('\n');
 }
