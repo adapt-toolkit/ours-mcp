@@ -16,11 +16,14 @@
 # it falls back to environment variables — see "Non-interactive" below — and otherwise makes
 # safe do-nothing choices rather than blocking.
 #
+# The base install is deliberately dead-simple: daemon + MCP server + skill per harness. It
+# asks ZERO questions about identities or wake-on-mail — those are set up later from inside the
+# agent (bind an identity, then ask the ours skill to "wake me on new mail"), never here.
+#
 # Non-interactive env overrides (all optional):
 #   OURS_HARNESSES="codex hermes openclaw"   harnesses to set up (space/comma list;
 #                                            names: claude-code codex hermes openclaw; or "all")
 #   OURS_SERVICE=yes|no                      install the daemon as a persistent service
-#   OURS_IDENTITIES="Agent1 Agent2"          identities to watch for wake-on-mail (reactive harnesses)
 #   OURS_ASSUME_YES=1                        accept defaults; never prompt (implies no tty needed)
 #   OURS_NPM="npm"                           npm binary to use
 set -euo pipefail
@@ -109,20 +112,63 @@ canon_harnesses(){
   printf '%s\n' $out | awk '!seen[$0]++' | tr '\n' ' '
 }
 
+# Interactive checkbox multi-select drawn on the controlling terminal. ↑/↓ (or k/j) move,
+# Space toggles, Enter confirms, a/n select-all / none, q cancels (selects nothing). ALL UI is
+# written to $TTY and keys are read from $TTY, so only the resulting space-separated harness
+# names reach stdout — safe to capture with $(...). Callers gate on $TTY (headless uses
+# OURS_HARNESSES instead). Args are "name=Label" specs.
+checkbox_select(){
+  local names=() labels=() sel=()
+  local spec
+  for spec in "$@"; do names+=("${spec%%=*}"); labels+=("${spec#*=}"); sel+=(0); done
+  local n=${#names[@]} i cur=0 drawn=0
+
+  redraw(){
+    [ "$drawn" = 1 ] && printf '\033[%dA' "$n" > "$TTY"   # rewind over the previous frame
+    drawn=1
+    for ((i=0; i<n; i++)); do
+      local box='[ ]'; [ "${sel[$i]}" = 1 ] && box='[x]'
+      local point='  '; [ "$i" = "$cur" ] && point='> '
+      printf '\r\033[K  %s%s %s\n' "$point" "$box" "${labels[$i]}" > "$TTY"
+    done
+  }
+
+  printf '  Choose harnesses to set up — %s move, %s toggle, %s confirm (a=all, n=none):\n' \
+    $'\033[1m↑/↓\033[0m' $'\033[1mSpace\033[0m' $'\033[1mEnter\033[0m' > "$TTY"
+  redraw
+  local key rest
+  while :; do
+    IFS= read -rsn1 key < "$TTY" || break
+    case "$key" in
+      $'\e')  # escape sequence: grab the rest of an arrow key (already buffered)
+        IFS= read -rsn2 -t 0.1 rest < "$TTY" || rest=''
+        case "$rest" in
+          '[A'|'OA') cur=$(( (cur - 1 + n) % n ));;
+          '[B'|'OB') cur=$(( (cur + 1) % n ));;
+        esac ;;
+      k|K) cur=$(( (cur - 1 + n) % n ));;
+      j|J) cur=$(( (cur + 1) % n ));;
+      ' ') sel[$cur]=$(( 1 - sel[$cur] ));;
+      a|A) for ((i=0; i<n; i++)); do sel[$i]=1; done;;
+      n|N) for ((i=0; i<n; i++)); do sel[$i]=0; done;;
+      q|Q) for ((i=0; i<n; i++)); do sel[$i]=0; done; break;;
+      '') break;;   # Enter
+    esac
+    redraw
+  done
+  local out=''
+  for ((i=0; i<n; i++)); do [ "${sel[$i]}" = 1 ] && out="$out ${names[$i]}"; done
+  printf '%s' "${out# }"
+}
+
 if [ -n "${OURS_HARNESSES:-}" ]; then
   SELECTED="$(canon_harnesses "$OURS_HARNESSES")"
+elif [ -n "$TTY" ]; then
+  SELECTED="$(canon_harnesses "$(checkbox_select \
+    'claude-code=Claude Code' 'codex=Codex' 'hermes=Hermes' 'openclaw=OpenClaw')")"
 else
-  if [ -z "$TTY" ] && [ -z "${OURS_ASSUME_YES:-}" ]; then
-    say "no terminal and no OURS_HARNESSES set — skipping harness setup (daemon is installed)."
-    SELECTED=""
-  else
-    printf '%s' "\
-  Which harnesses do you want to set up? Enter numbers (space-separated), names, or 'all':
-    1) Claude Code   2) Codex   3) Hermes   4) OpenClaw
-  > " > "${TTY:-/dev/stdout}"
-    reply=""; [ -n "$TTY" ] && { IFS= read -r reply < "$TTY" || reply=""; }
-    SELECTED="$(canon_harnesses "${reply:-none}")"
-  fi
+  say "no terminal and no OURS_HARNESSES set — skipping harness setup (daemon is installed)."
+  SELECTED=""
 fi
 SELECTED="$(printf '%s' "$SELECTED" | sed -E 's/^ +| +$//g')"
 
@@ -134,42 +180,45 @@ if [ -z "$SELECTED" ]; then
 fi
 say "setting up: $SELECTED"
 
-# identities to watch (asked once, reused for reactive harnesses)
-IDENTITIES="${OURS_IDENTITIES:-}"
-case " $SELECTED " in
-  *" hermes "*|*" openclaw "*)
-    if [ -z "$IDENTITIES" ]; then
-      IDENTITIES="$(ask "  Identities to wake on new mail (space-separated, Enter to skip live wake): " "")"
-    fi ;;
-esac
-
 # --- 4) run each selected harness's installer ------------------------------------------
+# The base install is intentionally identity-free: each harness installer sets up the daemon,
+# the ours MCP server, and the skill only — no identity or wake questions. Wake-on-mail is
+# enabled later from inside the agent (bind an identity, then ask the ours skill to "wake me on
+# new mail"), never here.
 install_npm_harness(){  # $1 = harness (hermes|openclaw|codex)
   local h="$1" pkg="@ours.network/$1" bin="ours-$1-install"
   hr "→ $h"
   say "installing $pkg…"; "$NPM" i -g "$pkg"
-  local args=()
-  case "$h" in
-    hermes|openclaw) [ -n "$IDENTITIES" ] && args=(--identities "$IDENTITIES");;
-  esac
-  say "running $bin ${args[*]:-}"
-  "$bin" "${args[@]}"
+  say "running $bin"
+  "$bin"
 }
 
-FAILED=""
+FAILED=""; INSTALLED=""
 for h in $SELECTED; do
   case "$h" in
     hermes|openclaw|codex)
-      install_npm_harness "$h" || { FAILED="$FAILED $h"; say "  $h setup failed (continuing)."; }
+      # These install automatically. On success, print a clear ✓ line; the final summary lists them.
+      if install_npm_harness "$h"; then
+        say "✓ $h installed and working."
+        INSTALLED="$INSTALLED $h"
+      else
+        FAILED="$FAILED $h"; say "✗ $h setup failed (continuing)."
+      fi
       ;;
     claude-code)
       hr "→ claude-code"
-      # Claude Code plugins install from its in-app marketplace, not a shell bin. Do the
-      # part we can (the daemon is already up) and print the two in-Claude-Code commands.
-      say "Claude Code installs its plugin from the in-app marketplace. Inside Claude Code, run:"
-      say "    /plugin marketplace add adapt-toolkit/ours-claude-marketplace"
-      say "    /plugin install ours.network"
+      # Claude Code plugins install from its in-app marketplace, not a shell bin — the installer
+      # cannot do it for you. Print the two commands and STOP so they can't scroll past unseen;
+      # wait for an explicit continue on the tty (headless just prints and proceeds).
+      say "Claude Code installs its plugin from its in-app marketplace — the installer can't do"
+      say "this part for you. Inside your Claude Code session, run these TWO commands:"
+      printf '\n    /plugin marketplace add adapt-toolkit/ours-claude-marketplace\n    /plugin install ours.network\n\n'
       say "(The daemon this installer set up is what that plugin talks to.)"
+      if [ -n "$TTY" ] && [ -z "${OURS_ASSUME_YES:-}" ]; then
+        printf '  Copy the 2 commands above and run them inside Claude Code, then press Enter to continue… ' > "$TTY"
+        IFS= read -r _ < "$TTY" || true
+      fi
+      INSTALLED="$INSTALLED claude-code"
       ;;
   esac
 done
@@ -177,6 +226,16 @@ done
 # --- done ------------------------------------------------------------------------------
 hr "Done"
 say "ours daemon: $(command -v ours-mcp)"
-[ -n "$SELECTED" ] && say "harnesses: $SELECTED"
+if [ -n "$INSTALLED" ]; then
+  say "installed:"
+  for h in $INSTALLED; do say "  ✓ $h"; done
+fi
 if [ -n "$FAILED" ]; then say "note: failed to fully set up:$FAILED — re-run or install those directly."; fi
 say "Reload each harness (Hermes/OpenClaw: 'openclaw gateway restart' / '/reload-mcp'; Codex: next session) to load the ours tools."
+hr "Optional: get woken on new mail"
+say "This install does NOT set up wake-on-mail — you enable it in-session from inside your agent."
+say "Open the ours skill in your harness, bind (or create) an identity, then ask it to \"wake me on"
+say "new mail\": the agent tails \`ours-mcp watch\` (the same stream Claude Code's Monitor uses) and"
+say "reacts to each message as it arrives. (In Claude Code this runs non-blocking in the background;"
+say "in Hermes/OpenClaw/Codex the watch blocks the session — press ESCAPE to interrupt.) See each"
+say "plugin's README \"Optional: get woken on new mail\"."

@@ -11,15 +11,13 @@
 // env-var gymnastics. The MCP server + skill install immediately; they are live for the
 // next Codex session.
 //
-// Reactivity is SESSION-ONLY by default (Codex has no background wake — the agent checks
-// get_messages when it goes live / expects a reply). An OPTIONAL, non-native fallback
-// drives Codex headlessly via `codex exec` from the shared connector gateway; enable it
-// with --reactivity=codex-exec, which only PRINTS setup instructions (it does not start
-// an always-on process). Everything is idempotent, so re-running is safe.
+// Wake-on-mail is NOT set up here: the agent tails `ours-mcp watch <identity>` (or a short
+// get_messages poll) IN-SESSION (see the ours skill), the same stream Claude Code's Monitor
+// tails. Codex is a session/invocation CLI, so it reacts while it is live. Everything is
+// idempotent, so re-running is safe.
 //
 // Usage:
-//   ours-codex-install [--reactivity none|codex-exec] [--identities "Agent1 Agent2"]
-//                      [--codex-dir DIR] [--skills-dir DIR] [--skip-daemon] [--help]
+//   ours-codex-install [--codex-dir DIR] [--skills-dir DIR] [--skip-daemon]
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -32,10 +30,7 @@ const argv = process.argv.slice(2);
 const opts = {};
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a === '--reactivity') opts.reactivity = argv[++i];
-  else if (a.startsWith('--reactivity=')) opts.reactivity = a.slice('--reactivity='.length);
-  else if (a === '--identities' || a === '-i') opts.identities = argv[++i];
-  else if (a === '--codex-dir') opts.codexDir = argv[++i];
+  if (a === '--codex-dir') opts.codexDir = argv[++i];
   else if (a === '--skills-dir') opts.skillsDir = argv[++i];
   else if (a === '--skip-daemon') opts.skipDaemon = true;
   else if (a === '--help' || a === '-h') { help(); process.exit(0); }
@@ -47,17 +42,17 @@ function help() {
 
   ours-codex-install [options]
 
+Sets up the daemon + the ours MCP server + the skill + the AGENTS.md pointer. It asks nothing
+about identities or wake-on-mail: you enable wake in-session (bind an identity, then the ours
+skill tails ours-mcp watch / polls get_messages so you react to new mail while you work).
+
 Options:
-      --reactivity <mode>   none (default, session-only) | codex-exec (optional,
-                            non-native fallback — prints connector+codex-exec setup)
-  -i, --identities "A B"    ours identities the optional codex-exec gateway would drive
       --codex-dir <dir>     Codex config+AGENTS.md root (default ~/.codex)
       --skills-dir <dir>    skills root (default ~/.agents/skills — USER scope)
       --skip-daemon         do not install/start the ours daemon
   -h, --help                show this help
 
-Idempotent: safe to re-run. MCP server + skill are live for the next Codex session.
-Reactivity is session-only unless you opt into the (flagged, non-native) codex-exec fallback.`);
+Idempotent: safe to re-run. MCP server + skill are live for the next Codex session.`);
 }
 
 if (!existsSync(INSTALL)) {
@@ -68,8 +63,6 @@ if (!existsSync(INSTALL)) {
 // install.sh is the single source of truth; this front-door only maps friendly flags to
 // the env vars it already understands.
 const env = { ...process.env };
-if (opts.reactivity != null) env.OURS_REACTIVITY = opts.reactivity;
-if (opts.identities != null) env.CONNECTOR_IDENTITIES = opts.identities;
 if (opts.codexDir) env.CODEX_DIR = opts.codexDir;
 if (opts.skillsDir) env.SKILLS_DIR = opts.skillsDir;
 if (opts.skipDaemon) env.OURS_INSTALL_SKIP_DAEMON = '1';

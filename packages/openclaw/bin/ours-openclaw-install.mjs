@@ -5,17 +5,14 @@
 //     npm i -g @ours.network/openclaw
 //     ours-openclaw-install
 //
-// It resolves this package's own install.sh (which ensures the ours daemon, registers
-// the `ours` MCP server under mcp.servers + per-identity webhook routes in
-// ~/.openclaw/openclaw.json, installs the skills, and starts the reactivity watcher)
-// and runs it — no env-var gymnastics. The MCP server + skill install immediately; live
-// wake-on-mail is enabled by passing --identities (you watch identities that already
-// exist, so this is opt-in rather than guessed). Everything is idempotent, so re-running
-// is safe.
+// It resolves this package's own install.sh (which ensures the ours daemon, registers the
+// `ours` MCP server under mcp.servers in ~/.openclaw/openclaw.json, and installs the skills) and
+// runs it — no env-var gymnastics. The MCP server + skill install immediately. Wake-on-mail is
+// NOT set up here: the agent enables it in-session by tailing `ours-mcp watch <identity>` (see the
+// ours skill), exactly like Claude Code. Everything is idempotent, so re-running is safe.
 //
 // Usage:
-//   ours-openclaw-install [--identities "Agent1 Agent2"] [--port 18789]
-//                         [--openclaw-dir DIR] [--skip-daemon] [--skip-watcher]
+//   ours-openclaw-install [--openclaw-dir DIR] [--skip-daemon]
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -28,11 +25,8 @@ const argv = process.argv.slice(2);
 const opts = {};
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a === '--identities' || a === '-i') opts.identities = argv[++i];
-  else if (a === '--port') opts.port = argv[++i];
-  else if (a === '--openclaw-dir') opts.openclawDir = argv[++i];
+  if (a === '--openclaw-dir') opts.openclawDir = argv[++i];
   else if (a === '--skip-daemon') opts.skipDaemon = true;
-  else if (a === '--skip-watcher') opts.skipWatcher = true;
   else if (a === '--help' || a === '-h') { help(); process.exit(0); }
   else { console.error(`ours-openclaw-install: unknown argument "${a}"`); help(); process.exit(2); }
 }
@@ -42,12 +36,13 @@ function help() {
 
   ours-openclaw-install [options]
 
+Sets up the daemon + the ours MCP server + the skill. It asks nothing about identities or
+wake-on-mail: you enable wake in-session from your agent (bind an identity, then ask the ours
+skill to "wake me on new mail" — it tails ours-mcp watch and reacts in-session).
+
 Options:
-  -i, --identities "A B"    ours identities to watch for wake-on-mail (space-separated)
-      --port <n>            OpenClaw gateway port (default 18789)
       --openclaw-dir <dir>  OpenClaw config+skills root (default ~/.openclaw)
       --skip-daemon         do not install/start the ours daemon
-      --skip-watcher        do not start the reactivity watcher
   -h, --help                show this help
 
 Idempotent: safe to re-run. After it finishes, run \`openclaw gateway restart\`.`);
@@ -61,11 +56,8 @@ if (!existsSync(INSTALL)) {
 // install.sh is the single source of truth; this front-door only maps friendly flags to
 // the env vars it already understands.
 const env = { ...process.env };
-if (opts.identities != null) env.CONNECTOR_IDENTITIES = opts.identities;
-if (opts.port) env.OURS_WEBHOOK_PORT = opts.port;
 if (opts.openclawDir) env.OPENCLAW_DIR = opts.openclawDir;
 if (opts.skipDaemon) env.OURS_INSTALL_SKIP_DAEMON = '1';
-if (opts.skipWatcher) env.OURS_INSTALL_SKIP_WATCHER = '1';
 
 const res = spawnSync('bash', [INSTALL], { stdio: 'inherit', env });
 if (res.error) { console.error(`ours-openclaw-install: ${res.error.message}`); process.exit(1); }

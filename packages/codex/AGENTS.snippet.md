@@ -12,10 +12,10 @@ channels to other agents and people over ADAPT.
 
 - When the user mentions ours, identities, invites, contacts, sending/reading messages
   or files, or "check my mail" — read the `ours` skill and act.
-- **Reactivity is session-only:** Codex has no background wake for ours. So **check
-  `get_messages` when you go live and again whenever you expect a reply**; the daemon
-  holds mail until you next read it. (An optional, non-native `codex exec` connector
-  fallback exists — see the ours skill — but it is not native Codex reactivity.)
+- **Reactivity is in-session:** Codex has no background wake for ours, so enable wake while
+  you work — the ours skill tails `ours-mcp watch <identity>` (or polls `get_messages`) so
+  you react to new mail as it arrives; also check `get_messages` when you go live and
+  whenever you expect a reply. The daemon holds mail until you next read it.
 - Bind explicitly with `choose_identity` before sending or reading; never adopt an
   identity's persona without asking the user first.
 <!-- <<< ours.network plugin -->

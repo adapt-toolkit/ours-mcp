@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Installs the ours blocks into ~/.openclaw/openclaw.json — safely and idempotently.
+// Installs the ours MCP server into ~/.openclaw/openclaw.json — safely and idempotently.
 //
 // openclaw.json is JSON5 (it MAY contain comments / unquoted keys / trailing commas), so
 // a strict JSON.parse can FAIL on a user's existing file. Blindly rewriting a JSON5 file as
@@ -9,7 +9,10 @@
 //   - file is STRICT JSON (parses)  -> deep-merge our keys idempotently, pretty-print back
 //   - file is JSON5 / unparseable   -> print the block and ask the user to merge by hand
 //   - our sentinel already present  -> noop (idempotent)
-// A sentinel key ("$ours" marker) inside the config makes a second run a no-op.
+// A sentinel key ("//ours" marker) inside the config makes a second run a no-op.
+//
+// Reactivity needs NO config here: wake-on-mail is the agent tailing `ours-mcp watch` in-session
+// (see the ours skill) — there is no webhook route, secret, gateway, or per-identity session.
 //
 // Pure functions (planConfigInstall / renderConfig / buildOursConfig) are unit-tested;
 // main() does the file IO. Zero dependencies.
@@ -18,45 +21,14 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-// Sentinel marker: a stable string we stamp into the managed webhooks config so a second
-// run recognizes its own prior write (in both parsed objects and raw text).
+// Sentinel marker: a stable string we stamp into the managed config so a second run recognizes
+// its own prior write (in both parsed objects and raw text).
 export const SENTINEL = 'ours.network plugin (managed block)';
 
-// Derive an OpenClaw-safe route/controller name + session key from an ours identity name.
-// Route names live in a URL path and as object keys, so slugify to [a-z0-9-].
-function slugify(identity) {
-  const s = String(identity).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  return s || 'default';
-}
-export function routeNameFor(identity) {
-  return `ours-wake-${slugify(identity)}`;
-}
-function envVarFor(identity) {
-  // Static bearer token env var id per identity; all identities share ONE token value, but
-  // OpenClaw's secret ref is per-route, so we point each at the same env id for simplicity.
-  return 'OURS_WAKE_SECRET';
-}
-function sessionKeyFor(identity) {
-  // A route binds to a fixed OpenClaw agent session. One route per identity => one session
-  // per identity. The session key derives from the (slugified) identity.
-  return `agent:${slugify(identity)}:main`;
-}
-
-// Build the ours config fragment as a plain object: the MCP server + one webhooks route per
-// identity. This is what we deep-merge into a strict-JSON config, and (pretty-printed) what
-// we write to a fresh file / print for a manual merge.
-export function buildOursConfig({ webhookPort = 18789, identities = [] } = {}) {
-  const routes = {};
-  for (const id of identities) {
-    const name = routeNameFor(id);
-    routes[name] = {
-      path: `/plugins/webhooks/${name}`,
-      sessionKey: sessionKeyFor(id),
-      secret: { source: 'env', provider: 'default', id: envVarFor(id) },
-      controllerId: `webhooks/${name}`,
-      description: `Wake the ours agent bound to "${id}" — connector pokes this route; the agent drains its inbox via get_messages.`,
-    };
-  }
+// Build the ours config fragment as a plain object: just the MCP server. This is what we
+// deep-merge into a strict-JSON config, and (pretty-printed) what we write to a fresh file /
+// print for a manual merge.
+export function buildOursConfig() {
   return {
     // sentinel: makes a re-run a provable no-op and marks the block for uninstall.
     '//ours': SENTINEL,
@@ -65,15 +37,6 @@ export function buildOursConfig({ webhookPort = 18789, identities = [] } = {}) {
         ours: {
           command: 'ours-mcp',
           args: ['proxy'],
-        },
-      },
-    },
-    plugins: {
-      entries: {
-        webhooks: {
-          config: {
-            routes,
-          },
         },
       },
     },
@@ -104,56 +67,26 @@ export function renderConfig(existingText, fragment) {
   return JSON.stringify(merged, null, 2) + '\n';
 }
 
-// Which of the fragment's webhook routes are NOT yet present in the parsed config. Used to
-// keep route creation idempotent across re-runs: a re-run with a NEW identity adds a route,
-// so the sentinel alone must not short-circuit to a no-op (that would leave the watcher poking
-// a route OpenClaw never registered → 404 forever). Returns [] when nothing is missing.
-export function missingRoutes(parsedConfig, fragment) {
-  const want = fragment?.plugins?.entries?.webhooks?.config?.routes || {};
-  const have = parsedConfig?.plugins?.entries?.webhooks?.config?.routes || {};
-  return Object.keys(want).filter((name) => !(name in have));
-}
-
-// Decide how to install given the current config text (and, optionally, the fragment we intend
-// to install so we can reconcile per-identity routes on re-run). Never returns a plan that
-// could corrupt / silently clobber a user's JSON5 file.
-export function planConfigInstall(text, fragment) {
+// Decide how to install given the current config text. Never returns a plan that could
+// corrupt / silently clobber a user's JSON5 file.
+export function planConfigInstall(text) {
   const t = (text ?? '').trim();
   if (!t) return { action: 'write', reason: 'no existing config' };
-  const hasSentinel = t.includes(SENTINEL);
-  // Without a fragment to reconcile against, keep the legacy short-circuit: sentinel ⇒ noop.
-  if (hasSentinel && !fragment) return { action: 'noop', reason: 'ours block already present' };
-  let parsed;
+  if (t.includes(SENTINEL)) return { action: 'noop', reason: 'ours block already present' };
   try {
-    parsed = JSON.parse(t);
+    JSON.parse(t);
   } catch {
     // JSON5 / comments / unquoted keys — a strict rewrite would drop them. Hand it off.
-    // (Even if our sentinel is present, we cannot safely rewrite JSON5 to add routes.)
     return { action: 'manual', reason: 'openclaw.json is not strict JSON (JSON5/comments); merge by hand to avoid clobbering it' };
-  }
-  if (hasSentinel) {
-    // Our block is installed. A plain re-run is a no-op, BUT a re-run with new identities
-    // introduces routes that aren't in the config yet — deep-merge those in (idempotent for
-    // routes that already exist).
-    const missing = missingRoutes(parsed, fragment);
-    if (missing.length) return { action: 'merge', reason: `ours block present; adding ${missing.length} missing route(s): ${missing.join(', ')}` };
-    return { action: 'noop', reason: 'ours block already present; all identity routes exist' };
   }
   return { action: 'merge', reason: 'strict JSON without our block; safe to deep-merge' };
 }
 
 function main() {
-  const secret = process.env.OURS_WAKE_SECRET;
-  if (!secret || secret === 'CHANGE_ME_local_webhook_hmac') {
-    console.error('openclaw-config-install: OURS_WAKE_SECRET must be set to a non-default value.');
-    process.exit(2);
-  }
-  const identities = (process.env.CONNECTOR_IDENTITIES || '').split(/\s+/).filter(Boolean);
-  const webhookPort = Number(process.env.OURS_WEBHOOK_PORT || 18789);
   const cfgPath = process.env.OPENCLAW_CONFIG || join(homedir(), '.openclaw', 'openclaw.json');
   const existing = existsSync(cfgPath) ? readFileSync(cfgPath, 'utf8') : '';
-  const fragment = buildOursConfig({ webhookPort, identities });
-  const plan = planConfigInstall(existing, fragment);
+  const fragment = buildOursConfig();
+  const plan = planConfigInstall(existing);
 
   if (plan.action === 'noop') {
     console.log(`ours: openclaw.json already has the ours block (${cfgPath}); nothing to do.`);

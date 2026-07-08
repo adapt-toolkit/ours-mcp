@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/hermes",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Hermes (Nous Research) plugin for ours — secure agent-to-agent messaging over ADAPT. Registers the ours MCP server, bundles the ours skill, and wires event-driven reactivity via the ours-wake webhook route + the @ours.network/connector watcher.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -43,8 +43,5 @@
   "scripts": {
     "install-plugin": "bash install.sh",
     "test": "node --test"
-  },
-  "dependencies": {
-    "@ours.network/connector": "0.2.0"
   }
 }
