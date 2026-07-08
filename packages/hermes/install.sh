@@ -2,41 +2,23 @@
 # Install the ours.network plugin into Hermes:
 #   1. ensure the ours daemon (@ours.network/mcp) is installed + running
 #   2. install the ours + writing-agent-bios skills into ~/.hermes/skills/
-#   3. write the `ours` MCP server + the `ours-wake` webhook route into
-#      ~/.hermes/config.yaml (idempotent, never corrupts existing YAML) — this is the identity-
-#      agnostic wake PLUMBING; the watcher that uses it is started in-session by the agent
-#   4. (only with the optional --identities escape hatch) start the reactivity watcher now; the
-#      DEFAULT install starts no watcher — wake is enabled in-session via the ours skill
+#   3. write the `ours` MCP server into ~/.hermes/config.yaml (idempotent, never corrupts
+#      existing YAML)
+#
+# That's it — no identities, no webhook route, no secret, no watcher. Wake-on-mail is the agent
+# tailing `ours-mcp watch <identity>` IN-SESSION (see the ours skill), exactly like Claude Code.
 #
 # Idempotent: safe to re-run. Test/CI knobs (all optional):
 #   HERMES_DIR                 config+skills root         (default ~/.hermes)
-#   CONNECTOR_DIR              path to @ours.network/connector (auto-detected)
-#   CONNECTOR_IDENTITIES       space-separated identities to watch
-#   OURS_WAKE_SECRET           shared HMAC secret        (generated if unset)
-#   OURS_WEBHOOK_PORT          webhook port              (default 8644)
 #   OURS_INSTALL_SKIP_DAEMON=1 skip daemon install/start
-#   OURS_INSTALL_SKIP_WATCHER=1 skip starting the watcher
 set -euo pipefail
 
 SELFDIR="$(cd "$(dirname "$0")" && pwd)"
 HERMES_DIR="${HERMES_DIR:-$HOME/.hermes}"
 HERMES_CONFIG="$HERMES_DIR/config.yaml"
 SKILLS_DEST="$HERMES_DIR/skills/communication"
-ENV_FILE="$HERMES_DIR/ours-connector.env"
-OURS_WEBHOOK_PORT="${OURS_WEBHOOK_PORT:-8644}"
 
 say(){ printf 'ours-install: %s\n' "$1"; }
-
-# --- locate the connector (monorepo sibling, installed dep, or explicit) ---
-find_connector(){
-  local c
-  for c in "${CONNECTOR_DIR:-}" "$SELFDIR/../connector" \
-           "$SELFDIR/node_modules/@ours.network/connector" \
-           "$HERMES_DIR/../@ours.network/connector"; do
-    [ -n "$c" ] && [ -f "$c/connector-watch.sh" ] && { echo "$c"; return 0; }
-  done
-  return 1
-}
 
 # --- 1) daemon ---
 if [ "${OURS_INSTALL_SKIP_DAEMON:-}" != "1" ]; then
@@ -58,66 +40,12 @@ for s in ours writing-agent-bios; do
   say "installed skill: $SKILLS_DEST/$s"
 done
 
-# --- 3) shared secret (persist so route + watcher always match) ---
-if [ -z "${OURS_WAKE_SECRET:-}" ] && [ -f "$ENV_FILE" ]; then
-  # Reuse ONLY the persisted secret so the route and the watcher never drift apart across
-  # re-runs. Extract it in a SUBSHELL so sourcing the env file cannot clobber the current
-  # environment — the file also `export`s CONNECTOR_IDENTITIES (from the prior run), and a
-  # naive `. "$ENV_FILE"` would overwrite a re-run's CLI-provided --identities, silently
-  # no-op'ing the watcher. The env file records the secret as CONNECTOR_HMAC_SECRET.
-  OURS_WAKE_SECRET="$(. "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${CONNECTOR_HMAC_SECRET:-}")"
-fi
-if [ -z "${OURS_WAKE_SECRET:-}" ] || [ "${OURS_WAKE_SECRET:-}" = "CHANGE_ME_local_webhook_hmac" ]; then
-  OURS_WAKE_SECRET="$(openssl rand -hex 32)"
-  say "generated a new shared HMAC secret"
-fi
+# --- 3) config.yaml: register the ours MCP server (idempotent, safe merge) ---
 mkdir -p "$HERMES_DIR"
-umask 077
-# Record the connector location so the agent can start the watcher IN-SESSION (the default wake
-# path) without re-discovering it — the ours skill sources this file and runs
-# "$CONNECTOR_DIR/connector-watch.sh" for its own bound identity.
-CONN_DIR="$(find_connector 2>/dev/null || true)"
-cat > "$ENV_FILE" <<EOF
-# ours.network connector env (managed by install.sh). Sourced by the ours skill to start the
-# in-session reactivity watcher (and by the optional --identities install-time watcher).
-export CONNECTOR_HMAC_SECRET="$OURS_WAKE_SECRET"
-export CONNECTOR_WEBHOOK_URL="http://localhost:$OURS_WEBHOOK_PORT/webhooks/ours-wake"
-export CONNECTOR_EVENT="ours_wake"
-export CONNECTOR_DIR="$CONN_DIR"
-export CONNECTOR_IDENTITIES="${CONNECTOR_IDENTITIES:-}"
-EOF
-say "wrote connector env: $ENV_FILE"
-
-# --- 4) config.yaml (idempotent, safe merge) ---
-OURS_WAKE_SECRET="$OURS_WAKE_SECRET" CONNECTOR_IDENTITIES="${CONNECTOR_IDENTITIES:-}" \
-  OURS_WEBHOOK_PORT="$OURS_WEBHOOK_PORT" HERMES_CONFIG="$HERMES_CONFIG" \
-  node "$SELFDIR/bin/hermes-config-install.mjs" || {
-    rc=$?; [ "$rc" = "3" ] && say "config needs a manual merge (see block above)"; [ "$rc" = "3" ] || exit "$rc";
-  }
-
-# --- 5) watcher ---
-# By DEFAULT the base install does NOT start a watcher — wake-on-mail is enabled in-session by the
-# agent (bind an identity, then the ours skill starts the watcher for it). The CONNECTOR_IDENTITIES
-# path below is an optional power-user escape hatch (ours-hermes-install --identities "…").
-if [ "${OURS_INSTALL_SKIP_WATCHER:-}" = "1" ]; then
-  say "skipping watcher start (OURS_INSTALL_SKIP_WATCHER=1)"
-elif [ -z "${CONNECTOR_IDENTITIES:-}" ]; then
-  say "wake-on-mail is set up in-session, not here: bind an identity in your agent, then ask the"
-  say "ours skill to \"wake me on new mail\" (it starts the watcher for that identity)."
-elif CONN="$(find_connector)"; then
-  if pgrep -f "connector-watch.sh" >/dev/null 2>&1; then
-    say "a connector watcher is already running — leaving it (restart it to pick up new identities)"
-  else
-    say "starting the reactivity watcher for: $CONNECTOR_IDENTITIES"
-    ( set -a; . "$ENV_FILE"; set +a; nohup bash "$CONN/connector-watch.sh" >"$HERMES_DIR/ours-connector.log" 2>&1 & )
-    say "watcher started (logs: $HERMES_DIR/ours-connector.log)"
-  fi
-else
-  say "could not locate @ours.network/connector — set CONNECTOR_DIR and re-run to start the watcher"
-fi
+HERMES_CONFIG="$HERMES_CONFIG" node "$SELFDIR/bin/hermes-config-install.mjs" || {
+  rc=$?; [ "$rc" = "3" ] && say "config needs a manual merge (see block above)"; [ "$rc" = "3" ] || exit "$rc";
+}
 
 say "done. Run /reload-mcp in Hermes to load the mcp_ours_* tools."
-if [ -z "${CONNECTOR_IDENTITIES:-}" ]; then
-  say "next: in your agent, bind (or create) an identity and ask the ours skill to \"wake me on"
-  say "      new mail\" — it starts a background watcher that wakes you when that identity gets mail."
-fi
+say "next: in your agent, bind (or create) an identity and ask the ours skill to \"wake me on new"
+say "      mail\" — it tails ours-mcp watch in-session and reacts to new mail as it arrives."

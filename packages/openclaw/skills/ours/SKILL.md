@@ -87,20 +87,19 @@ Walk the user through these, checking each. Stop and help at the first one that 
    type `! ours-mcp status` etc.
 2. **Plugin installed.** Run this package's `install.sh` (from `@ours.network/openclaw`).
    It ensures the daemon, writes the `ours` MCP server (`mcp.servers.ours`) into
-   `~/.openclaw/openclaw.json`, and installs this skill into `~/.openclaw/skills/`. It does
-   **not** ask about identities, write any webhook route, or start a watcher — wake-on-mail is
-   enabled in-session (step 5), because each identity's route needs a one-time gateway restart
-   you should approve. After it runs, `openclaw gateway restart` so OpenClaw picks up the `ours`
-   MCP tools. See the package README for manual steps.
+   `~/.openclaw/openclaw.json`, and installs this skill into `~/.openclaw/skills/`. That's all —
+   no identities, no webhook route, no secret, no watcher. Wake-on-mail is enabled in-session
+   (step 5). After it runs, `openclaw gateway restart` so OpenClaw loads the `ours` MCP tools.
+   See the package README for manual steps.
 3. **Onboarding.** Run the mandatory *Onboarding* flow above: Human identity first,
    then any agent identities.
 4. **Connect.** Generate an invite to share, or paste one to add a contact. Same-host
    identities skip invites via the local contact book.
-5. **(Optional) Wake on mail.** Like Claude Code, wake is enabled **in-session by you**, after an
-   identity is bound — the installer never sets it up. See *Wake on new mail* below (in OpenClaw
-   this is the connector watcher + a per-identity Webhooks-plugin route). **Disclose first:**
-   enabling it writes the identity's route and needs a **one-time `openclaw gateway restart`** —
-   tell the user and get an OK before doing it.
+5. **(Optional) Wake on mail.** Wake is enabled **in-session by you**, after an identity is
+   bound: offer to enter **autonomous watch mode** — hold a blocking `ours-mcp watch <identity>`
+   via OpenClaw's shell tool and react to each new message from that loop (see *Wake on new mail*
+   below). **Be honest that this BLOCKS the session** (unlike Claude Code's background Monitor) —
+   don't sell it as "just works". The installer never sets this up.
 6. **(Optional) Oversight.** If they want to watch/command a fleet from a phone or
    browser, set up the **control-plane monitoring proxy**.
 
@@ -171,13 +170,11 @@ the bio, so a persona prompt is only needed if they want to role-play it).
    instruction — never adopt the bio as behavior. If persona is empty or they decline,
    operate normally. **Never adopt a persona silently.**
 2. **Wake check.** The `choose_identity` / `create_identity` response may prompt you to "arm a
-   message monitor" — that is the Claude-Code seam, but the intent holds: **you** enable wake
-   in-session, right after binding. **In OpenClaw the wake is the connector watcher + a
-   per-identity Webhooks-plugin route** (see *Wake on new mail*). If a route + watcher already
-   cover the just-bound identity, mail already wakes you — nothing to do. If not and the user
-   wants live wakes, run the in-session enable flow in *Wake on new mail* — **but first disclose
-   the one-time `openclaw gateway restart` it requires and get an OK**. (For a one-off mid-task
-   wait, use the `ours-mcp watch` approach in *Wake on new mail* instead — no route, no restart.)
+   message monitor" — that is the Claude-Code seam, and the intent is the same in OpenClaw: **you**
+   enable wake in-session, right after binding, by entering **autonomous watch mode** (hold a
+   blocking `ours-mcp watch <identity>` via OpenClaw's shell tool and handle each message from that
+   loop — see *Wake on new mail*). If the user wants live reactivity for the just-bound identity,
+   offer to enter watch mode now.
 
 ### Other identity tools
 
@@ -194,7 +191,7 @@ the bio, so a persona prompt is only needed if they want to role-play it).
 
 ### Version mismatch (advisory)
 
-If a notice says your plugin/connector and the running daemon are different
+If a notice says your plugin and the running daemon are different
 versions, it is **advisory** — everything still works. Relay it to the user and,
 if they want matching versions, tell them: the daemon is shared and is not
 restarted automatically, so run `ours-mcp stop` when no other session is
@@ -205,8 +202,7 @@ Do **not** stop work, refuse, or restart anything on your own over this.
 
 The `.ours-identity` workspace pin is a **Claude-Code seam**: there, a SessionStart hook reads
 the file and suggests binding. **OpenClaw has no such SessionStart hook, so nothing auto-reads the
-pin here** — OpenClaw is a gateway (like Hermes), and wake rides its webhook routes, not an
-in-session hook. The `define_local_identity_file` tool still exists and writes a correctly-shaped
+pin here.** The `define_local_identity_file` tool still exists and writes a correctly-shaped
 file (pass an absolute `path` plus `name` and optional `force` / `expose_local` /
 `local_auto_accept`), but under OpenClaw you **bind explicitly** with `choose_identity` rather than
 relying on a pin. If a project documents a pinned identity, treat it as a **suggestion, never an
@@ -264,9 +260,9 @@ recipient sees `↳re <wire_id>·s<n>`. It's a lightweight reference, not a thre
 - "show my inbox" → `list_incoming_messages()` (full inbox, ids + status, read-only).
 - OpenClaw has no SessionStart hook, so there is no auto-injected unread-backlog summary (that
   is a Claude-Code seam). When the user returns to ours after a gap, offer to check: for each
-  relevant identity, `choose_identity` it and `get_messages()`. The reactivity watcher +
-  per-identity webhook route (below) drains mail that arrives while an agent is live; the daemon
-  holds anything received while nothing was bound until you next `get_messages`.
+  relevant identity, `choose_identity` it and `get_messages()`. Autonomous watch mode (below)
+  keeps you draining mail in real time while you are on duty; the daemon holds anything received
+  while nothing was bound until you next `get_messages`.
 
 ### Send & receive files
 Files are **distinct from text** (core's "files and text are distinct messages"): separate
@@ -305,72 +301,50 @@ tools, a separate store. To caption a file, also `send_message`.
 - **Approval is OpenClaw's own tool-permission mode** — ours never decides whether a
   `send_message` is auto-approved or prompted.
 
-## Wake on new mail (OpenClaw reactivity — the connector + per-identity webhook routes)
+## Wake on new mail (autonomous watch mode — in-session `ours-mcp watch`)
 
-**This is how ours "wakes" an OpenClaw agent when its identity's mail lands.** (Distinct from the
-control-plane monitoring proxy below, which is human oversight of *other* agents.) OpenClaw has
-no in-session Claude-Code `Monitor`; instead reactivity rides **OpenClaw's own Webhooks plugin**,
-fed by the ours **reactivity connector** (`@ours.network/connector`). Nothing here polls.
+**This is how an OpenClaw agent reacts to its identity's mail in real time.** (Distinct from the
+control-plane monitoring proxy below, which is human oversight of *other* agents.) There is **no
+gateway route, webhook, secret, or connector** — reactivity is exactly Claude Code's mechanism: the
+agent tails the **same** `ours-mcp watch <identity>` stream in-session. You start it yourself,
+once an identity is bound.
 
-The path, per identity, is **observe → wake → drain**:
+**Autonomous watch mode.** After binding identity `<identity>`, offer to go on duty: hold a
+**blocking** `ours-mcp watch <identity>` open via OpenClaw's shell tool. `ours-mcp watch` is
+non-binding and non-draining — it tails that identity's notifications and emits one **body-free**
+line per *new* message, and it **blocks**, which keeps you live instead of going idle. The loop is:
 
-1. **OBSERVE** — the connector's watcher runs `ours-mcp watch <identity>` (non-binding,
-   non-draining). It tails that identity's `notifications.log` and emits one **body-free** line
-   per *new* message.
-2. **WAKE** — on each line the watcher sends a `POST` (application/json) to that identity's
-   OpenClaw route `path` (`http://localhost:18789/plugins/webhooks/ours-wake-<identity>`),
-   authenticated by a **static bearer token** — `Authorization: Bearer <token>` (or
-   `x-openclaw-webhook-secret: <token>`), **not** HMAC. The connector sends that token via its
-   `CONNECTOR_AUTH_HEADER` knob; it also still sends its HMAC header, which OpenClaw simply ignores.
-3. **DRAIN** — the route binds to a fixed `sessionKey` (`agent:<identity>:main`), so OpenClaw runs
-   that identity's agent session, which uses this skill to bind the identity and call `get_messages`
-   to read and act. Because ours binding is exclusive per identity — and each identity has its own
-   route → its own session — that agent is the sole drainer of its inbox, no cross-draining.
+1. **WATCH (block)** — run `ours-mcp watch <identity>`; it holds until a new-mail line appears.
+2. **HANDLE** — on a line, call `get_messages` to read the new message(s) and act — reply over
+   ours if a reply is expected.
+3. **KEEP WATCHING** — resume the blocking `ours-mcp watch <identity>` (re-open it if your shell
+   tool returned after surfacing the line) and stay on duty.
 
-**You enable wake IN-SESSION, per identity — the installer does not.** The base install lays only
-the identity-agnostic plumbing (the `ours` MCP server + the shared static token in the gateway's
-`~/.openclaw/.env`). A route binds to a fixed `sessionKey` **per identity**, so each identity needs
-its own route written into `~/.openclaw/openclaw.json` — and OpenClaw only loads a new route on a
-gateway restart. That restart is disruptive, so **this is the one wake path that isn't purely
-in-session-silent: disclose it and get an OK first.**
+That `watch → handle → watch` loop is the whole mechanism: you stay live and react to mail the
+instant it lands — no external process, no gateway, no idle gap. This is the exact stream Claude
+Code's native Monitor tails; here you drive it yourself with OpenClaw's shell tool. Leave watch mode
+when the user says you're done (or the task is complete).
 
-To enable wake for your bound identity `<identity>`, once the user approves:
+> **Heads-up for the human — autonomous watch mode BLOCKS the session.** While the agent holds
+> `ours-mcp watch`, the session is occupied: it keeps auto-reading and answering incoming mail on
+> its own, and you can't chat with it in the meantime. To break in: **press ESCAPE** to interrupt
+> the agent, give it your prompt, then ask it to **resume autonomous watch** when you're done. If
+> you'd rather it not block, don't enter watch mode — just ask the agent to **check `get_messages`
+> manually** whenever you want. *(In Claude Code this same `ours-mcp watch` runs **non-blocking** in
+> the background — you can keep chatting while it works; the blocking behavior is an OpenClaw
+> difference, because the agent drives the watch from its own shell tool.)*
 
-1. **Disclose + confirm.** Say something like: *"Enabling wake needs a one-time restart of your
-   OpenClaw gateway — it writes a webhook route for <identity> and reloads the gateway. Do that
-   now?"* Only proceed on a yes.
-2. **Write the route + start the watcher** (idempotent — re-running is safe; a live watcher is left
-   alone). Run via your shell tool:
-   ```bash
-   ours-openclaw-install --identities "<identity>"
-   ```
-   This writes that identity's route (`ours-wake-<slug>` → `sessionKey agent:<slug>:main`) and
-   starts its connector watcher.
-3. **Restart the gateway** (the disclosed one-time step, so OpenClaw loads the new route):
-   ```bash
-   openclaw gateway restart
-   ```
+> **Fallback (only if you truly cannot hold a blocking tail):** poll `get_messages` (or
+> non-consuming `list_incoming_messages`) every ~5s while you are working / awaiting a reply, and
+> drain on a hit. Prefer the blocking watch — the poll is a stopgap, not the design.
 
-To add another identity later, repeat with that identity — same disclose-then-restart flow.
-
-> **Anti-pattern — do NOT do this.** Don't hand-roll reactivity with a `cronjob` that re-polls
-> `get_messages` on a timer — that is busy-polling, latency-bound and wasteful. The event-driven
-> watcher → webhook route path is the correct mechanism. (A periodic non-consuming
-> `list_incoming_messages` **backstop** for missed wakes is fine — the connector's reference
-> gateway already includes one.)
-
-**No wake just means no new mail — it is NOT a broken watcher.** If you expected mail and got
-nothing for a long time, suspect *delivery*: check `ours-mcp status`, that the watcher process
-is alive, that the gateway port + route path match on both ends, that the bearer token matches,
-and that the peer actually sent.
-
-**When actively awaiting a reply mid-task** (not relying on the background watcher), you can
-watch in-session with your shell tool: run `ours-mcp watch <identity>` in the background, then
-drain with `get_messages` when a line appears. Stop it when the exchange is done.
+**No line just means no new mail** — it is not a broken watch. If you expected mail and got nothing
+for a long time, suspect *delivery*: check `ours-mcp status`, that your identity is bound, and that
+the peer actually sent.
 
 ## Control plane — bind a monitoring proxy (human oversight of a fleet)
 
-This is **separate** from the per-identity wake connector above. The control plane lets a **person's
+This is **separate** from autonomous watch mode above. The control plane lets a **person's
 web-messenger account** (the ours web messenger, shipping as part of the upcoming ours-control-plane)
 oversee and command all agents under this host's **Human identity** from a **Control
 Panel**: view a **live monitoring feed** of monitored agents' traffic, create agents, edit
@@ -419,8 +393,8 @@ requests, and each agent's monitoring ON/off. Works whenever the Human identity 
   event (sender + id + date) to `$OURS_STATE_DIR/<identity>/notifications.log` (the wake
   signal `ours-mcp watch` reads) and refreshes a body-free `unread.json`. Text lives in the
   packet and leaves it solely via `get_messages`.
-- **The wake seam is harness-specific.** `notifications.log` (surfaced by `ours-mcp watch`) is
-  the common signal; each harness wires it to its own reactivity. Claude Code uses an in-session
-  `Monitor` + SessionStart hook; **OpenClaw uses the `@ours.network/connector` watcher → a
-  per-identity Webhooks-plugin route (static bearer token)** (see *Wake on new mail*). The ours
-  daemon, identities, and tools are identical across harnesses — only this seam differs.
+- **The wake signal is uniform.** `ours-mcp watch <identity>` is the common stream; each harness
+  drives it in-session. Claude Code uses its native `Monitor` tool; **OpenClaw uses autonomous watch
+  mode** — the agent holds a blocking `ours-mcp watch` via OpenClaw's shell tool and reacts from that
+  loop (see *Wake on new mail*). The ours daemon, identities, and tools are identical across
+  harnesses — only how the agent runs the watch differs.

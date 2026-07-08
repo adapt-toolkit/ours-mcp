@@ -1,15 +1,16 @@
 // Tests for the Hermes config-install planner (bin/hermes-config-install.mjs).
 // It decides, purely from the existing ~/.hermes/config.yaml text, how to install
-// the ours blocks WITHOUT ever corrupting a user's YAML:
+// the ours MCP server WITHOUT ever corrupting a user's YAML:
 //   - no config / empty            -> write a fresh file
 //   - config without our top keys  -> safe to append our block
 //   - config already installed     -> noop (idempotent via sentinel)
-//   - config with existing mcp_servers: or platforms: -> manual (print + instruct)
+//   - config with existing mcp_servers: -> manual (print + instruct)
+// Reactivity needs no config — wake is the agent tailing `ours-mcp watch` in-session.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { planConfigInstall, renderConfigBlock, SENTINEL } from '../bin/hermes-config-install.mjs';
 
-const BLOCK = renderConfigBlock({ secret: 's3cr3t', webhookPort: 8644, identities: ['Alice', 'Bob'] });
+const BLOCK = renderConfigBlock();
 
 test('empty config -> write', () => {
   assert.equal(planConfigInstall('').action, 'write');
@@ -31,25 +32,17 @@ test('existing mcp_servers: top-level -> manual (never corrupt)', () => {
   assert.equal(planConfigInstall(cfg).action, 'manual');
 });
 
-test('existing platforms: top-level -> manual (never corrupt)', () => {
-  const cfg = 'platforms:\n  telegram:\n    enabled: true\n';
-  assert.equal(planConfigInstall(cfg).action, 'manual');
-});
-
-test('rendered block wires the MCP server, the ours-wake route, and the sentinel', () => {
+test('rendered block wires the MCP server + sentinel, and NO webhook/route/secret', () => {
   assert.match(BLOCK, /^# >>> ours\.network plugin/m);
   assert.match(BLOCK, /mcp_servers:/);
   // MCP server points directly at the globally-installed daemon proxy
   assert.match(BLOCK, /ours:\s*\n\s*command:\s*["']?ours-mcp["']?/);
   assert.match(BLOCK, /args:\s*\[\s*["']proxy["']\s*\]/);
-  // webhook route the connector pokes
-  assert.match(BLOCK, /platforms:\s*\n\s*webhook:/);
-  assert.match(BLOCK, /ours-wake:/);
-  assert.match(BLOCK, /events:\s*\[\s*["']ours_wake["']\s*\]/);
-  assert.match(BLOCK, /secret:\s*["']?s3cr3t["']?/);
-  assert.match(BLOCK, /skills:\s*\[\s*["']ours["']\s*\]/);
-  // the drain prompt references the poked identity via dot-notation
-  assert.match(BLOCK, /\{identity\}/);
+  // the connector/gateway approach is gone — no webhook platform, route, or secret in the block
+  assert.doesNotMatch(BLOCK, /platforms:/);
+  assert.doesNotMatch(BLOCK, /ours-wake/);
+  assert.doesNotMatch(BLOCK, /secret:/);
+  assert.doesNotMatch(BLOCK, /webhook/i);
 });
 
 test('rendered block is valid: appending it after a config keeps the sentinel once', () => {

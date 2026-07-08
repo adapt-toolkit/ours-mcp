@@ -5,18 +5,14 @@
 //     npm i -g @ours.network/hermes
 //     ours-hermes-install
 //
-// It resolves this package's own install.sh (which ensures the ours daemon, registers
-// the `ours` MCP server + the `ours-wake` webhook route in ~/.hermes/config.yaml,
-// installs the skills) and runs it — no env-var gymnastics. The MCP server + skill install
-// immediately. Wake-on-mail is NOT set up here: the agent enables it in-session (bind an
-// identity, then the ours skill starts the watcher for it). Everything is idempotent, so
-// re-running is safe.
-//
-// (Power-user escape hatch, not the story and never prompted: --identities "A B" starts the
-// watcher at install time for identities that already exist. Prefer the in-session flow.)
+// It resolves this package's own install.sh (which ensures the ours daemon, registers the
+// `ours` MCP server in ~/.hermes/config.yaml, and installs the skills) and runs it — no env-var
+// gymnastics. The MCP server + skill install immediately. Wake-on-mail is NOT set up here: the
+// agent enables it in-session by tailing `ours-mcp watch <identity>` (see the ours skill),
+// exactly like Claude Code. Everything is idempotent, so re-running is safe.
 //
 // Usage:
-//   ours-hermes-install [--port 8644] [--hermes-dir DIR] [--skip-daemon] [--skip-watcher]
+//   ours-hermes-install [--hermes-dir DIR] [--skip-daemon]
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -29,11 +25,8 @@ const argv = process.argv.slice(2);
 const opts = {};
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a === '--identities' || a === '-i') opts.identities = argv[++i];
-  else if (a === '--port') opts.port = argv[++i];
-  else if (a === '--hermes-dir') opts.hermesDir = argv[++i];
+  if (a === '--hermes-dir') opts.hermesDir = argv[++i];
   else if (a === '--skip-daemon') opts.skipDaemon = true;
-  else if (a === '--skip-watcher') opts.skipWatcher = true;
   else if (a === '--help' || a === '-h') { help(); process.exit(0); }
   else { console.error(`ours-hermes-install: unknown argument "${a}"`); help(); process.exit(2); }
 }
@@ -45,13 +38,11 @@ function help() {
 
 Sets up the daemon + the ours MCP server + the skill. It asks nothing about identities or
 wake-on-mail: you enable wake in-session from your agent (bind an identity, then ask the ours
-skill to "wake me on new mail").
+skill to "wake me on new mail" — it tails ours-mcp watch and reacts in-session).
 
 Options:
-      --port <n>           Hermes webhook port (default 8644)
       --hermes-dir <dir>   Hermes config+skills root (default ~/.hermes)
       --skip-daemon        do not install/start the ours daemon
-      --skip-watcher       do not start the reactivity watcher
   -h, --help               show this help
 
 Idempotent: safe to re-run. After it finishes, run /reload-mcp in Hermes.`);
@@ -65,11 +56,8 @@ if (!existsSync(INSTALL)) {
 // install.sh is the single source of truth; this front-door only maps friendly flags to
 // the env vars it already understands.
 const env = { ...process.env };
-if (opts.identities != null) env.CONNECTOR_IDENTITIES = opts.identities;
-if (opts.port) env.OURS_WEBHOOK_PORT = opts.port;
 if (opts.hermesDir) env.HERMES_DIR = opts.hermesDir;
 if (opts.skipDaemon) env.OURS_INSTALL_SKIP_DAEMON = '1';
-if (opts.skipWatcher) env.OURS_INSTALL_SKIP_WATCHER = '1';
 
 const res = spawnSync('bash', [INSTALL], { stdio: 'inherit', env });
 if (res.error) { console.error(`ours-hermes-install: ${res.error.message}`); process.exit(1); }

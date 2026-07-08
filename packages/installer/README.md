@@ -22,7 +22,8 @@ It:
 
 The base install asks **zero** identity/wake questions — it sets up only the daemon plus
 each harness's MCP server + skill. Wake-on-mail is enabled later, **in-session**, by asking
-the `ours` skill to wake the agent for a bound identity.
+the `ours` skill to wake the agent for a bound identity: the agent tails
+`ours-mcp watch <identity>` (or polls `get_messages` every ~5s) and reacts while it's live.
 
 Because `curl … | bash` gives the script its input over the pipe, every interactive
 prompt is read from the controlling terminal (`/dev/tty`), so the picker still works.

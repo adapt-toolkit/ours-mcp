@@ -46,7 +46,7 @@ test('install.sh sets up skills, config.toml, and AGENTS.md; second run is idemp
     const agents = readFileSync(join(CODEX, 'AGENTS.md'), 'utf8');
     assert.match(agents, /ours\.network plugin \(managed block\)/, 'AGENTS pointer sentinel present');
     assert.match(agents, /get_messages/, 'AGENTS pointer mentions get_messages');
-    assert.match(agents, /session-only/i, 'AGENTS pointer is honest about session-only reactivity');
+    assert.match(agents, /in-session/i, 'AGENTS pointer describes in-session reactivity');
 
     // second run: idempotent — one MCP table, one pointer
     run(CODEX, SKILLS);

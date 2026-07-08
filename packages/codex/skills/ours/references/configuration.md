@@ -12,9 +12,9 @@ The daemon is a **shared, host-wide singleton** reachable only on `127.0.0.1`
 | GC interval (ms) | `OURS_GC_INTERVAL_MS` | `gcIntervalMs` | `3600000` |
 | Auto-start daemon | `OURS_AUTOSTART` | `autoStart` | `false` |
 
-**The port is shared.** Any process that dials the daemon (the MCP proxy, the
-optional codex-exec gateway) connects to `127.0.0.1:<OURS_PORT>` and the daemon
-binds the same port — both read `OURS_PORT`/`config.json`. Change it **once in
+**The port is shared.** Any process that dials the daemon — the `ours-mcp proxy` MCP
+server and `ours-mcp watch` — connects to `127.0.0.1:<OURS_PORT>` and the daemon
+binds the same port (both read `OURS_PORT`/`config.json`). Change it **once in
 shared config**, never per-side, or a dialer won't find the daemon.
 
 **Changing config (consent-first — never on your own initiative):**

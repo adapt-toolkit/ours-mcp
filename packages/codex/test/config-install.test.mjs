@@ -72,14 +72,14 @@ test('AGENTS.md with our pointer (sentinel present) -> noop', () => {
   assert.equal(planAgentsInstall(md).action, 'noop');
 });
 
-test('rendered AGENTS block names the ours skill, the tools, and session-only reactivity', () => {
+test('rendered AGENTS block names the ours skill, the tools, and in-session reactivity', () => {
   assert.match(AGENTS_BLOCK, /ours\.network/);
   assert.match(AGENTS_BLOCK, /~\/\.agents\/skills\/ours/);
   assert.match(AGENTS_BLOCK, /get_messages/);
-  assert.match(AGENTS_BLOCK, /session-only/i);
-  // honest: mentions the optional non-native fallback without claiming native wake
-  assert.match(AGENTS_BLOCK, /codex exec/);
-  assert.match(AGENTS_BLOCK, /not native/i);
+  // reactivity is in-session: tail `ours-mcp watch` (or poll get_messages) — no gateway/codex-exec
+  assert.match(AGENTS_BLOCK, /in-session/i);
+  assert.match(AGENTS_BLOCK, /ours-mcp watch/);
+  assert.doesNotMatch(AGENTS_BLOCK, /codex exec/);
 });
 
 test('appending the AGENTS block keeps the sentinel once', () => {

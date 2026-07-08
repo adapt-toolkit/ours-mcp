@@ -7,7 +7,8 @@
 #
 # It removes ONLY what the ours installers created — never unrelated files. Using the same
 # interactive toggle UI as install.sh, it asks WHAT to remove:
-#   • each per-harness plugin  (config block + skill dirs + connector env/log + npm global)
+#   • each per-harness plugin  (MCP-server config block + skill dirs + npm global, plus cleanup of
+#                               any LEGACY connector env/log/route/secret from earlier builds)
 #   • the ours data directory  (~/.ours — identities + keys; DESTRUCTIVE, extra confirm)
 #   • the ours-mcp daemon       (stop + remove service + npm global; extra confirm)
 #

@@ -1,22 +1,22 @@
 // Tests for the OpenClaw config-install planner (bin/openclaw-config-install.mjs).
 // It decides, purely from the existing ~/.openclaw/openclaw.json text, how to install
-// the ours keys WITHOUT ever clobbering a user's JSON5 file:
+// the ours MCP server WITHOUT ever clobbering a user's JSON5 file:
 //   - no config / empty            -> write a fresh file
 //   - strict JSON without our keys -> safe to deep-merge our block
 //   - config already installed     -> noop (idempotent via sentinel)
 //   - JSON5 / comments / unparsable -> manual (print + instruct, exit 3)
+// Reactivity needs no config — wake is the agent tailing `ours-mcp watch` in-session, so there
+// are no webhook routes / sessionKeys / secrets here.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   planConfigInstall,
   renderConfig,
   buildOursConfig,
-  routeNameFor,
-  missingRoutes,
   SENTINEL,
 } from '../bin/openclaw-config-install.mjs';
 
-const FRAGMENT = buildOursConfig({ webhookPort: 18789, identities: ['Alice', 'Bob'] });
+const FRAGMENT = buildOursConfig();
 
 test('empty / whitespace config -> write', () => {
   assert.equal(planConfigInstall('').action, 'write');
@@ -34,27 +34,6 @@ test('already-installed config (sentinel present) -> noop', () => {
   assert.equal(planConfigInstall(cfg).action, 'noop');
 });
 
-test('re-run with the SAME identities stays a noop (idempotent)', () => {
-  const fragment = buildOursConfig({ identities: ['Alice'] });
-  const installed = renderConfig('', fragment); // sentinel + Alice route
-  assert.equal(planConfigInstall(installed, fragment).action, 'noop');
-  assert.deepEqual(missingRoutes(JSON.parse(installed), fragment), []);
-});
-
-test('re-run with a NEW identity merges the missing route (not a blanket noop)', () => {
-  const installed = renderConfig('', buildOursConfig({ identities: ['Alice'] }));
-  const grown = buildOursConfig({ identities: ['Alice', 'Bob'] });
-  // sentinel is present, but Bob's route is missing → must merge, not noop.
-  assert.deepEqual(missingRoutes(JSON.parse(installed), grown), [routeNameFor('Bob')]);
-  assert.equal(planConfigInstall(installed, grown).action, 'merge');
-  // and the merge actually adds Bob while preserving Alice + the sentinel.
-  const out = renderConfig(installed, grown);
-  const parsed = JSON.parse(out);
-  assert.ok(parsed.plugins.entries.webhooks.config.routes[routeNameFor('Alice')], 'Alice preserved');
-  assert.ok(parsed.plugins.entries.webhooks.config.routes[routeNameFor('Bob')], 'Bob added on re-run');
-  assert.equal(parsed['//ours'], SENTINEL, 'sentinel preserved');
-});
-
 test('JSON5 / comments (not strict JSON) -> manual (never clobber)', () => {
   const cfg = '{\n  // a comment JSON.parse cannot handle\n  mcp: { servers: {} },\n}\n';
   assert.equal(planConfigInstall(cfg).action, 'manual');
@@ -64,34 +43,21 @@ test('outright garbage -> manual (never clobber)', () => {
   assert.equal(planConfigInstall('this is not json at all {').action, 'manual');
 });
 
-test('fragment wires the MCP server + one route per identity + the sentinel', () => {
+test('fragment wires the MCP server + the sentinel, and NO webhook routes', () => {
   assert.equal(FRAGMENT['//ours'], SENTINEL);
   // MCP server points directly at the globally-installed daemon proxy
   assert.equal(FRAGMENT.mcp.servers.ours.command, 'ours-mcp');
   assert.deepEqual(FRAGMENT.mcp.servers.ours.args, ['proxy']);
-  // one webhook route per identity
-  const routes = FRAGMENT.plugins.entries.webhooks.config.routes;
-  assert.ok(routes[routeNameFor('Alice')], 'Alice route rendered');
-  assert.ok(routes[routeNameFor('Bob')], 'Bob route rendered');
-  const alice = routes[routeNameFor('Alice')];
-  assert.equal(alice.path, '/plugins/webhooks/ours-wake-alice');
-  assert.equal(alice.sessionKey, 'agent:alice:main');
-  assert.equal(alice.secret.source, 'env');
-  assert.equal(alice.secret.id, 'OURS_WAKE_SECRET');
-  assert.equal(alice.controllerId, 'webhooks/ours-wake-alice');
-});
-
-test('routeNameFor slugifies identity names', () => {
-  assert.equal(routeNameFor('Agent One'), 'ours-wake-agent-one');
-  assert.equal(routeNameFor('Bob@laptop'), 'ours-wake-bob-laptop');
+  // the connector/gateway approach is gone — no webhooks plugin entry at all
+  assert.equal(FRAGMENT.plugins, undefined, 'no plugins/webhooks routes');
 });
 
 test('render on empty writes valid JSON containing our keys', () => {
   const out = renderConfig('', FRAGMENT);
   const parsed = JSON.parse(out); // must be strict JSON
   assert.equal(parsed.mcp.servers.ours.command, 'ours-mcp');
-  assert.ok(parsed.plugins.entries.webhooks.config.routes[routeNameFor('Alice')]);
   assert.equal(parsed['//ours'], SENTINEL);
+  assert.equal(parsed.plugins, undefined);
 });
 
 test('render deep-merges into existing strict JSON, preserving unrelated keys', () => {
@@ -105,10 +71,9 @@ test('render deep-merges into existing strict JSON, preserving unrelated keys', 
   // unrelated keys survive
   assert.equal(parsed.theme, 'dark');
   assert.equal(parsed.mcp.servers.other.command, 'keepme');
-  assert.ok(parsed.plugins.entries.somethingElse);
+  assert.ok(parsed.plugins.entries.somethingElse, 'unrelated plugins preserved');
   // ours keys added
   assert.equal(parsed.mcp.servers.ours.command, 'ours-mcp');
-  assert.ok(parsed.plugins.entries.webhooks.config.routes[routeNameFor('Bob')]);
 });
 
 test('re-merging is idempotent (second merge equals first)', () => {

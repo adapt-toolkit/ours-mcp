@@ -42,8 +42,5 @@
   "scripts": {
     "install-plugin": "bash install.sh",
     "test": "node --test"
-  },
-  "dependencies": {
-    "@ours.network/connector": "0.3.0"
   }
 }
