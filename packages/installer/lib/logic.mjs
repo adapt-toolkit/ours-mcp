@@ -1,0 +1,95 @@
+// Pure, dependency-free logic for the ours.network installer — everything here is a plain
+// function with no I/O so it can be unit-tested directly (no subprocess, no tty). The install.mjs
+// orchestrator wires these to real npm/ours-mcp/tty calls; the integration tests drive that via
+// install.sh. Keeping the decisions here means the tricky bits (harness canon, port-conflict,
+// config merge, version parsing) are covered by fast, hermetic tests.
+
+// canonHarnesses: normalize a free-form selection (numbers, names, or "all") into canonical
+// harness names, de-duped, order-preserving. Faithful port of install.sh's canon_harnesses.
+// Returns { names: string[], unknown: string[] } — unknown tokens are reported, not fatal.
+export function canonHarnesses(raw) {
+  const names = [];
+  const unknown = [];
+  const push = (n) => { if (!names.includes(n)) names.push(n); };
+  const toks = String(raw || '').toLowerCase().replace(/,/g, ' ').split(/\s+/).filter(Boolean);
+  for (const tok of toks) {
+    switch (tok) {
+      case 'all': case 'a':
+        return { names: ['claude-code', 'codex', 'hermes'], unknown };
+      case '1': case 'claude-code': case 'claude': case 'cc': push('claude-code'); break;
+      case '2': case 'codex': push('codex'); break;
+      case '3': case 'hermes': push('hermes'); break;
+      case 'none': case 'skip': case '0': break;
+      default: unknown.push(tok);
+    }
+  }
+  return { names, unknown };
+}
+
+// The Telegram connector owns 3051 — the installer must never hand a daemon that port.
+export const RESERVED_PORTS = [3051];
+export const DEFAULT_PORT = 3050;
+export const DEFAULT_BROKER = 'wss://broker1.ours.network';
+
+// suggestPort: pick a usable HTTP port. If `desired` is free and not reserved, keep it. Otherwise
+// scan upward from 3060 (the brief's suggested alternate band) for the first free, non-reserved
+// port. `isTaken(port)` is injected so this stays pure and testable (real caller probes a bind).
+export function suggestPort(desired, isTaken, { reserved = RESERVED_PORTS, floor = 3060 } = {}) {
+  const taken = (p) => reserved.includes(p) || isTaken(p);
+  if (!taken(desired)) return desired;
+  for (let p = Math.max(floor, desired + 1); p < desired + 1000; p++) {
+    if (!taken(p)) return p;
+  }
+  return desired; // exhausted — let the caller surface it; never silently loop forever
+}
+
+// A port string is valid if it's an integer in the ephemeral-safe user range.
+export function parsePort(input, fallback = DEFAULT_PORT) {
+  const n = Number.parseInt(String(input).trim(), 10);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) return { ok: false, port: fallback };
+  return { ok: true, port: n };
+}
+
+// Basic sanity for a broker address: must look like a ws:// or wss:// URL. Empty → keep default
+// (handled by caller). We don't hard-fail on odd input, just report so the caller can warn.
+export function validateBroker(input) {
+  const s = String(input).trim();
+  if (!s) return { ok: true, value: '', empty: true };
+  const ok = /^wss?:\/\/[^\s]+$/i.test(s);
+  return { ok, value: s, empty: false };
+}
+
+// mergeConfig: take the existing parsed config.json object and a patch of only the keys the user
+// changed, returning the pretty-printed strict-JSON text to write (stable key handling, trailing
+// newline). Never drops unrelated keys the daemon or user added.
+export function mergeConfig(existing, patch) {
+  const base = existing && typeof existing === 'object' ? existing : {};
+  const out = { ...base };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) continue;
+    out[k] = v;
+  }
+  return JSON.stringify(out, null, 2) + '\n';
+}
+
+// parseVersion: pull the first x.y.z out of a version string (e.g. `ours-mcp v0.9.9`), matching
+// install.sh's `grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1`. Returns '' when none is present.
+export function parseVersion(text) {
+  const m = String(text || '').match(/[0-9]+\.[0-9]+\.[0-9]+/);
+  return m ? m[0] : '';
+}
+
+// parseStatus: read the daemon's RESOLVED broker + port out of `ours-mcp status` output, so we
+// prompt with what the daemon is actually using rather than a hardcoded guess. Returns
+// { broker, port } with either field null when the line isn't present (daemon stopped / older
+// build). Lines look like:  "  broker: wss://broker1.ours.network"  and
+// "  url:    http://localhost:3050/mcp (reachable)".
+export function parseStatus(text) {
+  const s = String(text || '');
+  const bm = s.match(/^\s*broker:\s*(\S+)/m);
+  const pm = s.match(/url:\s*https?:\/\/[^:\s/]+:(\d+)/i);
+  return {
+    broker: bm ? bm[1] : null,
+    port: pm ? Number.parseInt(pm[1], 10) : null,
+  };
+}

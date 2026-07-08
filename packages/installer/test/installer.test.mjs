@@ -35,7 +35,7 @@ test('installs daemon + selected npm harnesses (identity-free base install), ski
   writeFileSync(log, '');
   // ours-mcp absent at first? We include it so `command -v` finds it; status returns non-zero
   // → installer calls `ours-mcp start`.
-  fakeBins(bin, ['npm', 'ours-mcp', 'ours-hermes-install', 'ours-codex-install', 'ours-openclaw-install']);
+  fakeBins(bin, ['npm', 'ours-mcp', 'ours-hermes-install', 'ours-codex-install']);
 
   execFileSync('bash', [INSTALL], {
     env: {
@@ -65,8 +65,8 @@ test('installs daemon + selected npm harnesses (identity-free base install), ski
   // the installer must NEVER forward identities / wake flags — that concept is gone from install
   assert.doesNotMatch(calls, /--identities/, 'installer must not forward --identities');
   assert.doesNotMatch(calls, /Alice|Bob/, 'installer must not pass any identity names through');
-  // openclaw was NOT selected
-  assert.doesNotMatch(calls, /ours-openclaw-install/, 'unselected harness must not run');
+  // OpenClaw support was dropped entirely — it must never appear anywhere.
+  assert.doesNotMatch(calls, /openclaw/i, 'openclaw must not appear — support was removed');
 
   rmSync(tmp, { recursive: true, force: true });
 });
@@ -137,35 +137,108 @@ function hasPython3() {
   try { execFileSync('python3', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; }
 }
 
-test('interactive toggle UI: arrow/space/enter selects harnesses, asks ZERO identity questions',
+test('interactive toggle UI: broker/port defaults then arrow/space/enter selects harnesses',
   { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
   const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
   const bin = join(tmp, 'bin');
   execFileSync('mkdir', ['-p', bin]);
   const log = join(tmp, 'calls.log');
   writeFileSync(log, '');
-  fakeBins(bin, ['npm', 'ours-mcp', 'ours-hermes-install', 'ours-codex-install', 'ours-openclaw-install']);
+  fakeBins(bin, ['npm', 'ours-mcp', 'ours-hermes-install', 'ours-codex-install']);
   const driver = join(HERE, 'pty-toggle-driver.py');
 
-  // Options render as: claude-code(0) codex(1) hermes(2) openclaw(3), cursor at 0.
-  // Keys: down→codex, space(toggle codex), down→hermes, space(toggle hermes), enter.
-  // No OURS_HARNESSES / OURS_ASSUME_YES → the installer MUST use the interactive checkbox UI.
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log, OURS_SERVICE: 'no' };
+  // Flow order (v2): daemon → service(env=no) → BROKER prompt → PORT prompt → harness checkbox.
+  // Keys: enter (keep broker default) · enter (keep port default) · then the checkbox — options
+  // claude-code(0) codex(1) hermes(2), cursor at 0: down→codex, space, down→hermes, space, enter.
+  // No OURS_HARNESSES / OURS_ASSUME_YES → the installer MUST prompt interactively. OURS_CONFIG →
+  // a throwaway path so "keep default" (which writes nothing) can't touch the real ~/.ours.
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log, OURS_SERVICE: 'no',
+    OURS_CONFIG: join(tmp, 'config.json') };
   delete env.OURS_HARNESSES; delete env.OURS_ASSUME_YES; delete env.OURS_IDENTITIES;
-  // execFileSync returning at all proves the run COMPLETED — it never blocked on an identity prompt.
-  const seen = execFileSync('python3', [driver, INSTALL, 'down,space,down,space,enter'],
+  delete env.OURS_BROKER; delete env.OURS_BROKER_URL; delete env.OURS_PORT;
+  // execFileSync returning at all proves the run COMPLETED — it never blocked on a prompt.
+  const seen = execFileSync('python3', [driver, INSTALL, 'enter,enter,down,space,down,space,enter'],
     { env, encoding: 'utf8' });
 
   const calls = readFileSync(log, 'utf8');
   assert.match(calls, /ours-codex-install/, 'codex toggled on → installed');
   assert.match(calls, /ours-hermes-install/, 'hermes toggled on → installed');
-  assert.doesNotMatch(calls, /ours-openclaw-install/, 'openclaw left off → not installed');
   assert.doesNotMatch(calls, /--identities/, 'no --identities forwarded');
-  // The removed prompt asked "Identities to wake on new mail …" — it must never appear again.
-  // (The end-of-run "Optional: get woken on new mail" pointer is fine; this matches only the old
-  // interactive prompt wording, which is what we deleted.)
-  assert.doesNotMatch(seen, /Identities to wake on new mail/, 'the old identities prompt must be gone');
+  assert.doesNotMatch(seen, /openclaw/i, 'openclaw must not appear — support was removed');
   // The toggle UI itself rendered (checkbox glyphs), confirming we exercised the interactive path.
   assert.match(seen, /\[x\]|\[ \]/, 'the checkbox toggle UI should have rendered');
+  // Keeping the broker/port defaults must persist nothing to the throwaway config.
+  assert.ok(!existsSync(join(tmp, 'config.json')), 'keeping defaults must not write config.json');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+// --- install.sh bootstrap: Node.js check -------------------------------------------------------
+test('install.sh with no Node.js prints friendly per-OS guidance and exits 0', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
+  const bin = join(tmp, 'bin');
+  execFileSync('mkdir', ['-p', bin]);
+  // A PATH with coreutils but NO `node` → the bootstrap must hit the guidance branch. `command`,
+  // `printf` are bash builtins; `uname` is guarded. execFileSync throws on non-zero, so a clean
+  // return proves exit 0.
+  const out = execFileSync('bash', [INSTALL], {
+    env: { PATH: '/usr/bin:/bin' + `:${bin}`, HOME: tmp },
+    stdio: 'pipe', encoding: 'utf8',
+  }).toString();
+  // Ensure node truly wasn't found (guard against a system node on /usr/bin leaking in).
+  let hasNode = true;
+  try { execFileSync('bash', ['-c', 'command -v node'], { env: { PATH: '/usr/bin:/bin' }, stdio: 'ignore' }); }
+  catch { hasNode = false; }
+  if (hasNode) { rmSync(tmp, { recursive: true, force: true }); return; } // environment has node on /usr/bin; skip
+  assert.match(out, /Node\.js/, 'explains Node.js is needed');
+  assert.match(out, /nodejs\.org/, 'links nodejs.org');
+  assert.doesNotMatch(out, /install\.mjs/, 'must not try to run the Node installer without node');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+// --- broker/port: env-driven values are written to config.json + the daemon restarts -----------
+test('OURS_BROKER/OURS_PORT are written to config.json and the daemon is restarted', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
+  const bin = join(tmp, 'bin');
+  execFileSync('mkdir', ['-p', bin]);
+  const log = join(tmp, 'calls.log');
+  writeFileSync(log, '');
+  const cfg = join(tmp, 'config.json');
+  fakeBins(bin, ['npm', 'ours-mcp'], { daemonRunning: true });
+
+  execFileSync('bash', [INSTALL], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log,
+      OURS_ASSUME_YES: '1', OURS_SERVICE: 'no', OURS_HARNESSES: 'none',
+      OURS_BROKER: 'wss://custom.example', OURS_PORT: '3060', OURS_CONFIG: cfg },
+    stdio: 'pipe',
+  });
+
+  assert.ok(existsSync(cfg), 'config.json should be written');
+  const parsed = JSON.parse(readFileSync(cfg, 'utf8'));
+  assert.equal(parsed.brokerUrl, 'wss://custom.example', 'broker persisted');
+  assert.equal(parsed.port, 3060, 'port persisted');
+  assert.match(readFileSync(log, 'utf8'), /ours-mcp restart/, 'daemon restarted to apply new config');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+// --- never hand out the Telegram connector's reserved port 3051 --------------------------------
+test('OURS_PORT=3051 is refused in favour of a non-reserved alternate', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
+  const bin = join(tmp, 'bin');
+  execFileSync('mkdir', ['-p', bin]);
+  const log = join(tmp, 'calls.log');
+  writeFileSync(log, '');
+  const cfg = join(tmp, 'config.json');
+  fakeBins(bin, ['npm', 'ours-mcp'], { daemonRunning: true });
+
+  execFileSync('bash', [INSTALL], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log,
+      OURS_ASSUME_YES: '1', OURS_SERVICE: 'no', OURS_HARNESSES: 'none',
+      OURS_PORT: '3051', OURS_CONFIG: cfg },
+    stdio: 'pipe',
+  });
+
+  assert.ok(existsSync(cfg), 'config.json should be written with the alternate port');
+  const parsed = JSON.parse(readFileSync(cfg, 'utf8'));
+  assert.notEqual(parsed.port, 3051, 'must never persist the reserved port 3051');
   rmSync(tmp, { recursive: true, force: true });
 });

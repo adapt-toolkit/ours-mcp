@@ -9,7 +9,6 @@
 #   @ours.network/mcp        packages/core         (no internal deps)
 #   @ours.network/claude-code packages/claude-code (pins @ours.network/mcp)
 #   @ours.network/hermes     packages/hermes       (no internal deps)
-#   @ours.network/openclaw   packages/openclaw     (no internal deps)
 #   @ours.network/codex      packages/codex        (no internal deps)
 # (packages/installer is private → never bumped or published.)
 #
@@ -26,7 +25,6 @@ MANAGED=(
   "@ours.network/mcp|packages/core/package.json|"
   "@ours.network/claude-code|packages/claude-code/package.json|@ours.network/mcp"
   "@ours.network/hermes|packages/hermes/package.json|"
-  "@ours.network/openclaw|packages/openclaw/package.json|"
   "@ours.network/codex|packages/codex/package.json|"
 )
 
@@ -132,5 +130,4 @@ emit "new-sha=$(git rev-parse HEAD)"
 emit "core-version=${NEWV[@ours.network/mcp]}"
 emit "plugin-version=${NEWV[@ours.network/claude-code]}"
 emit "hermes-version=${NEWV[@ours.network/hermes]}"
-emit "openclaw-version=${NEWV[@ours.network/openclaw]}"
 emit "codex-version=${NEWV[@ours.network/codex]}"
