@@ -1,0 +1,36 @@
+# ours.network — Hermes config blocks (reference).
+#
+# install.sh writes an equivalent managed block into ~/.hermes/config.yaml for you
+# (with a generated HMAC secret). This file is the manual reference: merge these two
+# top-level keys into your existing config.yaml, then run /reload-mcp in Hermes.
+#
+# IMPORTANT: the route `secret` below MUST equal the connector watcher's
+# CONNECTOR_HMAC_SECRET (same shared secret on both ends), and it must NOT be the
+# placeholder default — the connector's reference gateway refuses to start on it.
+
+# 1) The ours MCP server. Points Hermes directly at the globally-installed daemon
+#    proxy (`npm i -g @ours.network/mcp`). Tools appear as mcp_ours_<tool>.
+mcp_servers:
+  ours:
+    command: "ours-mcp"
+    args: ["proxy"]
+    enabled: true
+
+# 2) The wake route the reactivity connector pokes. The connector's watcher tails
+#    `ours-mcp watch <identity>` and POSTs an HMAC-signed wake here on each new
+#    message; Hermes runs the ours skill to drain that identity's inbox.
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      port: 8644
+      routes:
+        ours-wake:
+          events: ["ours_wake"]           # matched via X-GitHub-Event header / event_type field
+          secret: "REPLACE_WITH_SHARED_SECRET"   # == connector CONNECTOR_HMAC_SECRET
+          skills: ["ours"]
+          deliver: "log"
+          prompt: |
+            New ours.network mail arrived for identity "{identity}". Use the ours skill:
+            bind that identity if it is not already bound, then call the ours get_messages
+            tool to read the message(s) and act on them. Reply over ours if a reply is expected.
