@@ -7,11 +7,10 @@
 #
 # Managed packages (publish order = dependency order):
 #   @ours.network/mcp        packages/core         (no internal deps)
-#   @ours.network/connector  packages/connector    (no internal deps)
 #   @ours.network/claude-code packages/claude-code (pins @ours.network/mcp)
-#   @ours.network/hermes     packages/hermes       (pins @ours.network/connector)
-#   @ours.network/openclaw   packages/openclaw     (pins @ours.network/connector)
-#   @ours.network/codex      packages/codex        (pins @ours.network/connector)
+#   @ours.network/hermes     packages/hermes       (no internal deps)
+#   @ours.network/openclaw   packages/openclaw     (no internal deps)
+#   @ours.network/codex      packages/codex        (no internal deps)
 # (packages/installer is private → never bumped or published.)
 #
 # Bump level comes from the HEAD commit subject (Conventional Commits):
@@ -25,11 +24,10 @@ cd "$(git rev-parse --show-toplevel)"
 # name|json-path|pin-dep (pin-dep empty = none). Order matters: publish/bump in this order.
 MANAGED=(
   "@ours.network/mcp|packages/core/package.json|"
-  "@ours.network/connector|packages/connector/package.json|"
   "@ours.network/claude-code|packages/claude-code/package.json|@ours.network/mcp"
-  "@ours.network/hermes|packages/hermes/package.json|@ours.network/connector"
-  "@ours.network/openclaw|packages/openclaw/package.json|@ours.network/connector"
-  "@ours.network/codex|packages/codex/package.json|@ours.network/connector"
+  "@ours.network/hermes|packages/hermes/package.json|"
+  "@ours.network/openclaw|packages/openclaw/package.json|"
+  "@ours.network/codex|packages/codex/package.json|"
 )
 
 emit() { [[ -n "${GITHUB_OUTPUT:-}" ]] && printf '%s\n' "$1" >> "$GITHUB_OUTPUT" || true; }
@@ -132,7 +130,6 @@ git push origin "HEAD:${GITHUB_REF_NAME:-main}"
 emit "bumped=true"
 emit "new-sha=$(git rev-parse HEAD)"
 emit "core-version=${NEWV[@ours.network/mcp]}"
-emit "connector-version=${NEWV[@ours.network/connector]}"
 emit "plugin-version=${NEWV[@ours.network/claude-code]}"
 emit "hermes-version=${NEWV[@ours.network/hermes]}"
 emit "openclaw-version=${NEWV[@ours.network/openclaw]}"

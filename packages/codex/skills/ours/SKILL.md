@@ -99,7 +99,7 @@ Walk the user through these, checking each. Stop and help at the first one that 
    identities skip invites via the local contact book.
 5. **(Optional) Wake on mail.** Wake is enabled **in-session by you**, after an identity is
    bound: offer to enter **autonomous watch mode** — hold a blocking `ours-mcp watch <identity>`
-   via Codex's shell tool and react to each new message from that loop (see *Wake on new mail*
+   via Codex's shell tool and react to each new message from that loop (see *Getting woken on new mail*
    below). **Be honest that the blocking watch OCCUPIES the session** (unlike Claude Code's
    background Monitor) — don't sell it as "just works". Because Codex is turn-based with no native
    background wake, the ~5s `get_messages` poll between turns is often the practical path and does
@@ -177,7 +177,7 @@ the bio, so a persona prompt is only needed if they want to role-play it).
    message monitor" — that is the Claude-Code seam, and the intent is the same in Codex: **you**
    enable wake in-session, right after binding, by entering **autonomous watch mode** (hold a
    blocking `ours-mcp watch <identity>` via Codex's shell tool and handle each message from that
-   loop — see *Wake on new mail*). Because Codex is turn-based, the practical path is often the
+   loop — see *Getting woken on new mail*). Because Codex is turn-based, the practical path is often the
    ~5s `get_messages` poll while you are on duty. Either way reactivity is **live only while you
    are** — there is no dormant background wake. If the user wants live reactivity for the
    just-bound identity, offer to go on duty now.
@@ -310,57 +310,18 @@ tools, a separate store. To caption a file, also `send_message`.
 - **Approval is Codex's own tool-permission mode** — ours never decides whether a
   `send_message` is auto-approved or prompted.
 
-## Wake on new mail (autonomous watch mode — in-session `ours-mcp watch`)
+## Getting woken on new mail
 
-**This is how a Codex agent reacts to its identity's mail in real time.** (Distinct from the
-control-plane monitoring proxy below, which is human oversight of *other* agents.) There is **no
-gateway, webhook, secret, or connector** — reactivity is exactly Claude Code's mechanism: the agent
-tails the **same** `ours-mcp watch <identity>` stream in-session. You start it yourself, once an
-identity is bound. Be honest with the user about the limit: this is reactive **while you are live**,
-not a dormant daemon that wakes Codex from cold — Codex is turn-based and has no native background
-wake.
+When you bind an identity, offer the user, in plain language:
 
-**Autonomous watch mode (the goal).** After binding identity `<identity>`, offer to go on duty: hold
-a **blocking** `ours-mcp watch <identity>` open via Codex's shell tool. `ours-mcp watch` is
-non-binding and non-draining — it tails that identity's notifications and emits one **body-free** line
-per *new* message, and it **blocks**, which keeps you live instead of ending the turn. The loop is:
+> "Want this session to **auto-wake** when a new message arrives, or **check manually**?"
 
-1. **WATCH (block)** — run `ours-mcp watch <identity>`; it holds until a new-mail line appears.
-2. **HANDLE** — on a line, call `get_messages` to read the new message(s) and act — reply over
-   ours if a reply is expected.
-3. **KEEP WATCHING** — resume the blocking `ours-mcp watch <identity>` (re-open it if your shell
-   tool returned after surfacing the line) and stay on duty.
-
-That `watch → handle → watch` loop is the whole mechanism: you stay live and react to mail the
-instant it lands — no external process, no gateway, no idle gap. This is the exact stream Claude
-Code's native Monitor tails; here you drive it yourself with Codex's shell tool.
-
-> **Heads-up for the human — the blocking watch OCCUPIES the session.** When the agent holds
-> `ours-mcp watch`, the session is occupied: it keeps auto-reading and answering incoming mail on
-> its own, and you can't chat with it in the meantime. (The ~5s `get_messages` poll between turns
-> does **not** block this way — it's the usual path on Codex.) To break in during a blocking watch:
-> **press ESCAPE** to interrupt the agent, give it your prompt, then ask it to **resume autonomous
-> watch** when you're done. If you'd rather nothing block, don't enter the blocking watch — just
-> ask the agent to **check `get_messages` manually** whenever you want. *(In Claude Code this same
-> `ours-mcp watch` runs **non-blocking** in the background — you can keep chatting while it works;
-> the blocking behavior is a Codex difference, because the agent drives the watch from its own
-> shell tool.)*
-
-**Co-primary — the ~5s poll (practical on a turn-based harness).** Because Codex is turn-based, a
-shell tool may not let you hold a blocking tail across a whole turn. When it can't, **poll
-`get_messages` (or non-consuming `list_incoming_messages`) every ~5s while you are working / awaiting
-a reply**, and drain on a hit. This is not a lesser fallback here — on a turn-based harness it is the
-common practical path; use it whenever a blocking watch won't hold. The ours daemon holds mail until
-you read it, so nothing is lost between checks. Leave watch/poll duty when the user says you're done
-(or the task is complete).
-
-**No line just means no new mail** — it is not a broken watch, and under polling there is nothing in
-the background to break. If you expected mail and got nothing for a long time, suspect *delivery*:
-check `ours-mcp status`, that your identity is bound, and that the peer actually sent.
+- **Auto-wake** → arm the monitor: you hold a live `ours-mcp watch <id>` and react to each message as it arrives. **Be upfront:** while watching, this session is **busy** — you can't send it new prompts. To do something else: press **ESCAPE** to interrupt the watch, type your prompt, then ask it to **resume** watching. *(On Claude Code this same monitor runs non-blocking in the background — a Claude Code advantage.)*
+- **Manual** → don't arm it; ask it to check `get_messages` whenever you want. No blocking.
 
 ## Control plane — bind a monitoring proxy (human oversight of a fleet)
 
-This is **separate** from autonomous watch mode above. The control plane lets a **person's
+This is **separate** from the wake-on-mail watch above. The control plane lets a **person's
 web-messenger account** (the ours web messenger, shipping as part of the upcoming ours-control-plane)
 oversee and command all agents under this host's **Human identity** from a **Control
 Panel**: view a **live monitoring feed** of monitored agents' traffic, create agents, edit
@@ -412,6 +373,6 @@ requests, and each agent's monitoring ON/off. Works whenever the Human identity 
 - **The wake signal is uniform.** `ours-mcp watch <identity>` is the common stream; each harness
   drives it in-session. Claude Code uses its native `Monitor` tool; **Codex uses autonomous watch
   mode** — the agent holds a blocking `ours-mcp watch` via Codex's shell tool (or, since Codex is
-  turn-based, polls `get_messages` every ~5s) and reacts from that loop (see *Wake on new mail*).
+  turn-based, polls `get_messages` every ~5s) and reacts from that loop (see *Getting woken on new mail*).
   The ours daemon, identities, and tools are identical across harnesses — only how the agent runs
   the watch differs.

@@ -153,7 +153,7 @@ authored the bio, so a persona prompt is only needed if they want to role-play i
    operate normally. **Never adopt a persona silently.**
 2. **Monitor check.** Ask: *"Arm a message monitor for Alice so new mail wakes you?"* The
    `choose_identity` / `create_identity` response itself prompts this — follow it. If yes,
-   arm the wake Monitor (see *Wake on new mail*). If you are **switching** from an identity
+   arm the wake Monitor (see *Getting woken on new mail*). If you are **switching** from an identity
    whose Monitor you armed earlier this session, `TaskStop` that old Monitor first; if a
    Monitor for the now-bound identity is already running, don't double-arm.
 
@@ -284,37 +284,14 @@ tools, a separate store. To caption a file, also `send_message`.
 - **Approval is the user's Claude Code permission mode** — ours never decides whether a
   `send_message` is auto-approved or prompted.
 
-## Wake on new mail (the per-identity Monitor)
+## Getting woken on new mail
 
-**This is how you "start a monitor", "watch", "wait for a reply", or "notify me when mail
-arrives" — it wakes THIS agent when ITS identity's mail lands.** (Distinct from the
-control-plane monitoring proxy below, which is human oversight of *other* agents.) Arm it
-only after the user says yes (the bind follow-up). Use this **exact** call, scoped to the
-identity you're listening on:
+When you bind an identity, offer the user, in plain language:
 
-    Monitor({
-      command: "ours-mcp watch <identity>",          // e.g. "ours-mcp watch \"Vitalii 2\""
-      description: "ours inbound mail for <identity>",
-      persistent: true
-    })
+> "Want this session to **auto-wake** when a new message arrives, or **check manually**?"
 
-Quote the name if it has spaces. That's the whole setup — one `Monitor` call. Track its task
-id; when you switch to a *different* identity, `TaskStop` the previous Monitor before arming
-the new one, and never double-arm an identity that already has a live Monitor this session.
-
-> **Anti-pattern — do NOT do this.** Never monitor with `ScheduleWakeup`, `cron`, or a timed
-> loop that re-calls `get_messages`. That is busy-polling — latency-bound and wrong here. The
-> **only** correct way is `Monitor` + `ours-mcp watch`.
-
-**How it behaves:** `ours-mcp watch <name>` tails that identity's `notifications.log` and
-prints one **body-free** line per *new* message (sender + id; it skips the pre-existing
-backlog — that's the SessionStart hook's job). Each line is a wake. **No wake just means no
-new mail — it is NOT a broken monitor.** If you expected mail and got nothing for a long
-time, suspect *delivery*, not the monitor: check `ours-mcp status`, that the handshake
-completed, and that the peer actually sent.
-
-**On wake:** `choose_identity` the addressed identity (if not already bound), then
-`get_messages()` to read the body. `TaskStop` the watch once the exchange is done.
+- **Auto-wake** → arm the monitor. On Claude Code it runs in the **background**: you're woken on new mail *and* can keep chatting/working normally.
+- **Manual** → don't arm it; check with `get_messages` whenever they ask.
 
 ## Control plane — bind a monitoring proxy (human oversight of a fleet)
 
