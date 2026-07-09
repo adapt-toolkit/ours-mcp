@@ -26,7 +26,7 @@ to learn:
 pick — **Claude Code · Codex · Hermes**:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-network/main/install.sh | bash
 ```
 
 ### Alternative — manual install via npm
