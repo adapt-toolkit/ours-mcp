@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 #
-# Bumps every publishable @ours.network workspace version in one [skip ci] commit, re-pins
-# each plugin's exact internal dependency to the freshly bumped version, refreshes the
-# lockfile, and pushes. Each package bumps from max(local, npm-published) so a locally
-# published version can never collide.
+# LOCKSTEP release versioning: computes ONE next version for the whole @ours.network suite and
+# sets it on EVERY managed package.json AND every packages/*/.claude-plugin/plugin.json manifest,
+# re-pins each plugin's exact internal dependency to that same version, refreshes the lockfile,
+# and pushes — one [skip ci] commit. The single bump is applied to the MAX of every package's
+# max(local, npm-published) version, so the unified version is always publishable for all of
+# them (npm never sees a version twice) and packages can never drift apart again.
 #
 # Managed packages (publish order = dependency order):
 #   @ours.network/mcp        packages/core         (no internal deps)
 #   @ours.network/claude-code packages/claude-code (pins @ours.network/mcp)
 #   @ours.network/hermes     packages/hermes       (no internal deps)
 #   @ours.network/codex      packages/codex        (no internal deps)
-# (packages/installer is private → never bumped or published.)
+# (packages/installer is private → never bumped or published. Claude-Code plugin manifests are
+# not npm packages, but their "version" is user-visible in /plugin — kept at the suite version.)
 #
 # Bump level comes from the HEAD commit subject (Conventional Commits):
 #   feat: minor · fix: patch · !/BREAKING: major
 #   refactor/perf/style/build/revert/other: patch · ci/test/docs/chore: none
+#
+# OURS_BUMP_DRY_RUN=1: compute + patch the files in the working tree, print the resulting
+# versions/pins, and exit WITHOUT committing or pushing (verification; caller reverts).
 
 set -euo pipefail
 
@@ -27,6 +33,11 @@ MANAGED=(
   "@ours.network/hermes|packages/hermes/package.json|"
   "@ours.network/codex|packages/codex/package.json|"
 )
+
+# Every Claude-Code plugin manifest in the repo — bumped to the same suite version.
+PLUGIN_MANIFESTS=()
+while IFS= read -r f; do PLUGIN_MANIFESTS+=("$f"); done \
+  < <(git ls-files 'packages/*/.claude-plugin/plugin.json')
 
 emit() { [[ -n "${GITHUB_OUTPUT:-}" ]] && printf '%s\n' "$1" >> "$GITHUB_OUTPUT" || true; }
 log()  { printf '[bump] %s\n' "$*"; }
@@ -69,14 +80,6 @@ bump() { # <version> <level>
   esac
 }
 
-next_for() { # <pkg-json> <npm-name>
-  local local_v pub_v base
-  local_v=$(jq -r .version "$1")
-  pub_v=$(npm view "$2" version 2>/dev/null || echo "0.0.0")
-  base=$(printf '%s\n%s\n' "$local_v" "$pub_v" | sort -V | tail -1)
-  bump "$base" "$level"
-}
-
 patch_version() { # <pkg-json> <old> <new>
   local esc=${2//./\\.}
   sed -i -E "s|^(\\s*\"version\"\\s*:\\s*\")${esc}(\")|\\1${3}\\2|" "$1"
@@ -90,20 +93,37 @@ pin_dep() { # <pkg-json> <dep-name> <dep-new-version>
     || { echo "[bump] failed to pin ${2}@${3} in $1" >&2; exit 1; }
 }
 
-# Pass 1: compute + apply the version bump for every managed package. Remember new versions.
+# Pass 0: ONE suite version — bump from the MAX of every managed package's max(local, published),
+# so the result is strictly greater than anything npm has for ANY of them (all publishable).
+base="0.0.0"
+for entry in "${MANAGED[@]}"; do
+  IFS='|' read -r name path _pin <<<"$entry"
+  local_v=$(jq -r .version "$path")
+  pub_v=$(npm view "$name" version 2>/dev/null || echo "0.0.0")
+  base=$(printf '%s\n%s\n%s\n' "$base" "$local_v" "$pub_v" | sort -V | tail -1)
+  log "$name: local $local_v, published $pub_v"
+done
+UNIFIED=$(bump "$base" "$level")
+log "suite version: $base -> $UNIFIED (single $level bump over the max across all packages)"
+
+# Pass 1: apply the suite version to every managed package.json + every plugin manifest.
 declare -A NEWV
-summary=""
 files=(package-lock.json)
 for entry in "${MANAGED[@]}"; do
   IFS='|' read -r name path _pin <<<"$entry"
-  old=$(jq -r .version "$path"); new=$(next_for "$path" "$name")
-  log "$name: $old -> $new"
-  patch_version "$path" "$old" "$new"
-  NEWV["$name"]="$new"
+  old=$(jq -r .version "$path")
+  log "$name: $old -> $UNIFIED"
+  patch_version "$path" "$old" "$UNIFIED"
+  NEWV["$name"]="$UNIFIED"
   files+=("$path")
-  short=${name#@ours.network/}
-  summary+="${short} v${new}, "
 done
+for f in "${PLUGIN_MANIFESTS[@]}"; do
+  old=$(jq -r .version "$f")
+  log "$f: $old -> $UNIFIED"
+  patch_version "$f" "$old" "$UNIFIED"
+  files+=("$f")
+done
+summary="v${UNIFIED} lockstep (mcp, claude-code, hermes, codex + plugin manifests)"
 
 # Pass 2: PIN-SYNC — each plugin depends on the exact internal version it ships with.
 for entry in "${MANAGED[@]}"; do
@@ -115,18 +135,33 @@ done
 
 npm install --package-lock-only --ignore-scripts >/dev/null
 
+if [[ -n "${OURS_BUMP_DRY_RUN:-}" ]]; then
+  log "DRY RUN — no commit/push. Resulting versions:"
+  for entry in "${MANAGED[@]}"; do
+    IFS='|' read -r name path pin <<<"$entry"
+    pin_now=""
+    [[ -n "$pin" ]] && pin_now="  (pins ${pin}@$(jq -r ".dependencies[\"$pin\"]" "$path"))"
+    log "  $path -> $(jq -r .version "$path")${pin_now}"
+  done
+  for f in "${PLUGIN_MANIFESTS[@]}"; do
+    log "  $f -> $(jq -r .version "$f")"
+  done
+  exit 0
+fi
+
 git config user.name  "ours-ci-version-bump[bot]"
 git config user.email "ours-ci-version-bump[bot]@users.noreply.github.com"
 git add "${files[@]}"
 git diff --cached --quiet && no_bump "no changes after patch"
 
-git commit -m "chore(release): ${summary%, } [skip ci]
+git commit -m "chore(release): ${summary} [skip ci]
 
 Triggered by $(git rev-parse --short HEAD): $(printf '%s' "$subject" | head -c 200)"
 git push origin "HEAD:${GITHUB_REF_NAME:-main}"
 
 emit "bumped=true"
 emit "new-sha=$(git rev-parse HEAD)"
+emit "unified-version=${UNIFIED}"
 emit "core-version=${NEWV[@ours.network/mcp]}"
 emit "plugin-version=${NEWV[@ours.network/claude-code]}"
 emit "hermes-version=${NEWV[@ours.network/hermes]}"

@@ -1,8 +1,9 @@
 name: CI
 
-# Gates → Conventional-Commits version bump → publish @ours.network/mcp then
-# @ours.network/claude-code (strict order: the plugin's exact core dependency
-# is re-pinned to the freshly bumped core version before either publishes —
+# Gates → Conventional-Commits LOCKSTEP version bump (one suite version for every
+# @ours.network package + every .claude-plugin/plugin.json manifest) → publish
+# @ours.network/mcp then the plugins (strict order: each plugin's exact core
+# dependency is re-pinned to the same suite version before anything publishes —
 # see scripts/bump-versions.sh PIN-SYNC).
 #
 # Prerequisites (one-time, GitHub repo settings → secrets):
@@ -68,6 +69,7 @@ jobs:
     outputs:
       bumped: ${{ steps.bump.outputs.bumped }}
       new-sha: ${{ steps.bump.outputs.new-sha }}
+      unified-version: ${{ steps.bump.outputs.unified-version }}
       core-version: ${{ steps.bump.outputs.core-version }}
       plugin-version: ${{ steps.bump.outputs.plugin-version }}
       hermes-version: ${{ steps.bump.outputs.hermes-version }}
@@ -138,9 +140,10 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "Published:"
+            echo "Published (lockstep v${{ needs.version-bump.outputs.unified-version }}):"
             echo "- @ours.network/mcp@${{ needs.version-bump.outputs.core-version }}"
             echo "- @ours.network/claude-code@${{ needs.version-bump.outputs.plugin-version }}"
             echo "- @ours.network/hermes@${{ needs.version-bump.outputs.hermes-version }}"
             echo "- @ours.network/codex@${{ needs.version-bump.outputs.codex-version }}"
+            echo "- plugin manifests (.claude-plugin/plugin.json) at v${{ needs.version-bump.outputs.unified-version }}"
           } >> "$GITHUB_STEP_SUMMARY"
