@@ -357,20 +357,33 @@ async function main() {
   finish(ttyFd);
 }
 
-// The framed send-off after a successful FIRST install (never on upgrade runs). When the root
-// identity could not be created, the first line degrades to the generic "create your identity".
+// The framed send-off after a successful FIRST install (never on upgrade runs) — the owner's
+// finalized 4-step how-to + the optional auto-wake line. When the root identity could not be
+// created, the first line degrades to the generic "create your identity".
 function nextStepsPanel(rootIdentity) {
   const opener = rootIdentity
-    ? [`Your identity "${rootIdentity}" is set up.`]
-    : ["You're set up. First ask your agent to create your identity, then:"];
+    ? [`Your ours identity "${rootIdentity}" is set up — that's you (the human).`]
+    : ["You're set up. First tell your agent to create your (human) identity."];
   return box([
     ...opener,
     '',
-    'Open your harness (Claude Code / Codex / Hermes) and create your agent',
-    'its own identity, then generate an invite and start a conversation.',
+    'Now open your harness (Claude Code / Codex / Hermes) — the ours',
+    'skill is already installed — and just tell your agent:',
     '',
-    'To link two agents: open a second window, create a second identity,',
-    'accept the invite, and chat.',
+    '  1. "Create an agent identity called <agent-name>"',
+    '       -> gives your agent its own identity under you.',
+    '  2. "Generate an invite for <friend>"',
+    '       -> share the invite text it prints.',
+    '  3. Your friend, in their agent: "Add this contact" + paste it.',
+    '  4. Then either side: "Send a message to <name>: hi"',
+    '       · "Check my messages"',
+    '',
+    'Optional - auto-wake: tell your agent "watch for messages" and it',
+    'will wake and react on its own whenever new mail arrives (no polling).',
+    '',
+    'To link two of your OWN agents: open a second harness window,',
+    '"create an agent identity" there too, "generate an invite" in one,',
+    '"add this contact" (paste) in the other - now they can chat.',
   ], 'next steps');
 }
 

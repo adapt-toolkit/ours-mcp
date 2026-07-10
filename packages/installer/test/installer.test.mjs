@@ -235,7 +235,9 @@ test('first install with OURS_ASSUME_YES=1: installs the daemon without promptin
   assert.match(calls, /ours-mcp create-root \S/, 'root identity created (default: the OS username)');
   assert.doesNotMatch(out, /Install it now\?/, 'no consent prompt with the explicit env override');
   assert.match(out, /next steps/i, 'first install ends with the next-steps panel');
-  assert.match(out, /Your identity .+ is set up/, 'panel names the freshly created root identity');
+  assert.match(out, /Your ours identity .+ is set up/, 'panel names the freshly created root identity');
+  assert.match(out, /watch for messages/, 'panel includes the optional auto-wake line');
+  assert.match(out, /link two of your OWN agents/, 'panel includes the two-own-agents how-to');
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -316,7 +318,8 @@ test('interactive first install: consenting installs the daemon and shows the ne
   assert.match(seen, /Step 1 of 5/, 'wizard shows a progress indicator');
   assert.match(seen, /Step 2 of 5/, 'the name prompt is its own wizard step');
   assert.match(seen, /next steps/i, 'first install ends with the next-steps panel');
-  assert.match(seen, /Your identity .+ is set up/, 'panel names the freshly created root identity');
+  assert.match(seen, /Your ours identity .+ is set up/, 'panel names the freshly created root identity');
+  assert.match(seen, /watch for messages/, 'panel includes the optional auto-wake line');
   assert.ok(seen.indexOf('next steps') > seen.indexOf('\x1b[?1049l'),
     'summary + panel land on the MAIN screen so they survive the wizard closing');
   rmSync(tmp, { recursive: true, force: true });
