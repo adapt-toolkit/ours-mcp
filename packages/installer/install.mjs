@@ -9,11 +9,11 @@
 // Interactive prompts are drawn on /dev/tty so `curl … | bash` still works. With no controlling
 // terminal (true headless / CI) it falls back to environment variables and makes safe do-nothing
 // choices rather than blocking — see the env overrides in install.sh's header.
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join, dirname } from 'node:path';
-import { banner, section, heading, ok, step, info, warn, c, box, openTty, makeWriter, closeSync } from './lib/ui.mjs';
+import { banner, section, heading, ok, step, info, warn, c, box, withSpinner, openTty, makeWriter, closeSync } from './lib/ui.mjs';
 import { askLine, askYesNo, checkboxSelect } from './lib/prompt.mjs';
 import {
   canonHarnesses, suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
@@ -31,6 +31,21 @@ function run(bin, args, { capture = false } = {}) {
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
   });
   return { code: r.status ?? (r.error ? -1 : 0), out: r.stdout || '', err: r.stderr || '', ok: !r.error && r.status === 0 };
+}
+// Async twin of run() for the long npm steps, so a spinner can animate while they work. Output is
+// captured (npm's own noise stays off the pretty run) and surfaced by the caller on failure.
+function runAsync(bin, args) {
+  return new Promise((resolve) => {
+    let child;
+    try { child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch { resolve({ code: -1, out: '', err: '', ok: false }); return; }
+    let out = '';
+    let errOut = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { errOut += d; });
+    child.on('error', () => resolve({ code: -1, out, err: errOut, ok: false }));
+    child.on('close', (code) => resolve({ code: code ?? -1, out, err: errOut, ok: code === 0 }));
+  });
 }
 const daemonVersionLine = () => (run('ours-mcp', ['--version'], { capture: true }).out.split('\n')[0] || '').trim();
 const daemonStatusText = () => run('ours-mcp', ['status'], { capture: true }).out;
@@ -59,13 +74,14 @@ function portTakenSync(port) {
 }
 
 // ===============================================================================================
-function main() {
+async function main() {
   const ttyFd = openTty();
   const interactive = ttyFd != null && !process.env.OURS_ASSUME_YES;
   const write = makeWriter(ttyFd);
 
   line(banner());
   say('This sets up your local ours node and connects the AI agents you choose.');
+  line('  ' + c.dim('Takes about a minute — you approve each step, and you can re-run any time.'));
 
   // --- 1) daemon: consent-gated first install; ensure @latest + restart on change otherwise ----
   line(section(1, 'ours daemon'));
@@ -92,8 +108,8 @@ function main() {
     }
   }
   const before = parseVersion(versionBefore);
-  line(step('ensuring @ours.network/mcp@latest…'));
-  run(NPM, ['i', '-g', '@ours.network/mcp@latest']);
+  const ensured = await withSpinner('ensuring @ours.network/mcp@latest…', () => runAsync(NPM, ['i', '-g', '@ours.network/mcp@latest']));
+  if (!ensured.ok) line(warn('npm install of @ours.network/mcp did not finish cleanly — continuing with what is there.'));
   const after = parseVersion(daemonVersionLine());
   if (!daemonRunning()) {
     line(step('starting the daemon…'));
@@ -234,7 +250,7 @@ function main() {
   const failed = [];
   for (const h of selected) {
     if (h === 'claude-code') {
-      line(heading('→ claude-code'));
+      line(heading('claude-code'));
       say("Claude Code installs its plugin from its in-app marketplace — the installer can't do");
       say('this part for you. Inside your Claude Code session, run these TWO commands:');
       line('');
@@ -247,9 +263,9 @@ function main() {
     } else {
       // hermes | codex — @latest bypasses a stale global so a re-run upgrades the plugin (and its
       // bundled skill); the bin then does its own daemon-ensure + legacy cleanup.
-      line(heading(`→ ${h}`));
-      line(step(`installing @ours.network/${h}@latest…`));
-      run(NPM, ['i', '-g', `@ours.network/${h}@latest`]);
+      line(heading(h));
+      const plugin = await withSpinner(`installing @ours.network/${h}@latest…`, () => runAsync(NPM, ['i', '-g', `@ours.network/${h}@latest`]));
+      if (!plugin.ok) line(warn(`npm install of @ours.network/${h} did not finish cleanly — trying its installer anyway.`));
       line(step(`running ours-${h}-install`));
       if (run(`ours-${h}-install`, []).ok) { line(ok(`${h} installed and working.`)); installed.push(h); }
       else { line(warn(`${h} setup failed (continuing).`)); failed.push(h); }
@@ -257,7 +273,7 @@ function main() {
   }
 
   // --- 7) end screen — brief "how to use" + versions -------------------------------------------
-  line(heading('Done'));
+  line(heading('Done ✦ welcome to the mesh'));
   say(`ours daemon: ${run('ours-mcp', ['status'], { capture: true }).ok ? 'running' : 'installed'}`);
   say('versions:');
   say(`  daemon: ${daemonVersionLine() || 'unknown'}`);
@@ -302,4 +318,8 @@ function finish(ttyFd) {
   if (ttyFd != null) { try { closeSync(ttyFd); } catch { /* ignore */ } }
 }
 
-main();
+main().catch((e) => {
+  // Same philosophy as everywhere else: degrade, don't crash — one honest line, non-zero exit.
+  say(`unexpected error: ${String(e)}`);
+  process.exitCode = 1;
+});

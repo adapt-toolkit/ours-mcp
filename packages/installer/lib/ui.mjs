@@ -19,14 +19,28 @@ export const c = {
   red: (s) => wrap(E.red, s), blue: (s) => wrap(E.blue, s), magenta: (s) => wrap(E.magenta, s),
 };
 
+// The theme's gradient ramp (256-color cyan → blue → violet), one shade per banner row. Plain
+// text under NO_COLOR — same degrade contract as c.*.
+const GRAD = [51, 45, 39, 33, 63, 99];
+const grad = (s, i) => (COLOR ? `\x1b[38;5;${GRAD[Math.min(i, GRAD.length - 1)]}m${s}\x1b[0m` : String(s));
+
 // --- banner -----------------------------------------------------------------------------------
-// The colored "ours.network" wordmark + a mesh accent + the website tagline. No ASCII-art
-// block letters (they read crooked at terminal widths). Kept under 80 columns so it never wraps
-// on a default terminal. Colour is applied per-line; plain ASCII with NO_COLOR.
+// The block-letter "ours" logo with a top-to-bottom gradient, the wordmark, a mesh accent and
+// the website tagline. Straight monospace blocks (no slanted ASCII art — that reads crooked),
+// kept well under 80 columns so it never wraps on a default terminal. Plain under NO_COLOR.
 export function banner() {
+  const logo = [
+    ' ██████  ██    ██ ██████  ███████',
+    '██    ██ ██    ██ ██   ██ ██     ',
+    '██    ██ ██    ██ ██████  ███████',
+    '██    ██ ██    ██ ██   ██      ██',
+    ' ██████   ██████  ██   ██ ███████',
+  ];
   const dot = c.gray('·');
   const mesh = `${c.cyan('◇')}${dot}${c.cyan('◇')}${dot}${c.cyan('◇')}`;
   const out = [];
+  out.push('');
+  logo.forEach((l, i) => out.push('  ' + grad(l, i)));
   out.push('');
   out.push('  ' + c.bold(c.cyan('ours')) + c.gray('.network') + '   ' + mesh);
   out.push('  ' + c.dim('The space where humans and AI agents collaborate'));
@@ -35,10 +49,14 @@ export function banner() {
 }
 
 // --- section + status helpers -----------------------------------------------------------------
+// Sections read as ruled chapter headers: `── 3 · broker address ────────…` (fixed overall
+// width so the rules line up down the whole run).
+const SECTION_WIDTH = 64;
 export function section(n, title) {
-  return '\n' + c.bold(c.cyan(`${n})`)) + ' ' + c.bold(title);
+  const rule = '─'.repeat(Math.max(2, SECTION_WIDTH - `── ${n} · ${title} `.length));
+  return '\n' + c.cyan('──') + ' ' + c.bold(c.cyan(String(n))) + c.gray(' · ') + c.bold(title) + ' ' + c.gray(rule);
 }
-export function heading(title) { return '\n' + c.bold(c.cyan(title)); }
+export function heading(title) { return '\n' + c.bold(c.cyan('◆ ' + title)); }
 export const ok = (s) => `  ${c.green('✓')} ${s}`;
 export const step = (s) => `  ${c.dim('…')} ${s}`;
 export const info = (s) => `  ${c.gray('•')} ${s}`;
@@ -58,6 +76,29 @@ export function box(lines, title = '') {
   const row = (l) => bar('│') + ' ' + l + ' '.repeat(inner - l.length - 1) + bar('│');
   const bottom = bar('└' + '─'.repeat(inner) + '┘');
   return [top, ...lines.map(row), bottom].map((l) => '  ' + l).join('\n');
+}
+
+// --- spinner ------------------------------------------------------------------------------------
+// Animate a braille spinner next to `label` while the (async) thunk runs, then clear the line so
+// the caller prints the real ✓/! outcome. Animation only on a real color tty — a piped or
+// NO_COLOR run gets one static `… label` line instead, so logs and tests stay clean.
+export async function withSpinner(label, thunk) {
+  const animate = COLOR && !!process.stdout.isTTY;
+  if (!animate) {
+    process.stdout.write(`  … ${label}\n`);
+    return thunk();
+  }
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let i = 0;
+  const draw = () => process.stdout.write(`\r\x1b[K  ${c.cyan(frames[i = (i + 1) % frames.length])} ${label}`);
+  draw();
+  const timer = setInterval(draw, 80);
+  try {
+    return await thunk();
+  } finally {
+    clearInterval(timer);
+    process.stdout.write('\r\x1b[K');
+  }
 }
 
 // --- /dev/tty-aware prompting ------------------------------------------------------------------
