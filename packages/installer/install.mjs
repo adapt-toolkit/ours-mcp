@@ -21,8 +21,41 @@ import {
 } from './lib/logic.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
-const say = (s) => process.stdout.write(`ours: ${s}\n`);
-const line = (s = '') => process.stdout.write(`${s}\n`);
+// All narrative output goes through `sink` so the wizard can redirect it to the tty's alternate
+// screen and hand it back to stdout for the final (persistent) summary.
+let sink = (s) => process.stdout.write(s);
+const say = (s) => sink(`ours: ${s}\n`);
+const line = (s = '') => sink(`${s}\n`);
+
+// --- step-by-step wizard (alternate screen buffer) ----------------------------------------------
+// On a real interactive terminal the installer behaves like an app installer: ONE step per
+// screen on the ANSI alternate buffer — a finished step is REPLACED by the next, never scrolled
+// past — with a "Step k of N" indicator. Piped / no-tty / TERM=dumb / NO_COLOR / OURS_ASSUME_YES
+// runs keep the plain linear log (what tests and logs see). The main buffer is restored BEFORE
+// the closing summary + next-steps panel, so they stay visible after the wizard closes.
+const wizard = { active: false, write: null, step: 0, total: 0 };
+function wizardEnter(write, total) {
+  wizard.active = true; wizard.write = write; wizard.total = total;
+  write('\x1b[?1049h\x1b[2J\x1b[H');
+  sink = write;
+}
+function wizardLeave() {
+  if (!wizard.active) return;
+  wizard.active = false;
+  wizard.write('\x1b[?1049l');
+  sink = (s) => process.stdout.write(s);
+}
+function wizardScreen(title) {
+  wizard.step++;
+  wizard.write('\x1b[2J\x1b[H');
+  const prog = `Step ${wizard.step} of ${wizard.total}`;
+  const pad = ' '.repeat(Math.max(2, 64 - 2 - 'ours.network'.length - prog.length));
+  line('');
+  line('  ' + c.bold(c.cyan('ours')) + c.gray('.network') + pad + c.gray(prog));
+  line('');
+  line('  ' + c.cyan('──') + ' ' + c.bold(title) + ' ' + c.gray('─'.repeat(Math.max(2, 64 - title.length - 7))));
+  line('');
+}
 
 // --- external command helpers (never throw; the installer degrades, it doesn't crash) ----------
 function run(bin, args, { capture = false } = {}) {
@@ -78,16 +111,26 @@ async function main() {
   const ttyFd = openTty();
   const interactive = ttyFd != null && !process.env.OURS_ASSUME_YES;
   const write = makeWriter(ttyFd);
+  const useWizard = interactive && !process.env.NO_COLOR && (process.env.TERM || '') !== 'dumb';
 
+  // Probe up front (cheap) so the wizard knows its step count before the first screen.
+  const versionBefore = daemonVersionLine();
+  const firstInstall = !versionBefore; // absent binary / failed version probe = not installed yet
+
+  if (useWizard) {
+    // A killed wizard must never leave the terminal stranded on the alternate screen.
+    process.on('SIGINT', () => { wizardLeave(); process.exit(130); });
+    process.on('SIGTERM', () => { wizardLeave(); process.exit(143); });
+    wizardEnter(write, firstInstall ? 5 : 4);
+    wizardScreen('welcome');
+  }
   line(banner());
   say('This sets up your local ours node and connects the AI agents you choose.');
   line('  ' + c.dim('Takes about a minute — you approve each step, and you can re-run any time.'));
 
   // --- 1) daemon: consent-gated first install; ensure @latest + restart on change otherwise ----
-  line(section(1, 'ours daemon'));
+  if (!useWizard) line(section(1, 'ours daemon'));
   line(info('The daemon is your local ours node — it keeps your connection to the mesh alive.'));
-  const versionBefore = daemonVersionLine();
-  const firstInstall = !versionBefore; // absent binary / failed version probe = not installed yet
   if (firstInstall) {
     // Never install the shared daemon silently: describe what it is, then ask. The safe default
     // is NOT installing — a headless/piped run with no tty only proceeds with an explicit
@@ -101,12 +144,27 @@ async function main() {
       ? true
       : askYesNo(write, ttyFd, '  Install it now?', false);
     if (!consent) {
+      wizardLeave();
       if (ttyFd == null) say('no terminal to ask for consent and OURS_ASSUME_YES=1 not set.');
       say('okay — nothing was installed. Re-run this installer any time to set up ours.');
       finish(ttyFd);
       return;
     }
   }
+
+  // First install: ask for the person's name BEFORE the install work (its own wizard step; same
+  // prompt order in linear mode so both modes read one key script). The root identity itself is
+  // created right after the daemon is up.
+  let rootName;
+  if (firstInstall) {
+    if (useWizard) wizardScreen('your identity');
+    line(info('Your agents act for a person — you. This creates your ours identity (their root).'));
+    let defaultName = 'me';
+    try { defaultName = userInfo().username || defaultName; } catch { /* keep the fallback */ }
+    rootName = askLine(write, ttyFd, `  Your name ${c.gray(`[${defaultName}]`)}: `, defaultName).trim() || defaultName;
+  }
+
+  if (useWizard) wizardScreen('install & settings');
   const before = parseVersion(versionBefore);
   const ensured = await withSpinner('ensuring @ours.network/mcp@latest…', () => runAsync(NPM, ['i', '-g', '@ours.network/mcp@latest']));
   if (!ensured.ok) line(warn('npm install of @ours.network/mcp did not finish cleanly — continuing with what is there.'));
@@ -128,12 +186,8 @@ async function main() {
   // root somehow already exists; a failure degrades (the agent can still create it in-session).
   let rootIdentity;
   if (firstInstall) {
-    line(info('Your agents act for a person — you. This creates your ours identity (their root).'));
-    let defaultName = 'me';
-    try { defaultName = userInfo().username || defaultName; } catch { /* keep the fallback */ }
-    const name = askLine(write, ttyFd, `  Your name ${c.gray(`[${defaultName}]`)}: `, defaultName).trim() || defaultName;
-    const created = run('ours-mcp', ['create-root', name], { capture: true });
-    if (created.ok) { rootIdentity = name; line(ok(`your identity "${name}" is created.`)); }
+    const created = run('ours-mcp', ['create-root', rootName], { capture: true });
+    if (created.ok) { rootIdentity = rootName; line(ok(`your identity "${rootName}" is created.`)); }
     else say(`could not create your identity now (non-fatal) — ask your agent to create it later.`);
   }
 
@@ -143,7 +197,8 @@ async function main() {
   const portCurrent = status.port || DEFAULT_PORT;
 
   // --- 2) persistent service (optional) --------------------------------------------------------
-  line(section(2, 'persistent service'));
+  if (!useWizard) line(section(2, 'persistent service'));
+  else line('');
   line(info('A service means ours restarts on its own after a reboot, so you stay reachable.'));
   const svcEnv = (process.env.OURS_SERVICE || '').toLowerCase();
   const wantSvc = svcEnv ? svcEnv === 'yes' || svcEnv === 'y' || svcEnv === '1'
@@ -157,7 +212,8 @@ async function main() {
   }
 
   // --- 3) broker address -----------------------------------------------------------------------
-  line(section(3, 'broker address'));
+  if (!useWizard) line(section(3, 'broker address'));
+  else line('');
   line(info('The broker is the public relay your node dials to reach peers. Keep the default'));
   line(info('unless you run your own broker.'));
   const brokerEnv = process.env.OURS_BROKER || process.env.OURS_BROKER_URL || '';
@@ -173,7 +229,8 @@ async function main() {
   }
 
   // --- 4) HTTP port ----------------------------------------------------------------------------
-  line(section(4, 'HTTP port'));
+  if (!useWizard) line(section(4, 'HTTP port'));
+  else line('');
   line(info('The local port the daemon listens on for your agent (default ' + DEFAULT_PORT + ').'));
   const portEnv = process.env.OURS_PORT || '';
   const portRaw = portEnv || askLine(write, ttyFd, `  HTTP port ${c.gray(`[${portCurrent}]`)}: `, String(portCurrent));
@@ -205,7 +262,8 @@ async function main() {
   }
 
   // --- 5) select harnesses ---------------------------------------------------------------------
-  line(section(5, 'agent harnesses'));
+  if (useWizard) wizardScreen('agent harnesses');
+  else line(section(5, 'agent harnesses'));
   line(info('A harness is your AI agent\'s app. The plugin connects it to ours; the bundled skill'));
   line(info('teaches your agent to send, receive, and monitor messages.'));
   const HARNESS_SPECS = [
@@ -228,6 +286,7 @@ async function main() {
   }
 
   if (selected.length === 0) {
+    wizardLeave(); // the closing summary must persist on the MAIN screen
     line(heading('Done'));
     say('Daemon is set up. No harness selected — re-run any time, or install one directly:');
     say('  npm i -g @ours.network/{hermes,codex} && ours-<harness>-install');
@@ -273,6 +332,7 @@ async function main() {
   }
 
   // --- 7) end screen — brief "how to use" + versions -------------------------------------------
+  wizardLeave(); // the closing summary must persist on the MAIN screen
   line(heading('Done ✦ welcome to the mesh'));
   say(`ours daemon: ${run('ours-mcp', ['status'], { capture: true }).ok ? 'running' : 'installed'}`);
   say('versions:');
@@ -315,11 +375,13 @@ function nextStepsPanel(rootIdentity) {
 }
 
 function finish(ttyFd) {
+  wizardLeave(); // idempotent — never leave the terminal on the alternate screen
   if (ttyFd != null) { try { closeSync(ttyFd); } catch { /* ignore */ } }
 }
 
 main().catch((e) => {
   // Same philosophy as everywhere else: degrade, don't crash — one honest line, non-zero exit.
+  wizardLeave();
   say(`unexpected error: ${String(e)}`);
   process.exitCode = 1;
 });
