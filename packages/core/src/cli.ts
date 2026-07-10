@@ -32,6 +32,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 import * as fs from 'node:fs';
 
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport as HttpClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {
   loadConfig,
   configPath,
@@ -522,6 +524,52 @@ async function runIdentitySurvey(): Promise<{
   }
 }
 
+// ─── create-root (installer seam: deterministic first-run root identity) ─────
+//
+// `ours-mcp create-root "<name>"` creates THE root human identity by calling the
+// running daemon's create_root_identity MCP tool over loopback. The installer
+// invokes this at FIRST install so the root exists deterministically — no agent
+// has to discover a skill and decide to call it. Idempotent for scripts: when a
+// root already exists this is a quiet no-op (exit 0); a genuine failure (invalid
+// or duplicate NAME, unreachable daemon) exits non-zero.
+async function cmdCreateRoot(argv: string[]): Promise<void> {
+  const name = (argv[0] ?? '').trim();
+  if (!name || name.startsWith('--')) {
+    err('usage: ours-mcp create-root "<your name>"');
+    process.exit(1);
+  }
+  if (!(await portOpen(PORT))) {
+    err(`create-root: the daemon is not running on port ${PORT} — start it with \`ours-mcp start\`.`);
+    process.exit(1);
+  }
+  const transport = new HttpClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), {
+    requestInit: { headers: apiHeaders() },
+  });
+  const client = new Client({ name: 'ours-mcp-cli', version: CLI_VERSION });
+  try {
+    await client.connect(transport);
+    const r = await client.callTool({ name: 'create_root_identity', arguments: { name } });
+    const text = (Array.isArray(r.content) ? (r.content as Array<{ text?: unknown }>) : [])
+      .map((c) => (typeof c.text === 'string' ? c.text : ''))
+      .join(' ')
+      .split('\n\nAsk the user:')[0] // the monitor hint is agent-directed; meaningless on a CLI
+      .replace(/^create_root_identity failed: /, '')
+      .trim();
+    if (r.isError) {
+      if (/a root identity already exists/i.test(text)) {
+        out(`create-root: ${text.split('—')[0].trim()} — nothing to do.`);
+        return;
+      }
+      err(`create-root failed: ${text}`);
+      process.exit(1);
+    }
+    out(text);
+  } finally {
+    try { await transport.terminateSession(); } catch { /* ignore */ }
+    try { await client.close(); } catch { /* ignore */ }
+  }
+}
+
 // ─── watch (Claude Code host seam: the wake source for `Monitor`) ────────────
 //
 // `ours-mcp watch [identity]` tails every identity's notifications.log and
@@ -946,6 +994,9 @@ function usage(): void {
   out('  watch [identity]  stream one line per new inbound message (wake source for a Monitor)');
   out('  proxy     per-session stdio shim → daemon (stable binding; for the MCP client config)');
   out('');
+  out('  create-root "<name>"   create THE root human identity (one per host) via the running');
+  out('                         daemon — quiet no-op if a root already exists (installer seam)');
+  out('');
   out('  define-local-identity-file   write a .ours-identity workspace pin');
   out('    interactive (default): 4-question survey, writes to CWD');
   out('    scripted: --name <s> [--force-bind] [--local-book] [--auto-accept-local]');
@@ -1011,6 +1062,9 @@ async function main(): Promise<void> {
       break;
     case 'setup':
       await cmdSetup();
+      break;
+    case 'create-root':
+      await cmdCreateRoot(process.argv.slice(3));
       break;
     case 'define-local-identity-file':
       await cmdDefineLocalIdentityFile(process.argv.slice(3));
