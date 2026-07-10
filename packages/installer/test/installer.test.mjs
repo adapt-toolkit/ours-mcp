@@ -169,9 +169,9 @@ test('interactive toggle UI: broker/port defaults then arrow/space/enter selects
   // No OURS_HARNESSES / OURS_ASSUME_YES → the installer MUST prompt interactively. OURS_CONFIG →
   // a throwaway path so "keep default" (which writes nothing) can't touch the real ~/.ours.
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log, OURS_SERVICE: 'no',
-    OURS_CONFIG: join(tmp, 'config.json') };
+    OURS_CONFIG: join(tmp, 'config.json'), TERM: 'xterm-256color' };
   delete env.OURS_HARNESSES; delete env.OURS_ASSUME_YES; delete env.OURS_IDENTITIES;
-  delete env.OURS_BROKER; delete env.OURS_BROKER_URL; delete env.OURS_PORT;
+  delete env.OURS_BROKER; delete env.OURS_BROKER_URL; delete env.OURS_PORT; delete env.NO_COLOR;
   // execFileSync returning at all proves the run COMPLETED — it never blocked on a prompt.
   const seen = execFileSync('python3', [driver, INSTALL, 'enter,enter,down,space,down,space,enter'],
     { env, encoding: 'utf8' });
@@ -179,6 +179,7 @@ test('interactive toggle UI: broker/port defaults then arrow/space/enter selects
   const calls = readFileSync(log, 'utf8');
   assert.match(calls, /ours-codex-install/, 'codex toggled on → installed');
   assert.match(calls, /ours-hermes-install/, 'hermes toggled on → installed');
+  assert.match(seen, /Step 1 of 4/, 'upgrade wizard counts its own (shorter) step list');
   assert.doesNotMatch(calls, /--identities/, 'no --identities forwarded');
   assert.doesNotMatch(seen, /openclaw/i, 'openclaw must not appear — support was removed');
   // The toggle UI itself rendered (checkbox glyphs), confirming we exercised the interactive path.
@@ -211,6 +212,7 @@ test('first install, headless, no OURS_ASSUME_YES: explains the daemon, installs
   assert.doesNotMatch(calls, /ours-mcp start/, 'daemon must not be started without consent');
   assert.doesNotMatch(calls, /ours-mcp create-root/, 'no root identity without consent');
   assert.doesNotMatch(out, /next steps/i, 'no next-steps panel when nothing was installed');
+  assert.doesNotMatch(out, /\x1b\[\?1049/, 'no alt-screen wizard without a tty');
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -270,14 +272,17 @@ test('interactive first install: declining installs nothing',
   fakeBins(bin, ['npm', 'ours-mcp'], { notInstalled: true });
   const driver = join(HERE, 'pty-toggle-driver.py');
 
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log,
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log, TERM: 'xterm-256color',
     OURS_SERVICE: 'no', OURS_HARNESSES: 'none', OURS_CONFIG: join(tmp, 'config.json') };
-  delete env.OURS_ASSUME_YES;
+  delete env.OURS_ASSUME_YES; delete env.NO_COLOR;
   const seen = execFileSync('python3', [driver, INSTALL, 'n,enter'], { env, encoding: 'utf8', timeout: 90_000 });
 
   assert.match(seen, /shared background process/, 'describes what the daemon is');
   assert.match(seen, /Install it now\?/, 'asks for explicit consent');
-  assert.match(seen, /nothing was installed/, 'declining ends with a clean message');
+  assert.match(seen, /\x1b\[\?1049h/, 'interactive run is a wizard on the alternate screen buffer');
+  assert.match(seen, /\x1b\[\?1049l/, 'main screen buffer restored on decline');
+  assert.ok(seen.indexOf('nothing was installed') > seen.indexOf('\x1b[?1049l'),
+    'the decline message lands on the MAIN screen so it survives the wizard closing');
   const calls = readFileSync(log, 'utf8');
   assert.doesNotMatch(calls, /npm i -g @ours\.network\/mcp/, 'decline must not install the daemon');
   assert.doesNotMatch(calls, /ours-mcp start/, 'decline must not start the daemon');
@@ -297,9 +302,9 @@ test('interactive first install: consenting installs the daemon and shows the ne
 
   // Keys: y+enter answer the consent prompt; the next enter accepts the default (OS username) at
   // the root-identity name prompt; the last two keep the broker/port defaults.
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log,
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log, TERM: 'xterm-256color',
     OURS_SERVICE: 'no', OURS_HARNESSES: 'none', OURS_CONFIG: join(tmp, 'config.json') };
-  delete env.OURS_ASSUME_YES;
+  delete env.OURS_ASSUME_YES; delete env.NO_COLOR;
   const seen = execFileSync('python3', [driver, INSTALL, 'y,enter,enter,enter,enter'], { env, encoding: 'utf8', timeout: 90_000 });
 
   assert.match(seen, /Install it now\?/, 'asks for explicit consent');
@@ -307,8 +312,13 @@ test('interactive first install: consenting installs the daemon and shows the ne
   const calls = readFileSync(log, 'utf8');
   assert.match(calls, /npm i -g @ours\.network\/mcp@latest/, 'consent → daemon installed');
   assert.match(calls, /ours-mcp create-root \S/, 'root identity created with the accepted default name');
+  assert.match(seen, /\x1b\[\?1049h/, 'interactive run is a wizard on the alternate screen buffer');
+  assert.match(seen, /Step 1 of 5/, 'wizard shows a progress indicator');
+  assert.match(seen, /Step 2 of 5/, 'the name prompt is its own wizard step');
   assert.match(seen, /next steps/i, 'first install ends with the next-steps panel');
   assert.match(seen, /Your identity .+ is set up/, 'panel names the freshly created root identity');
+  assert.ok(seen.indexOf('next steps') > seen.indexOf('\x1b[?1049l'),
+    'summary + panel land on the MAIN screen so they survive the wizard closing');
   rmSync(tmp, { recursive: true, force: true });
 });
 
