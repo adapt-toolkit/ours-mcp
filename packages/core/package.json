@@ -48,7 +48,7 @@
     "serve": "node dist/cli.js serve",
     "prepublishOnly": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node test/loopback-bind.test.mjs && node test/lease-binding.test.mjs && node test/session-restore.test.mjs && node test/daemon-restart-resume.test.mjs && node test/version-advisory.test.mjs && node test/files-helpers.test.mjs && node test/validate-name.test.mjs && node test/port-visibility.test.mjs && node test/notify-http-api.test.mjs"
+    "test": "node test/loopback-bind.test.mjs && node test/lease-binding.test.mjs && node test/session-restore.test.mjs && node test/daemon-restart-resume.test.mjs && node test/version-advisory.test.mjs && node test/files-helpers.test.mjs && node test/validate-name.test.mjs && node test/port-visibility.test.mjs && node test/notify-http-api.test.mjs && node test/create-root-cli.test.mjs"
   },
   "dependencies": {
     "@adapt-toolkit/sdk": "0.9.1",
