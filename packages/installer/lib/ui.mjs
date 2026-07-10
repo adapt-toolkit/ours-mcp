@@ -45,6 +45,21 @@ export const info = (s) => `  ${c.gray('•')} ${s}`;
 export const warn = (s) => `  ${c.yellow('!')} ${s}`;
 export const why = (s) => `    ${c.gray('why: ' + s)}`;
 
+// --- framed panel -------------------------------------------------------------------------------
+// A boxed block for the one moment that must stand out (the post-first-install next steps).
+// Content lines must be PLAIN strings (no ANSI) so the width math stays honest — only the frame
+// is coloured, which degrades to plain box-drawing under NO_COLOR.
+export function box(lines, title = '') {
+  const inner = Math.max(...lines.map((l) => l.length), title.length + 2) + 2;
+  const bar = (s) => c.cyan(s);
+  const top = title
+    ? bar('┌─') + ' ' + c.bold(title) + ' ' + bar('─'.repeat(inner - title.length - 3) + '┐')
+    : bar('┌' + '─'.repeat(inner) + '┐');
+  const row = (l) => bar('│') + ' ' + l + ' '.repeat(inner - l.length - 1) + bar('│');
+  const bottom = bar('└' + '─'.repeat(inner) + '┘');
+  return [top, ...lines.map(row), bottom].map((l) => '  ' + l).join('\n');
+}
+
 // --- /dev/tty-aware prompting ------------------------------------------------------------------
 // Probe by OPENING /dev/tty read-write: the device node is world-rw, so a permission check passes
 // even with no controlling terminal (headless/CI). open() fails (ENXIO) when there is genuinely no

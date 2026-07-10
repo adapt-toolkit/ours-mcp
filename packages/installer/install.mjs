@@ -11,9 +11,9 @@
 // choices rather than blocking — see the env overrides in install.sh's header.
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { join, dirname } from 'node:path';
-import { banner, section, heading, ok, step, info, warn, c, openTty, makeWriter, closeSync } from './lib/ui.mjs';
+import { banner, section, heading, ok, step, info, warn, c, box, openTty, makeWriter, closeSync } from './lib/ui.mjs';
 import { askLine, askYesNo, checkboxSelect } from './lib/prompt.mjs';
 import {
   canonHarnesses, suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
@@ -67,10 +67,31 @@ function main() {
   line(banner());
   say('This sets up your local ours node and connects the AI agents you choose.');
 
-  // --- 1) daemon: ensure @latest (upgrade, not install-if-missing) + restart on change ---------
+  // --- 1) daemon: consent-gated first install; ensure @latest + restart on change otherwise ----
   line(section(1, 'ours daemon'));
   line(info('The daemon is your local ours node — it keeps your connection to the mesh alive.'));
-  const before = parseVersion(daemonVersionLine());
+  const versionBefore = daemonVersionLine();
+  const firstInstall = !versionBefore; // absent binary / failed version probe = not installed yet
+  if (firstInstall) {
+    // Never install the shared daemon silently: describe what it is, then ask. The safe default
+    // is NOT installing — a headless/piped run with no tty only proceeds with an explicit
+    // OURS_ASSUME_YES=1 (the same convention as install.sh's other env overrides).
+    line('');
+    line(info('ours.network needs to install one shared background process on this computer.'));
+    line(info("It manages your agents' identities, stores their keys, sends and accepts invites,"));
+    line(info('encrypts and decrypts your messages, and gives your agents access to all of this'));
+    line(info('through the MCP server protocol.'));
+    const consent = process.env.OURS_ASSUME_YES
+      ? true
+      : askYesNo(write, ttyFd, '  Install it now?', false);
+    if (!consent) {
+      if (ttyFd == null) say('no terminal to ask for consent and OURS_ASSUME_YES=1 not set.');
+      say('okay — nothing was installed. Re-run this installer any time to set up ours.');
+      finish(ttyFd);
+      return;
+    }
+  }
+  const before = parseVersion(versionBefore);
   line(step('ensuring @ours.network/mcp@latest…'));
   run(NPM, ['i', '-g', '@ours.network/mcp@latest']);
   const after = parseVersion(daemonVersionLine());
@@ -84,6 +105,20 @@ function main() {
     line(ok(`daemon on v${after}.`));
   } else {
     line(ok(`daemon already current${after ? ` (v${after})` : ''}.`));
+  }
+
+  // First install only: create THE root human identity right now, deterministically — no agent
+  // should have to discover and decide this later. `ours-mcp create-root` is a quiet no-op if a
+  // root somehow already exists; a failure degrades (the agent can still create it in-session).
+  let rootIdentity;
+  if (firstInstall) {
+    line(info('Your agents act for a person — you. This creates your ours identity (their root).'));
+    let defaultName = 'me';
+    try { defaultName = userInfo().username || defaultName; } catch { /* keep the fallback */ }
+    const name = askLine(write, ttyFd, `  Your name ${c.gray(`[${defaultName}]`)}: `, defaultName).trim() || defaultName;
+    const created = run('ours-mcp', ['create-root', name], { capture: true });
+    if (created.ok) { rootIdentity = name; line(ok(`your identity "${name}" is created.`)); }
+    else say(`could not create your identity now (non-fatal) — ask your agent to create it later.`);
   }
 
   // Read the daemon's RESOLVED broker + port so we prompt with real values, not a hardcoded guess.
@@ -180,6 +215,7 @@ function main() {
     line(heading('Done'));
     say('Daemon is set up. No harness selected — re-run any time, or install one directly:');
     say('  npm i -g @ours.network/{hermes,codex} && ours-<harness>-install');
+    if (firstInstall) { line(''); line(nextStepsPanel(rootIdentity)); }
     finish(ttyFd);
     return;
   }
@@ -241,7 +277,25 @@ function main() {
     say('Heads-up: Claude Code\'s monitor is the most tested; Codex/Hermes are newer — report issues:');
     say('  https://github.com/adapt-toolkit/ours-mcp/issues');
   }
+  if (firstInstall) { line(''); line(nextStepsPanel(rootIdentity)); }
   finish(ttyFd);
+}
+
+// The framed send-off after a successful FIRST install (never on upgrade runs). When the root
+// identity could not be created, the first line degrades to the generic "create your identity".
+function nextStepsPanel(rootIdentity) {
+  const opener = rootIdentity
+    ? [`Your identity "${rootIdentity}" is set up.`]
+    : ["You're set up. First ask your agent to create your identity, then:"];
+  return box([
+    ...opener,
+    '',
+    'Open your harness (Claude Code / Codex / Hermes) and create your agent',
+    'its own identity, then generate an invite and start a conversation.',
+    '',
+    'To link two agents: open a second window, create a second identity,',
+    'accept the invite, and chat.',
+  ], 'next steps');
 }
 
 function finish(ttyFd) {
