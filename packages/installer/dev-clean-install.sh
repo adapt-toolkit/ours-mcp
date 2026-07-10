@@ -38,14 +38,17 @@ TGZ="$(npm pack --workspace @ours.network/mcp --pack-destination /tmp | tail -1)
 say "built /tmp/${TGZ}"
 
 # npm shim: exactly the installer's daemon-install invocation resolves to the branch tarball;
-# every other npm call falls through to the real npm.
-SHIM=/usr/local/bin/ours-branch-npm
+# every other npm call falls through to the real npm. OURS_DEV_BIN relocates it for sandboxed
+# (non-root) verification runs.
+BIN="${OURS_DEV_BIN:-/usr/local/bin}"
+SHIM="$BIN/ours-branch-npm"
 cat > "$SHIM" <<EOF
 #!/bin/bash
 if [ "\$*" = "i -g @ours.network/mcp@latest" ]; then exec npm i -g "/tmp/${TGZ}"; fi
 exec npm "\$@"
 EOF
 chmod +x "$SHIM"
+export PATH="$BIN:$PATH"
 
 say "handing off to the branch installer (daemon installs from the branch build)…"
 OURS_NPM=ours-branch-npm exec bash "$SRC/packages/installer/install.sh"
