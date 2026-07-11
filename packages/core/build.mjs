@@ -81,6 +81,14 @@ await build({
   outfile: resolve(dist, 'inbox.js'),
 });
 
+// Same deal for the voice-message detection/transcription helpers
+// (test/transcribe-detect.test.mjs imports ../dist/transcribe.js directly).
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/transcribe.ts')],
+  outfile: resolve(dist, 'transcribe.js'),
+});
+
 // Ship ONLY the compiled MUFL packet (*.muflo) — never the .mu/.mm/.mufl source.
 // The MCP server loads the .muflo at runtime from dist/mufl_code/ by hash.
 const muflSrc = resolve(root, 'mufl_code');
