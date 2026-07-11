@@ -49,6 +49,19 @@ import {
 } from './config';
 import { runProxy } from './proxy';
 
+// systemctl/journalctl --user (install-service / uninstall-service) locate the
+// user bus via $XDG_RUNTIME_DIR/bus. sudo/su shells run inside the CALLING
+// user's logind session, so the target user's shell has no XDG_RUNTIME_DIR even
+// when linger keeps the user manager (and the bus socket at /run/user/<uid>/bus)
+// alive. Derive the standard path once at startup: never override an existing
+// value, and only when the dir actually exists — when it doesn't, the real
+// problem is missing linger and the systemctl error is the right signal.
+// (Mirror of adapt-toolkit/ours-fleet#9.)
+if (!process.env.XDG_RUNTIME_DIR && typeof process.getuid === 'function') {
+  const runDir = `/run/user/${process.getuid()}`;
+  if (fs.existsSync(runDir)) process.env.XDG_RUNTIME_DIR = runDir;
+}
+
 const CONFIG = loadConfig();
 const STATE_DIR = CONFIG.stateDir;
 const PORT = CONFIG.port;
@@ -884,6 +897,12 @@ WantedBy=default.target
   run('systemctl', ['--user', 'daemon-reload']);
   if (!run('systemctl', ['--user', 'enable', '--now', SYSTEMD_UNIT])) {
     err('failed to enable/start the service via systemctl --user.');
+    if (!process.env.XDG_RUNTIME_DIR) {
+      // Reachable after the startup fallback only when /run/user/<uid> is
+      // missing — no user manager, i.e. linger is off and no session is active.
+      err(`hint: no user runtime dir — enable linger: sudo loginctl enable-linger ${userInfo().username}`);
+      err('      (if linger is already on: export XDG_RUNTIME_DIR=/run/user/$(id -u))');
+    }
     process.exit(1);
   }
   if (!run('loginctl', ['enable-linger', userInfo().username])) {
