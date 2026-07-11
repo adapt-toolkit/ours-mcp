@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve, join, dirname, basename } from 'node:path';
+import type { SttUserConfig, SttCustomTemplate } from './transcribe';
 
 // How reachable the daemon's local HTTP surface (the messaging + notification
 // endpoints) is to OTHER local OS users. The port always binds 127.0.0.1, so
@@ -37,6 +38,10 @@ export interface OursConfig {
   // the config-file equivalent. Empty/undefined → resolve from file or generate
   // (owner mode only). Required for `shared`.
   apiToken?: string;
+  // Voice-message transcription (STT). NO defaults: transcription stays off
+  // until the operator sets provider + apiKey (+ model where required); model
+  // strings pass to the provider verbatim. See src/transcribe.ts.
+  stt?: SttUserConfig;
 }
 
 export const DEFAULT_CONFIG: OursConfig = {
@@ -77,6 +82,19 @@ function readFileConfig(): Partial<OursConfig> {
     out.apiVisibility = parsed.apiVisibility as ApiVisibility;
   }
   if (typeof parsed.apiToken === 'string' && parsed.apiToken.trim()) out.apiToken = parsed.apiToken.trim();
+  if (parsed.stt && typeof parsed.stt === 'object') {
+    const s = parsed.stt as Record<string, unknown>;
+    const stt: SttUserConfig = {};
+    if (typeof s.provider === 'string') stt.provider = s.provider;
+    if (typeof s.apiKey === 'string') stt.apiKey = s.apiKey;
+    if (typeof s.model === 'string') stt.model = s.model;
+    if (typeof s.baseUrl === 'string') stt.baseUrl = s.baseUrl;
+    if (typeof s.language === 'string') stt.language = s.language;
+    if (typeof s.maxBytes === 'number' && Number.isFinite(s.maxBytes)) stt.maxBytes = s.maxBytes;
+    if (typeof s.timeoutMs === 'number' && Number.isFinite(s.timeoutMs)) stt.timeoutMs = s.timeoutMs;
+    if (s.custom && typeof s.custom === 'object') stt.custom = s.custom as SttCustomTemplate;
+    out.stt = stt;
+  }
   return out;
 }
 
@@ -108,7 +126,21 @@ export function loadConfig(): OursConfig {
     autoStart: envBool('OURS_AUTOSTART') ?? file.autoStart ?? DEFAULT_CONFIG.autoStart,
     apiVisibility: envVisibility() ?? file.apiVisibility ?? DEFAULT_CONFIG.apiVisibility,
     apiToken: process.env.OURS_API_TOKEN?.trim() || file.apiToken,
+    stt: sttFromEnv(file.stt),
   };
+}
+
+// OURS_STT_* env overrides the config-file stt block field-by-field (matching
+// the global env > file precedence). Secrets are env-preferred.
+function sttFromEnv(file: SttUserConfig | undefined): SttUserConfig | undefined {
+  const env: SttUserConfig = {};
+  if (process.env.OURS_STT_PROVIDER?.trim()) env.provider = process.env.OURS_STT_PROVIDER.trim();
+  if (process.env.OURS_STT_API_KEY?.trim()) env.apiKey = process.env.OURS_STT_API_KEY.trim();
+  if (process.env.OURS_STT_MODEL?.trim()) env.model = process.env.OURS_STT_MODEL.trim();
+  if (process.env.OURS_STT_BASE_URL?.trim()) env.baseUrl = process.env.OURS_STT_BASE_URL.trim();
+  if (process.env.OURS_STT_LANGUAGE?.trim()) env.language = process.env.OURS_STT_LANGUAGE.trim();
+  const merged = { ...(file ?? {}), ...env };
+  return Object.keys(merged).length ? merged : undefined;
 }
 
 // ----- API access token ------------------------------------------------------

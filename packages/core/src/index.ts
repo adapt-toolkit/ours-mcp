@@ -108,6 +108,7 @@ import {
 import { OURS_COMPAT_VERSION } from './protocol';
 import { mimeFromExt, sanitizeFilename } from './files.js';
 import { e2eWireIdsFromEvents, buildMessagesPayload } from './inbox.js';
+import { isVoiceMessage, sttStatus, transcribeVoice, voiceDeliveryLine, type VoiceOutcome } from './transcribe.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -2909,7 +2910,8 @@ function renderFiles(v: AdaptValue): string {
     const sender = f.Reduce('sender_name').Visualize();
     const status = f.Reduce('status').Visualize();
     const wire = f.Reduce('wire_id').Visualize();
-    lines.push(`  • ${name} (${mime || 'application/octet-stream'}) from ${sender} [${status}] {${wire}}`);
+    const voiceTag = isVoiceMessage(mime, name) ? '🎤 voice message · ' : '';
+    lines.push(`  • ${voiceTag}${name} (${mime || 'application/octet-stream'}) from ${sender} [${status}] {${wire}}`);
   }
   if (lines.length === 0) return 'No files received.';
   return `${lines.length} file(s):\n${lines.join('\n')}`;
@@ -2933,6 +2935,20 @@ async function writeIncomingFiles(id: Identity, v: AdaptValue): Promise<string> 
     const bytes = Buffer.from(f.Reduce('data').GetBinary());
     const outPath = join(dir, `${wire}-${sanitizeFilename(name)}`);
     await writeFile(outPath, bytes);
+    if (isVoiceMessage(mime, name)) {
+      // Voice messages reach the agent as TEXT, deterministically (the agent
+      // never processes audio; the original file is saved above either way).
+      const st = sttStatus(CONFIG.stt);
+      let outcome: VoiceOutcome;
+      if (!st.ready) {
+        outcome = { kind: 'unconfigured', reason: st.reason };
+      } else {
+        const r = await transcribeVoice(bytes, name, mime, CONFIG.stt!);
+        outcome = r.ok ? { kind: 'transcript', text: r.text } : { kind: 'failed', error: r.error };
+      }
+      lines.push(voiceDeliveryLine({ sender, wire, savedPath: outPath, sizeBytes: bytes.length }, outcome));
+      continue;
+    }
     lines.push(`  • ${name} (${mime || 'application/octet-stream'}, ${bytes.length} B) from ${sender} → ${outPath} {${wire}}`);
   }
   if (lines.length === 0) return 'No new files.';
