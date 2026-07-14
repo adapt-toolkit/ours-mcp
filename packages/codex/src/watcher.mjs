@@ -12,6 +12,7 @@ export class MonitorWatcher {
     this.running = false;
     this.turnActive = false;
     this.pending = false;
+    this.queued = false;
     this.controller = null;
     appServer?.onNotification?.((message) => {
       if (message.method === 'turn/started') { this.turnActive = true; this.pending = false; }
@@ -33,10 +34,30 @@ export class MonitorWatcher {
   }
 
   async #wake(threadId) {
-    if (this.turnActive || this.pending) { this.pending = true; return; }
+    if (this.turnActive || this.pending) { this.queued = true; return; }
     this.pending = true;
-    try { await this.appServer.startTurn(threadId, WAKE_PROMPT); }
+    try {
+      const result = await this.appServer.startTurn(threadId, WAKE_PROMPT);
+      if (this.appServer.readThread && result?.turn?.id) void this.#trackCompletion(threadId, result.turn.id);
+      else this.pending = false;
+    }
     catch (error) { this.pending = false; throw error; }
+  }
+
+  async #trackCompletion(threadId, turnId) {
+    try {
+      while (this.pending) {
+        const result = await this.appServer.readThread(threadId);
+        const turn = result?.thread?.turns?.find((item) => item.id === turnId);
+        if (turn && turn.status !== 'inProgress') break;
+        await this.sleep(250);
+      }
+    } catch { /* the next notification poll remains recoverable */ }
+    this.pending = false;
+    if (this.queued && this.current) {
+      this.queued = false;
+      void this.#wake(this.current.threadId);
+    }
   }
 
   async pollOnce({ identity, threadId, cursor }, signal) {
@@ -84,6 +105,6 @@ export class MonitorWatcher {
     this.controller?.abort();
     this.controller = null;
     this.pending = false;
+    this.queued = false;
   }
 }
-

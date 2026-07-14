@@ -24,7 +24,6 @@ test('primes at tip, checks backlog, persists cursor before fixed wake', async (
   assert.equal(turns[0][1], WAKE_PROMPT);
   assert.doesNotMatch(turns[0][1], /Mallory|SECRET|Bob/);
   turns.length = 0;
-  watcher.pending = false; // fake client does not emit the real turn lifecycle notification
   await watcher.pollOnce({ identity: 'Alice', threadId: 'thr', cursor: '20' });
   assert.equal(saved.at(-1).cursor, '21');
   assert.equal(turns[0][1], WAKE_PROMPT);
