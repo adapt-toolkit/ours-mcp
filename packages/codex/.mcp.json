@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "ours": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/bin/proxy.mjs"]
+    },
+    "ours_monitor": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/bin/monitor-mcp.mjs"]
+    }
+  }
+}
+

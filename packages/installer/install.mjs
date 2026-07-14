@@ -296,14 +296,6 @@ async function main() {
   }
   say(`setting up: ${selected.join(' ')}`);
 
-  // Honest maturity note: Claude Code's wake-on-mail monitor is the most tested; Codex/Hermes are
-  // newer. Show it briefly (1-2 lines) when a non-Claude-Code harness is selected.
-  const NON_CC = selected.filter((h) => h !== 'claude-code');
-  if (NON_CC.length) {
-    line(info(`Note: Claude Code has the most tested, reliable wake-on-mail monitor; ${NON_CC.join(' & ')} support is`));
-    line(info('newer and may have rough edges — please report anything off: ' + c.cyan('https://github.com/adapt-toolkit/ours-mcp/issues')));
-  }
-
   // --- 6) run each selected harness's installer ------------------------------------------------
   const installed = [];
   const failed = [];
@@ -346,13 +338,16 @@ async function main() {
   if (installed.length) { say('installed:'); for (const h of installed) say(`  ✓ ${h}`); }
   if (failed.length) say(`note: failed to fully set up: ${failed.join(' ')} — re-run or install those directly.`);
   line('');
-  say('Next: reload each harness to load the ours tools (Hermes: \'/reload-mcp\'; Codex: next session).');
+  say('Next: reload each harness to load the ours tools (Hermes: \'/reload-mcp\'; Codex: new thread).');
   say('In your agent: bind or create an identity, then ask it to wake you on new mail.');
-  say('Wake-on-mail: enable it in-session — see your plugin\'s README. Docs: https://ours.network');
-  if (installed.some((h) => h !== 'claude-code')) {
-    say('Heads-up: Claude Code\'s monitor is the most tested; Codex/Hermes are newer — report issues:');
-    say('  https://github.com/adapt-toolkit/ours-mcp/issues');
+  if (installed.includes('codex')) {
+    const live = (process.env.OURS_CODEX_LIVE || 'yes').toLowerCase() !== 'no';
+    say(live
+      ? 'Codex live mode: start with \'ours-codex\'; bind an identity, then explicitly approve arming.'
+      : 'Codex standard mode: start with \'codex\'; messaging works, live wake stays unavailable.');
+    say('Codex will ask you to review the native plugin hooks; the installer never bypasses hook trust.');
   }
+  say('Wake-on-mail is always consent-first — see your plugin README. Docs: https://ours.network');
   if (firstInstall) { line(''); line(nextStepsPanel(rootIdentity)); }
   finish(ttyFd);
 }
@@ -378,8 +373,8 @@ function nextStepsPanel(rootIdentity) {
     '  4. Then either side: "Send a message to <name>: hi"',
     '       · "Check my messages"',
     '',
-    'Optional - auto-wake: tell your agent "watch for messages" and it',
-    'will wake and react on its own whenever new mail arrives (no polling).',
+    'Optional - auto-wake: in Codex, launch with ours-codex; after binding,',
+    'tell your agent "watch for messages" and explicitly approve arming.',
     '',
     'To link two of your OWN agents: open a second harness window,',
     '"create an agent identity" there too, "generate an invite" in one,',

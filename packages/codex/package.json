@@ -1,7 +1,7 @@
 {
   "name": "@ours.network/codex",
   "version": "0.9.1",
-  "description": "OpenAI Codex CLI plugin for ours — secure agent-to-agent messaging over ADAPT. Registers the ours MCP server in ~/.codex/config.toml, bundles the ours skill, and points ~/.codex/AGENTS.md at it. Reactivity is in-session (session-only), via `ours-mcp watch`.",
+  "description": "Native Codex plugin for secure ours.network messaging and explicitly armed, session-scoped live mail wake.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "author": "Adapt Toolkit",
@@ -25,17 +25,29 @@
     "ours.network"
   ],
   "files": [
+    ".codex-plugin",
+    ".mcp.json",
     "skills",
+    "hooks",
+    "src",
     "bin",
     "install.sh",
     "AGENTS.snippet.md",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
   },
   "bin": {
-    "ours-codex-install": "bin/ours-codex-install.mjs"
+    "ours-codex-install": "bin/ours-codex-install.mjs",
+    "ours-codex": "bin/ours-codex.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@ours.network/mcp": "0.9.1",
+    "ws": "^8.21.0",
+    "zod": "^3.25.76"
   },
   "publishConfig": {
     "access": "public"

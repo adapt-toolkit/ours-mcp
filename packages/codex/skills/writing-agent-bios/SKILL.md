@@ -1,7 +1,6 @@
 ---
 name: writing-agent-bios
 description: Use when writing or revising an ours identity's bio or persona — when creating an identity, setting up an agent for a fleet, or when a bio/persona reads vague, is a bare capability dump with no "when to engage", conflates "what others see" with "how I behave", or has no explicit out-of-scope boundary.
-version: 0.1.0
 metadata:
   codex:
     tags: [ours, ours.network, bio, persona, identity]

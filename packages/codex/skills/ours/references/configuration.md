@@ -1,38 +1,27 @@
-# ours configuration & self-service
+# ours configuration and daemon profiles
 
-The daemon is a **shared, host-wide singleton** reachable only on `127.0.0.1`
-(loopback — there is no host knob, by design). Configuration is resolved
-**env var > `~/.ours/config.json` > built-in default**:
+Each ours daemon owns one port and one state directory. Multiple daemons can run on the
+same host when both values are distinct. Configuration resolves as environment variables,
+then the file named by `OURS_CONFIG` (otherwise `~/.ours/config.json`), then defaults:
 
-| Setting | Env | config.json | Default |
+| Setting | Environment | JSON key | Default |
 |---|---|---|---|
 | HTTP port | `OURS_PORT` | `port` | `3050` |
-| State dir | `OURS_STATE_DIR` | `stateDir` | `~/.ours` |
-| Broker URL | `OURS_BROKER_URL` | `brokerUrl` | (bundled default) |
-| GC interval (ms) | `OURS_GC_INTERVAL_MS` | `gcIntervalMs` | `3600000` |
-| Auto-start daemon | `OURS_AUTOSTART` | `autoStart` | `false` |
+| State directory | `OURS_STATE_DIR` | `stateDir` | `~/.ours` |
+| Broker | `OURS_BROKER_URL` | `brokerUrl` | bundled public broker |
+| API token | `OURS_API_TOKEN` | `apiToken` | owner token file |
+| API visibility | `OURS_API_VISIBILITY` | `apiVisibility` | `owner` |
+| Auto-start | `OURS_AUTOSTART` | `autoStart` | `false` |
 
-**The port is shared.** Any process that dials the daemon — the `ours-mcp proxy` MCP
-server and `ours-mcp watch` — connects to `127.0.0.1:<OURS_PORT>` and the daemon
-binds the same port (both read `OURS_PORT`/`config.json`). Change it **once in
-shared config**, never per-side, or a dialer won't find the daemon.
+For live Codex mode, `ours-codex --ours-port <port>` has highest precedence. The launcher
+queries `/info`, verifies the authenticated notification API, and propagates that exact
+profile to the plugin, hooks, and watcher. It never starts or changes the daemon. A stopped
+or incompatible selected daemon is an error.
 
-**Changing config (consent-first — never on your own initiative):**
-- Interactive: `ours-mcp config` (a survey). It needs a TTY, so ask the **user**
-  to run it via `!ours-mcp config` — you cannot drive the survey yourself.
-- Scripted: edit `~/.ours/config.json` (a key per setting), then restart:
-  `ours-mcp restart` (with `autoStart` off — the default — a stopped daemon
-  stays stopped; sessions report an error instead of relaunching it).
+Changing daemon configuration is separate operator work. Explain the impact and obtain
+explicit consent before editing or restarting anything. A changed state directory selects a
+different identity store. Use a distinct `OURS_CONFIG`, port, and state directory for a
+second daemon.
 
-Both methods edit the same `~/.ours/config.json` file — the interactive survey is just guided editing.
-
-**Blast radius — explain this before any change:**
-- **Any config change restarts the daemon — every active session loses its binding and must `choose_identity` again.** Only change config when no other session is mid-task.
-- **Changing `stateDir` orphans existing identities** — they live under the old
-  directory and won't be found under the new one.
-
-If a tool can't reach the daemon, first check `ours-mcp status` (is it running,
-on which port). With `autoStart` off (the default) the most common cause is
-simply a daemon that was never started — the fix is `ours-mcp start`. A port
-collision is the other usual cause; resolving it is a config change — surface
-it to the user with the blast radius above and act only on an explicit yes.
+Standard mode and live mode use the same MCP tools. Live mode only adds explicitly armed,
+session-scoped wake; it stops with the `ours-codex` session.

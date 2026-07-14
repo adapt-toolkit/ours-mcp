@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/src/hooks/runner.mjs\"",
+            "timeout": 5,
+            "statusMessage": "Checking ours mail metadata"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/src/hooks/runner.mjs\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__ours__(choose_identity|create_identity|create_root_identity)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/src/hooks/runner.mjs\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

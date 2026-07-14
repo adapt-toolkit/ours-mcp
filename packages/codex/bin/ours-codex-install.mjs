@@ -5,16 +5,9 @@
 //     npm i -g @ours.network/codex
 //     ours-codex-install
 //
-// It resolves this package's own install.sh (which ensures the ours daemon, registers
-// the `ours` MCP server in ~/.codex/config.toml, installs the skills into
-// ~/.agents/skills, and points ~/.codex/AGENTS.md at the ours skill) and runs it — no
-// env-var gymnastics. The MCP server + skill install immediately; they are live for the
-// next Codex session.
-//
-// Wake-on-mail is NOT set up here: the agent tails `ours-mcp watch <identity>` (or a short
-// get_messages poll) IN-SESSION (see the ours skill), the same stream Claude Code's Monitor
-// tails. Codex is a session/invocation CLI, so it reacts while it is live. Everything is
-// idempotent, so re-running is safe.
+// It resolves this package's install.sh, ensures the existing daemon installation,
+// registers the native Codex marketplace/plugin, and migrates installer-owned legacy
+// config only after Codex confirms the native plugin is installed.
 //
 // Usage:
 //   ours-codex-install [--codex-dir DIR] [--skills-dir DIR] [--skip-daemon]
@@ -42,9 +35,8 @@ function help() {
 
   ours-codex-install [options]
 
-Sets up the daemon + the ours MCP server + the skill + the AGENTS.md pointer. It asks nothing
-about identities or wake-on-mail: you enable wake in-session (bind an identity, then the ours
-skill tails ours-mcp watch / polls get_messages so you react to new mail while you work).
+Sets up the daemon and native ours Codex plugin. Standard mode uses `codex`; live mode uses
+`ours-codex`. Live monitoring still requires explicit consent after an identity is bound.
 
 Options:
       --codex-dir <dir>     Codex config+AGENTS.md root (default ~/.codex)
@@ -52,7 +44,8 @@ Options:
       --skip-daemon         do not install/start the ours daemon
   -h, --help                show this help
 
-Idempotent: safe to re-run. MCP server + skill are live for the next Codex session.`);
+Idempotent: safe to re-run. Start a new Codex thread after installation and review the
+plugin's exact hook definitions before trusting them.`);
 }
 
 if (!existsSync(INSTALL)) {
