@@ -1646,6 +1646,39 @@ function refreshUnread(id: Identity): void {
   }
 }
 
+// Return the daemon-selected state tree's unread metadata without ever opening
+// message packets. Hooks and host-side wake clients use this instead of guessing
+// ~/.ours, which also keeps multiple daemon instances (port + stateDir) isolated.
+function unreadSummary(): { identities: Array<Record<string, unknown>> } {
+  const out: Array<Record<string, unknown>> = [];
+  let entries: fs.Dirent[] = [];
+  try { entries = fs.readdirSync(STATE_DIR, { withFileTypes: true }); } catch { return { identities: out }; }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || validateName(entry.name) !== null) continue;
+    let value: Record<string, unknown>;
+    try { value = JSON.parse(fs.readFileSync(unreadPath(join(STATE_DIR, entry.name)), 'utf8')) as Record<string, unknown>; }
+    catch { continue; }
+    const count = Number.isSafeInteger(value.count) && Number(value.count) >= 0 ? Number(value.count) : 0;
+    const files = Number.isSafeInteger(value.files) && Number(value.files) >= 0 ? Number(value.files) : 0;
+    if (count === 0 && files === 0) continue;
+    const recent = Array.isArray(value.recent) ? value.recent.slice(-10).flatMap((raw) => {
+      if (!raw || typeof raw !== 'object') return [];
+      const m = raw as Record<string, unknown>;
+      if (typeof m.from !== 'string' || !['string', 'number'].includes(typeof m.msg_id) || typeof m.date !== 'string') return [];
+      return [{ from: m.from, msg_id: m.msg_id, date: m.date }];
+    }) : [];
+    const unreadFiles = Array.isArray(value.unread_files) ? value.unread_files.slice(-10).flatMap((raw) => {
+      if (!raw || typeof raw !== 'object') return [];
+      const f = raw as Record<string, unknown>;
+      if (typeof f.from !== 'string' || typeof f.filename !== 'string' || typeof f.mime !== 'string' || typeof f.wire_id !== 'string') return [];
+      return [{ from: f.from, filename: f.filename, mime: f.mime, wire_id: f.wire_id }];
+    }) : [];
+    out.push({ name: entry.name, count, recent, files, unread_files: unreadFiles });
+  }
+  out.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return { identities: out };
+}
+
 // ----- push notification plumbing --------------------------------------------
 // Notifications are scoped to the ONE session bound to the target identity, not
 // broadcast. A session only ever hears about its own identity's mail — no
@@ -2436,9 +2469,8 @@ function createMcpServer(getSessionId: () => string): McpServer {
         const exposure = expose_local
           ? ` Published to the local contact book${local_auto_accept ? '' : ' (introductions require approval)'}.`
           : ' Not exposed in the local contact book.';
-        const monitorHint = `\n\nAsk the user: do you want to arm a message monitor for "${name}"? ` +
-          `If yes, use: Monitor({ command: "ours-mcp watch ${name.includes(' ') ? `\\"${name}\\"` : name}", ` +
-          `description: "ours inbound mail for ${name}", persistent: true })`;
+        const monitorHint = `\n\nAsk the user whether to enable this harness's live mail monitor for "${name}". ` +
+          'Never enable monitoring without explicit consent.';
         return textResult(`Created identity "${name}" (${id.cid}) and bound it to this session.${hierarchy}${exposure}${monitorHint}`);
       } catch (err) {
         return textResult(`create_identity failed: ${String(err)}`, true);
@@ -2497,9 +2529,8 @@ function createMcpServer(getSessionId: () => string): McpServer {
             ? ` Adopted ${adopted.length} existing identit${adopted.length === 1 ? 'y' : 'ies'} as role(s): ${adopted.join(', ')}.`
             : '';
         const failures = failed.length > 0 ? ` FAILED to adopt: ${failed.join(', ')} (see daemon log).` : '';
-        const monitorHint = `\n\nAsk the user: do you want to arm a message monitor for "${name}"? ` +
-          `If yes, use: Monitor({ command: "ours-mcp watch ${name.includes(' ') ? `\\"${name}\\"` : name}", ` +
-          `description: "ours inbound mail for ${name}", persistent: true })`;
+        const monitorHint = `\n\nAsk the user whether to enable this harness's live mail monitor for "${name}". ` +
+          'Never enable monitoring without explicit consent.';
         return textResult(`Created root identity "${name}" (${id.cid}) and bound it to this session.${adoption}${failures}${monitorHint}`);
       } catch (err) {
         return textResult(`create_root_identity failed: ${String(err)}`, true);
@@ -2595,11 +2626,10 @@ function createMcpServer(getSessionId: () => string): McpServer {
       const id = identities.get(name)!;
       let msg = `Bound to identity "${name}" (${id.cid}).`;
       if (wasSwitched) {
-        msg += `\n\nSwitched away from "${prev}" — if you armed a Monitor for it, TaskStop it now.`;
+        msg += `\n\nSwitched away from "${prev}" — disable any live monitor previously armed for it.`;
       }
-      msg += `\n\nAsk the user: do you want to arm a message monitor for "${name}"? ` +
-        `If yes, use: Monitor({ command: "ours-mcp watch ${name.includes(' ') ? `\\"${name}\\"` : name}", ` +
-        `description: "ours inbound mail for ${name}", persistent: true })`;
+      msg += `\n\nAsk the user whether to enable this harness's live mail monitor for "${name}". ` +
+        'Never enable monitoring without explicit consent.';
       return textResult(msg);
     },
   );
@@ -3465,6 +3495,12 @@ async function main() {
       if (!requireAuth(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ identities: [...identities.values()].map((i) => ({ name: i.name })) }));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/unread') {
+      if (!requireAuth(req, res)) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(unreadSummary()));
       return;
     }
     {
