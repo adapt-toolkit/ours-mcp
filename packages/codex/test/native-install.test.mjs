@@ -9,13 +9,15 @@ import { fileURLToPath } from 'node:url';
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const install = join(root, 'install.sh');
 
-function fixture(failAdd = false) {
+function fixture(failAdd = false, orphanedMarker = false) {
   const dir = mkdtempSync(join(tmpdir(), 'ours-native-install-'));
   const bin = join(dir, 'bin'); const codex = join(dir, '.codex'); const skills = join(dir, '.agents/skills');
   mkdirSync(bin, { recursive: true }); mkdirSync(skills, { recursive: true }); mkdirSync(codex, { recursive: true });
   const fake = `#!/usr/bin/env bash\necho "$*" >> "${dir}/codex.log"\ncase "$*" in *"plugin add"*) exit ${failAdd ? 1 : 0};; esac\nexit 0\n`;
   writeFileSync(join(bin, 'codex'), fake); chmodSync(join(bin, 'codex'), 0o755);
-  writeFileSync(join(codex, 'config.toml'), 'before\n# >>> ours.network plugin\n[mcp_servers.ours]\ncommand="ours-mcp"\n# <<< ours.network plugin\nafter\n');
+  writeFileSync(join(codex, 'config.toml'), orphanedMarker
+    ? 'before\n[mcp_servers.ours]\ncommand="ours-mcp"\n[mcp_servers.ours.tools.get_messages]\napproval_mode="approve"\n[mcp_servers.keep]\ncommand="keep"\n# <<< ours.network plugin\nafter\n'
+    : 'before\n# >>> ours.network plugin\n[mcp_servers.ours]\ncommand="ours-mcp"\n# <<< ours.network plugin\nafter\n');
   writeFileSync(join(codex, 'AGENTS.md'), 'keep\n<!-- >>> ours.network plugin (managed block) -->\nold\n<!-- <<< ours.network plugin -->\n');
   for (const name of ['ours', 'writing-agent-bios']) { mkdirSync(join(skills, name), { recursive: true }); writeFileSync(join(skills, name, 'SKILL.md'), 'legacy'); }
   return { dir, bin, codex, skills };
@@ -45,5 +47,18 @@ test('plugin failure preserves all legacy wiring', () => {
     assert.notEqual(result.status, 0);
     assert.match(readFileSync(join(f.codex, 'config.toml'), 'utf8'), /mcp_servers\.ours/);
     assert.ok(existsSync(join(f.skills, 'ours/SKILL.md')));
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('orphaned closing marker removes only old ours MCP tables', () => {
+  const f = fixture(false, true);
+  try {
+    execFileSync('bash', [install], { env: env(f), encoding: 'utf8' });
+    const config = readFileSync(join(f.codex, 'config.toml'), 'utf8');
+    assert.doesNotMatch(config, /mcp_servers\.ours/);
+    assert.doesNotMatch(config, /<<< ours\.network plugin/);
+    assert.match(config, /\[mcp_servers\.keep\]\ncommand="keep"/);
+    assert.match(config, /before.*after/s);
+    assert.ok(readdirSync(f.codex).some((name) => name.startsWith('config.toml.ours-backup-')));
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });

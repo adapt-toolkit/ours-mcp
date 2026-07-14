@@ -18,7 +18,32 @@ function stripManaged(path, start, end) {
   return true;
 }
 
-stripManaged(join(codexDir, 'config.toml'), '# >>> ours.network plugin', '# <<< ours.network plugin');
+function stripOrphanedMcpConfig(path) {
+  if (!existsSync(path)) return false;
+  const before = readFileSync(path, 'utf8');
+  const end = '# <<< ours.network plugin';
+  if (!before.includes(end) || before.includes('# >>> ours.network plugin') || !/^\s*\[mcp_servers\.ours(?:\.[^\]]+)?\]/m.test(before)) return false;
+
+  const kept = [];
+  let dropping = false;
+  for (const line of before.split('\n')) {
+    if (/^\s*\[mcp_servers\.ours(?:\.[^\]]+)?\]\s*(?:#.*)?$/.test(line)) {
+      dropping = true;
+      continue;
+    }
+    if (dropping && /^\s*\[[^\]]+\]/.test(line)) dropping = false;
+    if (!dropping && line.trim() !== end) kept.push(line);
+  }
+
+  const after = kept.join('\n').replace(/^\s+$/, '');
+  if (after === before) return false;
+  writeFileSync(`${path}.ours-backup-${stamp}`, before, { mode: 0o600 });
+  writeFileSync(path, after);
+  return true;
+}
+
+const configPath = join(codexDir, 'config.toml');
+if (!stripManaged(configPath, '# >>> ours.network plugin', '# <<< ours.network plugin')) stripOrphanedMcpConfig(configPath);
 stripManaged(join(codexDir, 'AGENTS.md'), '<!-- >>> ours.network plugin', '<!-- <<< ours.network plugin -->');
 
 for (const name of ['ours', 'writing-agent-bios']) {

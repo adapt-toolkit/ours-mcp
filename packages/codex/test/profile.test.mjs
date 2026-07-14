@@ -46,5 +46,14 @@ test('rejects malformed flags, unreachable and incompatible daemons', async () =
   await assert.rejects(() => resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch: async () => { throw new Error('refused'); } }), /not reachable.*never starts/i);
   await assert.rejects(() => resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch: async () => Response.json({ name: 'other', protocol: 99 }) }), /incompatible/);
   await assert.rejects(() => resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch: async (url) => String(url).endsWith('/info') ? Response.json({ name: 'ours', protocol: 1, stateDir: '/tmp/x' }) : new Response('no', { status: 401 }) }), /authentication failed/);
+  await assert.rejects(() => resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch: async (url) => {
+    if (String(url).endsWith('/info')) return Response.json({ name: 'ours', protocol: 1, stateDir: '/tmp/x' });
+    if (String(url).endsWith('/identities')) return Response.json({ identities: [] });
+    return new Response('missing', { status: 404 });
+  } }), /unread API/);
+  await assert.rejects(() => resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch: async (url) => {
+    if (String(url).endsWith('/info')) return Response.json({ name: 'ours', protocol: 1, stateDir: '/tmp/x' });
+    if (String(url).endsWith('/identities')) return Response.json({ identities: [] });
+    throw new Error('daemon vanished');
+  } }), /unread capability check failed.*daemon vanished/);
 });
-

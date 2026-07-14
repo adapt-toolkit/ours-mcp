@@ -35,8 +35,8 @@ function help() {
 
   ours-codex-install [options]
 
-Sets up the daemon and native ours Codex plugin. Standard mode uses `codex`; live mode uses
-`ours-codex`. Live monitoring still requires explicit consent after an identity is bound.
+Sets up the daemon and native ours Codex plugin. Standard mode uses \`codex\`; live mode uses
+\`ours-codex\`. Live monitoring still requires explicit consent after an identity is bound.
 
 Options:
       --codex-dir <dir>     Codex config+AGENTS.md root (default ~/.codex)

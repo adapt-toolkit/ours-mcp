@@ -363,6 +363,7 @@ requests, and each agent's monitoring ON/off. Works whenever the Human identity 
   signal `ours-mcp watch` reads) and refreshes a body-free `unread.json`. Text lives in the
   packet and leaves it solely via `get_messages`.
 - **Codex live wake is native-plugin plumbing.** `ours-codex` owns the App Server and
-  watcher for exactly one TUI session. Hooks register the thread, monitor MCP tools carry
-  explicit arm/disarm consent, and authenticated daemon notification endpoints remain
-  body-free. Only `get_messages` releases message text to the agent.
+  watcher for exactly one TUI session. The launcher observes that session's thread
+  directly; monitor MCP tools carry explicit arm/disarm consent, while trusted hooks add
+  defensive identity-state synchronization. Authenticated daemon notification endpoints
+  remain body-free. Only `get_messages` releases message text to the agent.

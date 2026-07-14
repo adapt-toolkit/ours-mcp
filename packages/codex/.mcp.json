@@ -2,12 +2,15 @@
   "mcpServers": {
     "ours": {
       "command": "node",
-      "args": ["${PLUGIN_ROOT}/bin/proxy.mjs"]
+      "args": ["bin/proxy.mjs"],
+      "cwd": ".",
+      "env_vars": ["OURS_PORT", "OURS_CONFIG", "OURS_API_TOKEN", "OURS_STATE_DIR", "OURS_AUTOSTART", "OURS_CODEX_LIVE"]
     },
     "ours_monitor": {
       "command": "node",
-      "args": ["${PLUGIN_ROOT}/bin/monitor-mcp.mjs"]
+      "args": ["bin/monitor-mcp.mjs"],
+      "cwd": ".",
+      "env_vars": ["OURS_CODEX_CONTROL_SOCKET", "OURS_CODEX_CAPABILITY"]
     }
   }
 }
-

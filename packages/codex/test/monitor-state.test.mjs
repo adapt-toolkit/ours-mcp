@@ -14,6 +14,13 @@ test('monitor requires explicit arm and disarms on identity change', () => {
   assert.deepEqual(result.effects, [{ type: 'unsubscribe', identity: 'Alice' }]);
 });
 
+test('explicit arm consent claims an unset binding but never overwrites another binding', () => {
+  const claimed = arm(createMonitorState(), 'Alice');
+  assert.equal(claimed.state.boundIdentity, 'Alice');
+  assert.equal(claimed.state.armedIdentity, 'Alice');
+  assert.throws(() => arm(bindingChanged(createMonitorState(), 'Bob').state, 'Alice'), /current binding is Bob/);
+});
+
 test('coalesces notifications and queues while a turn is active', () => {
   let state = { ...createMonitorState(), sessionId: 's', threadId: 't', boundIdentity: 'Alice', armedIdentity: 'Alice' };
   let result = notificationArrived(state, '10'); state = result.state;
@@ -28,4 +35,3 @@ test('coalesces notifications and queues while a turn is active', () => {
   result = disarm(state);
   assert.equal(result.state.pendingWake, false);
 });
-

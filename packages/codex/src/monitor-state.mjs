@@ -20,9 +20,13 @@ export function bindingChanged(state, identity) {
 }
 
 export function arm(state, identity) {
-  if (!identity || state.boundIdentity !== identity) throw new Error(`cannot arm ${identity || 'an empty identity'}; current binding is ${state.boundIdentity || 'unset'}`);
+  if (!identity) throw new Error('cannot arm an empty identity');
+  if (state.boundIdentity && state.boundIdentity !== identity) throw new Error(`cannot arm ${identity}; current binding is ${state.boundIdentity}`);
   if (state.armedIdentity === identity) return result(state);
-  return result({ ...state, armedIdentity: identity, cursor: null, pendingWake: false, lastError: null }, [{ type: 'subscribe', identity }]);
+  // The arm tool itself is an explicit, identity-named consent boundary. Claiming an
+  // otherwise-unset binding here keeps live wake functional before plugin hooks have
+  // been reviewed; trusted PostToolUse hooks still synchronize later identity switches.
+  return result({ ...state, boundIdentity: identity, armedIdentity: identity, cursor: null, pendingWake: false, lastError: null }, [{ type: 'subscribe', identity }]);
 }
 
 export function disarm(state) {
@@ -49,4 +53,3 @@ export function turnCompleted(state) {
 export function withError(state, error) {
   return result({ ...state, lastError: String(error) });
 }
-

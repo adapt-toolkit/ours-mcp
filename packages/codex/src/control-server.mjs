@@ -46,6 +46,12 @@ export class ControlServer {
   async #handle(line) {
     try {
       const msg = decodeControlLine(line, this.capability);
+      return await this.apply(msg);
+    } catch (error) { return { ok: false, error: error.message }; }
+  }
+
+  async apply(msg) {
+    try {
       let transition = { state: this.state, effects: [] };
       if (msg.command === 'register_session') transition = registerSession(this.state, msg);
       else if (msg.command === 'binding_changed') transition = bindingChanged(this.state, msg.identity);

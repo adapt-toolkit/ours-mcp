@@ -64,6 +64,11 @@ export async function resolveDaemonProfile({ argv = [], env = process.env, readC
   catch (error) { throw new Error(`ours daemon capability check failed: ${error?.message || error}`); }
   if (capability.status === 401 || capability.status === 403) throw new Error(`ours daemon authentication failed on port ${port}; supply the matching OURS_API_TOKEN/config`);
   if (!capability.ok) throw new Error(`selected daemon lacks the notification API (HTTP ${capability.status})`);
+  let unread;
+  try { unread = await fetchImpl(`${baseUrl}/unread`, { headers, signal: AbortSignal.timeout(2000) }); }
+  catch (error) { throw new Error(`ours daemon unread capability check failed: ${error?.message || error}`); }
+  if (unread.status === 401 || unread.status === 403) throw new Error(`ours daemon authentication failed on port ${port}; supply the matching OURS_API_TOKEN/config`);
+  if (!unread.ok) throw new Error(`selected daemon lacks the body-free unread API (HTTP ${unread.status}); install the testing daemon build and restart that daemon explicitly`);
 
   return {
     port, stateDir, token: token || null,
@@ -71,4 +76,3 @@ export async function resolveDaemonProfile({ argv = [], env = process.env, readC
     source, info, baseUrl, configPath, codexArgs: parsed.codexArgs,
   };
 }
-

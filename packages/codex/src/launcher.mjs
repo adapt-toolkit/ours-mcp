@@ -13,7 +13,10 @@ import { MonitorWatcher } from './watcher.mjs';
 export function validatePlatform(platform = process.platform) {
   if (platform === 'win32') throw new Error('native Windows is not supported in ours-codex v1; run it inside WSL');
 }
-export const appServerArgs = (url) => ['app-server', '--listen', url];
+export const appServerArgs = (url, codexArgs = []) => [
+  ...(codexArgs.includes('--dangerously-bypass-hook-trust') ? ['--dangerously-bypass-hook-trust'] : []),
+  'app-server', '--listen', url,
+];
 export const remoteTuiArgs = (url, codexArgs) => ['--remote', url, ...codexArgs];
 
 export function launcherEnvironment(env, profile, control) {
@@ -29,6 +32,20 @@ export function launcherEnvironment(env, profile, control) {
   if (profile.token) out.OURS_API_TOKEN = profile.token;
   else delete out.OURS_API_TOKEN;
   return out;
+}
+
+export function liveProcessEnvironments(env, profile, control) {
+  const live = launcherEnvironment(env, profile, control);
+  return { appServer: live, tui: live };
+}
+
+export function sessionRegistrationFromNotification(message, cwd) {
+  const threadId = message?.method === 'thread/started' ? message.params?.thread?.id
+    : message?.method === 'turn/started' ? (message.params?.threadId || message.params?.thread?.id)
+      : null;
+  return typeof threadId === 'string' && threadId
+    ? { command: 'register_session', sessionId: threadId, threadId, cwd }
+    : null;
 }
 
 async function freePort() {
@@ -66,6 +83,7 @@ export async function runLauncher({
   const socketPath = join(runtimeDir, 'control.sock');
   const capability = randomBytes(32).toString('hex');
   const url = `ws://127.0.0.1:${await freePort()}`;
+  const processEnvs = liveProcessEnvironments(env, profile, { socketPath, capability });
   let appServer;
   let tui;
   let client;
@@ -82,7 +100,7 @@ export async function runLauncher({
   const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
   const handlers = new Map();
   try {
-    appServer = spawn('codex', appServerArgs(url), { env, stdio: ['ignore', 'ignore', 'inherit'] });
+    appServer = spawn('codex', appServerArgs(url, profile.codexArgs), { env: processEnvs.appServer, stdio: ['ignore', 'ignore', 'inherit'] });
     appServer.once('error', () => {});
     await waitReady(url, fetchImpl, appServer);
     client = await connect(url, { timeoutMs: 30_000 });
@@ -107,8 +125,11 @@ export async function runLauncher({
       },
     });
     await control.start();
-    const childEnv = launcherEnvironment(env, profile, { socketPath, capability });
-    tui = spawn('codex', remoteTuiArgs(url, profile.codexArgs), { env: childEnv, stdio: 'inherit' });
+    client.onNotification((message) => {
+      const registration = sessionRegistrationFromNotification(message, profile.cwd || process.cwd());
+      if (registration) void control.apply(registration);
+    });
+    tui = spawn('codex', remoteTuiArgs(url, profile.codexArgs), { env: processEnvs.tui, stdio: 'inherit' });
     for (const signal of signals) {
       const handler = () => { if (tui?.exitCode == null) tui.kill(signal); };
       handlers.set(signal, handler); process.on(signal, handler);
@@ -122,4 +143,3 @@ export async function runLauncher({
     await cleanup();
   }
 }
-

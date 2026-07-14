@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleHook } from '../src/hooks/runner.mjs';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
 test('SessionStart registers the thread and injects body-free unread context', async () => {
   const commands = [];
@@ -31,4 +36,12 @@ test('compact suppresses duplicate preamble and successful binding updates contr
 test('hook failures never block Codex', async () => {
   const result = await handleHook({ hook_event_name: 'SessionStart', source: 'startup', session_id: 'x', cwd: '/x' }, { env: { OURS_CODEX_CONTROL_SOCKET: '/bad', OURS_CODEX_CAPABILITY: 'x' }, send: async () => { throw new Error('no'); } });
   assert.deepEqual(result, { continue: true });
+});
+
+test('PostToolUse matcher accepts plugin-qualified ours tool names', () => {
+  const config = JSON.parse(readFileSync(join(root, 'hooks/hooks.json'), 'utf8'));
+  const matcher = new RegExp(config.hooks.PostToolUse[0].matcher);
+  assert.ok(matcher.test('mcp__ours__choose_identity'));
+  assert.ok(matcher.test('mcp__ours-local-testing_ours__choose_identity'));
+  assert.ok(matcher.test('ours.choose_identity'));
 });

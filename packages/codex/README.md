@@ -60,15 +60,18 @@ OURS_CONFIG="$HOME/.ours/testing.json" ours-codex --ours-port 4050
 
 ## Hooks and consent
 
-The native plugin bundles `hooks/hooks.json` using Codex's default hook discovery:
+The native plugin bundles `hooks/hooks.json` using Codex's default hook discovery.
+Live mode does not depend on hook trust: the launcher observes the App Server's thread
+lifecycle directly, while the hooks add standard-mode context and defensive state sync:
 
-- `SessionStart` registers the live thread and surfaces body-free unread metadata and an
-  advisory `.ours-identity` pin.
+- `SessionStart` surfaces body-free unread metadata and an advisory `.ours-identity` pin.
 - `UserPromptSubmit` can re-surface unresolved unread/pin context.
 - `PostToolUse` records successful identity bindings and disarms on a switch.
 
-Codex requires review and trust of the exact hook definitions. Installation does not
-bypass hook trust. Start a new Codex thread after installing or updating the plugin.
+Codex requires review and trust of the exact hook definitions before running them.
+Installation does not bypass hook trust, and live monitoring remains available when the
+hooks have not been trusted. Start a new Codex thread after installing or updating the
+plugin.
 
 ## Commands
 

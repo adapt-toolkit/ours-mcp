@@ -26,5 +26,15 @@ test('npm artifact contains a valid native Codex plugin and all entry points', (
   for (const config of Object.values(mcp.mcpServers)) {
     const script = config.args[0].replace('${PLUGIN_ROOT}/', '');
     assert.ok(existsSync(join(root, script)), `${script} exists`);
+    assert.equal(config.cwd, '.', 'Codex resolves plugin-relative MCP commands from cwd');
+  }
+  assert.ok(mcp.mcpServers.ours.env_vars.includes('OURS_PORT'));
+  assert.ok(mcp.mcpServers.ours.env_vars.includes('OURS_API_TOKEN'));
+  assert.deepEqual(mcp.mcpServers.ours_monitor.env_vars.sort(), ['OURS_CODEX_CAPABILITY', 'OURS_CODEX_CONTROL_SOCKET']);
+});
+
+test('shipped command entry points parse as JavaScript', () => {
+  for (const file of ['ours-codex-install.mjs', 'ours-codex.mjs', 'monitor-mcp.mjs', 'proxy.mjs']) {
+    assert.doesNotThrow(() => execFileSync(process.execPath, ['--check', join(root, 'bin', file)]));
   }
 });
