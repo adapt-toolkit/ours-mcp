@@ -3452,6 +3452,49 @@ async function main() {
 
   const transports: Record<string, StreamableHTTPServerTransport> = {};
 
+  // Reap sessions whose owning client process is gone. transport.onclose does NOT fire on an
+  // abrupt client disconnect (SIGKILL / crash / `claude` restart) — only on graceful DELETE/SSE
+  // close — so serversBySession/transports/sessionHeaders would otherwise grow unbounded on
+  // connection churn, each orphaned McpServer retaining its ~per-session zod tool-schema bindings.
+  // Liveness is OS-authoritative via the client pid the proxy reports in x-ours-client-pid
+  // (mirrors the lease dead-pid reclaim). Never reaps a live pid or a pid-less (stdio) session.
+  // Per-session in-flight request tracking so the reaper never evicts a session mid-request.
+  // BOUNDED: a DEAD client with a stuck request (counter never decrements) is still reaped once its
+  // in-flight burst exceeds STUCK_MS — else dead-client-mid-request would be un-reapable forever.
+  const inflight = new Map<string, { n: number; since: number }>();
+  const STUCK_MS = 30_000;
+  const enterInflight = (sid: string) => { const e = inflight.get(sid); if (e) e.n++; else inflight.set(sid, { n: 1, since: Date.now() }); };
+  const leaveInflight = (sid: string) => { const e = inflight.get(sid); if (e && --e.n <= 0) inflight.delete(sid); };
+
+  const reapDeadSessions = (): number => {
+    let reaped = 0;
+    for (const sid of [...serversBySession.keys()]) {
+      if (sid === 'stdio') continue;
+      const pid = sessionHeaders.get(sid)?.pid;
+      // Fail-safe: only reap on an OS-confirmed-dead, resolvable-LOCAL pid. A missing/invalid pid
+      // (pid<=1: init/launchd/absent) is NOT proof of death — never reap it. Same-host is guaranteed
+      // by the 127.0.0.1 listen bind, so this client pid is always a local process (as the existing
+      // lease dead-pid reclaim already assumes).
+      if (pid === undefined || pid <= 1 || pidAlive(pid)) continue;
+      // Fail-safe (bounded): never reap a session with an in-flight request — UNLESS it has been
+      // in-flight past STUCK_MS (a dead client whose request will never complete), so a stuck
+      // dead-client request cannot defer reaping forever.
+      const inf = inflight.get(sid);
+      if (inf && inf.n > 0 && Date.now() - inf.since < STUCK_MS) continue;
+      const srv = serversBySession.get(sid);
+      serversBySession.delete(sid);
+      delete transports[sid];
+      sessionHeaders.delete(sid);
+      inflight.delete(sid);
+      void srv?.close().catch(() => {});
+      reaped++;
+      log(`session ${sid.slice(0, 8)}… reaped (client pid ${pid} dead)`);
+    }
+    return reaped;
+  };
+  const sessionReaper = setInterval(reapDeadSessions, 60_000);
+  sessionReaper.unref?.();
+
   const httpServer = createHttpServer(async (req, res) => {
     const url = new URL(req.url!, `http://localhost:${PORT}`);
     // Unauthenticated liveness/introspection: lets `ours-mcp watch` learn the
@@ -3533,8 +3576,13 @@ async function main() {
         const headers = { token: hdrToken, pid: Number.isInteger(hdrPid) ? hdrPid : undefined };
         if (sessionId && transports[sessionId]) {
           sessionHeaders.set(sessionId, headers);
-          await transports[sessionId].handleRequest(req, res, body);
+          enterInflight(sessionId);
+          try { await transports[sessionId].handleRequest(req, res, body); }
+          finally { leaveInflight(sessionId); }
         } else if (!sessionId && isInitializeRequest(body)) {
+          // Bound serversBySession to live clients before adding one: reap any sessions whose
+          // client pid is dead (their onclose never fired). This is where churn-growth is reclaimed.
+          reapDeadSessions();
           const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sid: string) => {
@@ -3556,6 +3604,14 @@ async function main() {
               // must not unbind. Release is explicit (DELETE) or by dead-pid reclaim.
               log(`session ${sid.slice(0, 8)}… closed (lease kept)`);
             }
+            // NOTE (HardenerSpecialist 2026-07-14): do NOT call server.close() here.
+            // server.close() → transport.close() → this.onclose?.() → THIS handler →
+            // server.close() … = infinite recursion (RangeError: Maximum call stack size
+            // exceeded, thrashing the daemon under churn). Dropping the map refs above
+            // (eviction/dereference) is what makes the McpServer + its zod native_bind
+            // closures collectable — confirmed by the create/drop-400 micro-benchmark
+            // (close-mode == plain-drop). So eviction is the mechanism; close() is neither
+            // necessary nor safe to call from within onclose.
           };
           await server.connect(transport);
           await transport.handleRequest(req, res, body);
@@ -3570,7 +3626,9 @@ async function main() {
           res.end('Invalid or missing session ID');
           return;
         }
-        await transports[sessionId].handleRequest(req, res);
+        enterInflight(sessionId);
+        try { await transports[sessionId].handleRequest(req, res); }
+        finally { leaveInflight(sessionId); }
       } else if (req.method === 'DELETE') {
         const sessionId = req.headers['mcp-session-id'] as string | undefined;
         if (!sessionId || !transports[sessionId]) {
