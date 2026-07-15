@@ -565,7 +565,7 @@ async function cmdCreateRoot(argv: string[]): Promise<void> {
     const text = (Array.isArray(r.content) ? (r.content as Array<{ text?: unknown }>) : [])
       .map((c) => (typeof c.text === 'string' ? c.text : ''))
       .join(' ')
-      .split('\n\nAsk the user:')[0] // the monitor hint is agent-directed; meaningless on a CLI
+      .split(/\n\nAsk the user\b/)[0] // the monitor hint is agent-directed; meaningless on a CLI
       .replace(/^create_root_identity failed: /, '')
       .trim();
     if (r.isError) {
