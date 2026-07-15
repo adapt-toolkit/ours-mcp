@@ -3067,7 +3067,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
     },
   );
 
-  // ---- e2e-migration route verdict (Q1=A · Option B) -------------------------------------------
+  // ---- e2e-migration route verdict (Q1=B — Option B: CORE delivers) ----------------------------
   // Under the migration design, CORE (a2a_messaging) is the routing AUTHORITY: send_message/send_file
   // consult `e2e_route(cid)` and, for a migrated (epoch-pinned) contact, return a typed verdict in
   // `_return_data`. Per MigrationImpl3's Option-B decision, CORE also owns the actual e2e app DELIVERY
