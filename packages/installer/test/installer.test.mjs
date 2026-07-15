@@ -111,9 +111,13 @@ test('update path: daemon present → drives plugin CLIs, creates human identity
   assert.match(calls, /codex plugin add ours@ours-codex-marketplace/, 'codex plugin add');
   assert.match(calls, /npm i -g @ours\.network\/codex@latest/, 'ours-codex launcher installed with the codex plugin');
   assert.match(out, /AUTO wake-up/, 'explains what ours-codex is (background wake vs blocking)');
-  // ours-fleet installed + host setup.
+  // ours-fleet: CLI + host setup, AND the fleet HARNESS PLUGIN installed into each harness.
   assert.match(calls, /npm i -g @ours\.network\/fleet@latest/, 'fleet package installed');
   assert.match(calls, /ours-fleet init/, 'fleet host setup run');
+  assert.match(calls, /claude plugin install fleet@ours\.network/, 'Claude fleet plugin installed');
+  assert.match(calls, /codex plugin add ours-fleet@ours-codex-marketplace/, 'Codex fleet plugin installed');
+  assert.match(out, /Claude Code fleet plugin installed/, 'reports the Claude fleet plugin');
+  assert.match(out, /Codex fleet plugin installed/, 'reports the Codex fleet plugin');
   // Telegram default No → skipped, and its hand-off step drops out.
   assert.doesNotMatch(calls, /ours-tg-connector/, 'telegram skipped by default');
   assert.match(out, /Telegram connector.*skipped/, 'summary shows telegram skipped');
@@ -121,7 +125,8 @@ test('update path: daemon present → drives plugin CLIs, creates human identity
   assert.match(out, /paste this into your agent/, 'final copy-paste hand-off present');
   assert.doesNotMatch(out, /Create my Ours human identity/, 'identity created in-install drops from the hand-off');
   assert.doesNotMatch(out, /Set up my Telegram bot/, 'hand-off drops the skipped telegram step');
-  assert.match(out, /Set up ours-fleet/, 'hand-off keeps the installed fleet step');
+  assert.match(out, /Set up my ours-fleet/, 'hand-off keeps the (permanent-team) fleet step');
+  assert.match(out, /PERMANENT use/, 'fleet hand-off asks for a permanent team, not a temp-agent demo');
   rmSync(tmp, { recursive: true, force: true });
 });
 
