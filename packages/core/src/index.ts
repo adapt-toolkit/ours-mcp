@@ -1896,6 +1896,42 @@ function wireHandlers(id: Identity): void {
         appendNotifyLog(id, { event: 'contact_restored', from: name });
         log(`[${id.name}] contact "${name}" restored (re-keyed)`);
         process.nextTick(() => void flushDeferredFor(id, String(cid)));
+      } else if (event === 'migration_active') {
+        // The e2e migration pin is set for this contact (DAEMON-INTEGRATION.md §3): subsequent app
+        // sends to $cid now route "e2e". CORE owns the §4 `[migration] active … session_id=` proof
+        // line + the actual delivery (Option B); the daemon just records the cue at event level.
+        const cid = payload.Reduce('cid').Visualize();
+        const role = payload.Reduce('role').Visualize();
+        appendNotifyLog(id, { event: 'migration_active', cid: String(cid), role: String(role) });
+        log(`[migration] active-notify cid=${cid} role=${role} (pin set; app sends now route e2e)`);
+      } else if (event === 'migration_deferred_flush') {
+        // One notify per queued message drained on active (DAEMON-INTEGRATION.md §3), FIFO order.
+        // Option B: CORE performs the actual boxed e2e re-drive; the daemon does NOT deliver here —
+        // it records the event + surfaces order at the event level. NEVER box, NEVER drop silently.
+        const cid = payload.Reduce('cid').Visualize();
+        const wireId = payload.Reduce('wire_id').Visualize();
+        appendNotifyLog(id, { event: 'migration_deferred_flush', cid: String(cid), wire_id: String(wireId) });
+        log(`[migration] flush-notify cid=${cid} wire_id=${wireId} (deferred→e2e; core delivers)`);
+      } else if (event === 'migration_stalled') {
+        // The migration didn't reach active in its window (DAEMON-INTEGRATION.md §0.1). UX/log only —
+        // core drives recovery via the sweep. (Field set beyond $cid pending §4 log-surface align.)
+        const cid = payload.Reduce('cid').Visualize();
+        const reasonAv = payload.Reduce('reason');
+        const reason = reasonAv.IsNil() ? '' : String(reasonAv.Visualize());
+        appendNotifyLog(id, { event: 'migration_stalled', cid: String(cid), ...(reason ? { reason } : {}) });
+        log(`[migration] stalled-notify cid=${cid}${reason ? ` (${reason})` : ''} (core re-drives via sweep)`);
+      } else if (event === 'downgrade_refused') {
+        // SECURITY: core dropped an inbound LEGACY plaintext app message from an epoch-pinned (migrated)
+        // contact — post-migration all app data is e2e, so a legacy plaintext is a downgrade attack
+        // (DAEMON-INTEGRATION.md §0.1 receive-side). Core already dropped it; the daemon surfaces it.
+        const cid = payload.Reduce('cid').Visualize();
+        const wireAv = payload.Reduce('wire_id');
+        const wireId = wireAv.IsNil() ? '' : String(wireAv.Visualize());
+        appendNotifyLog(id, { event: 'downgrade_refused', cid: String(cid), ...(wireId ? { wire_id: wireId } : {}) });
+        log(`[e2e-route] downgrade-dropped cid=${cid}${wireId ? ` wire_id=${wireId}` : ''} (legacy plaintext from a migrated peer — dropped by core)`);
+        process.nextTick(() =>
+          pushNotification(id.name, `[${id.name}] a message from a migrated contact was rejected as an unsafe downgrade (dropped).`),
+        );
       } else if (event === 'control_request') {
         // Daemon-internal: the proxy's request queue is drained and executed
         // here, never surfaced to agent sessions.
@@ -3004,6 +3040,33 @@ function createMcpServer(getSessionId: () => string): McpServer {
     },
   );
 
+  // ---- e2e-migration route verdict (Q1=A · Option B) -------------------------------------------
+  // Under the migration design, CORE (a2a_messaging) is the routing AUTHORITY: send_message/send_file
+  // consult `e2e_route(cid)` and, for a migrated (epoch-pinned) contact, return a typed verdict in
+  // `_return_data`. Per MigrationImpl3's Option-B decision, CORE also owns the actual e2e app DELIVERY
+  // (a bare e2e_signed_message can't ride the SDK wire schema, so delivery is boxed and core does it
+  // inline) AND the §4 session_id proof logs (`[e2e-app] send/recv`, `[migration] active … session_id=`).
+  // The DAEMON's job here is narrow: OBEY the verdict — never box a refused/migrated contact, surface
+  // "migrating"/"downgrade_refused" to the user, and emit DAEMON-scoped event-level logs (distinct from
+  // core's §4 proof lines). See /tmp/ours-migration-spec/DAEMON-INTEGRATION.md §2 (revision pending).
+  // The `$route`/`$code` MUFL symbols visualize to their bare name ("e2e", "e2e_downgrade_refused", …).
+  type SendVerdict =
+    | { kind: 'refused'; wireId: string; cid: string }               // downgrade_refused → NEVER box
+    | { kind: 'migrating'; wireId: string; cid: string; queued: number } // core queued (msg) / retry (file)
+    | { kind: 'e2e'; wireId: string; cid: string }                   // ride the migrated session
+    | { kind: 'deferred'; wireId: string; queued: number }           // degraded-contact restore queue
+    | { kind: 'sent'; wireId: string };                              // legacy / fresh-v2 box (core sent)
+  const parseSendVerdict = (sent: AdaptValue): SendVerdict => {
+    const has = (f: string) => !sent.Reduce(f).IsNil();
+    const wireId = sent.Reduce('wire_id').Visualize();
+    const cid = has('sent_to') ? sent.Reduce('sent_to').Visualize() : '';
+    if (has('downgrade_refused')) return { kind: 'refused', wireId, cid };
+    if (has('migrating')) return { kind: 'migrating', wireId, cid, queued: has('queued') ? Number(sent.Reduce('queued').Visualize()) : 0 };
+    if (has('route')) return { kind: 'e2e', wireId, cid }; // $route -> $e2e ⇒ "e2e"
+    if (has('deferred')) return { kind: 'deferred', wireId, queued: has('queued') ? Number(sent.Reduce('queued').Visualize()) : 0 };
+    return { kind: 'sent', wireId };
+  };
+
   server.tool(
     'send_message',
     'Send an end-to-end-encrypted message to a known contact (by name or container id). ' +
@@ -3038,24 +3101,40 @@ function createMcpServer(getSessionId: () => string): McpServer {
           : { wire_id: reply_to_wire_id }
         : undefined;
       try {
-        const { wireId, deferred, queued } = await withScopeAsync(async (lt) => {
-          const sent = await mutatingTx(id!, '::a2a_messaging::send_message', {
-            contact,
-            text,
-            ...(reply_to ? { reply_to } : {}),
-          }, lt);
-          const defAv = sent.Reduce('deferred');
-          return {
-            wireId: sent.Reduce('wire_id').Visualize(),
-            deferred: !defAv.IsNil(),
-            queued: defAv.IsNil() ? 0 : Number(sent.Reduce('queued').Visualize()),
-          };
-        });
-        return textResult(deferred
-          ? `Message queued for "${contact}" (wire_id ${wireId}) — the contact's encryption keys are being ` +
-            `re-established after an upgrade (contact restore in progress); delivery is automatic once ` +
-            `restored (${queued} message${queued === 1 ? '' : 's'} queued).`
-          : `Message sent to "${contact}" (wire_id ${wireId}).`);
+        const v = await withScopeAsync(async (lt) => parseSendVerdict(await mutatingTx(id!, '::a2a_messaging::send_message', {
+          contact,
+          text,
+          ...(reply_to ? { reply_to } : {}),
+        }, lt)));
+        switch (v.kind) {
+          case 'refused':
+            // downgrade_refused: once-E2E peer with no current v2 bundle. FAIL CLOSED — never box.
+            log(`[e2e-route] refused cid=${v.cid} wire_id=${v.wireId} (downgrade_refused)`);
+            return textResult(
+              `Couldn't send to "${contact}" (wire_id ${v.wireId}): their end-to-end encryption must be ` +
+              `re-established after an upgrade before messages can go through. It was NOT sent and NOT ` +
+              `downgraded to the old channel — the system re-offers the upgrade automatically; try again shortly.`,
+              true);
+          case 'migrating':
+            // Initiator commit window: CORE queued it in mig_deferred; it flushes on migration-active.
+            log(`[migration] queued cid=${v.cid} wire_id=${v.wireId} (migrating, ${v.queued} queued)`);
+            return textResult(
+              `Message queued for "${contact}" (wire_id ${v.wireId}) — an encryption upgrade is completing; ` +
+              `it will send automatically the moment the migration goes active ` +
+              `(${v.queued} message${v.queued === 1 ? '' : 's'} queued).`);
+          case 'e2e':
+            // Migrated session: CORE delivered over e2e (Option B, boxed inline). Daemon just reports
+            // it. §4 session_id proof line is core's `[e2e-app] send`; this is the daemon verdict log.
+            log(`[e2e-route] cid=${v.cid} wire_id=${v.wireId} verdict=e2e (core delivered over migrated session)`);
+            return textResult(`Message sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`);
+          case 'deferred':
+            return textResult(
+              `Message queued for "${contact}" (wire_id ${v.wireId}) — the contact's encryption keys are being ` +
+              `re-established after an upgrade (contact restore in progress); delivery is automatic once ` +
+              `restored (${v.queued} message${v.queued === 1 ? '' : 's'} queued).`);
+          default:
+            return textResult(`Message sent to "${contact}" (wire_id ${v.wireId}).`);
+        }
       } catch (e) {
         if (!/Unknown contact/.test(String(e))) {
           return textResult(`send_message failed: ${String(e)}`, true);
@@ -3119,18 +3198,38 @@ function createMcpServer(getSessionId: () => string): McpServer {
           : { wire_id: reply_to_wire_id }
         : undefined;
       try {
-        const wireId = await withScopeAsync(async (lt) => {
+        const v = await withScopeAsync(async (lt) => {
           const binValue = id!.pw.packet.NewBinaryFromBuffer(buf).Attach(lt);
-          const sent = await mutatingTx(id!, '::a2a_messaging::send_file', {
+          return parseSendVerdict(await mutatingTx(id!, '::a2a_messaging::send_file', {
             contact,
             filename: fname,
             mime: mt,
             data: binValue,
             ...(reply_to ? { reply_to } : {}),
-          }, lt);
-          return sent.Reduce('wire_id').Visualize();
+          }, lt));
         });
-        return textResult(`File "${fname}" (${buf.length} B${mt ? `, ${mt}` : ''}) sent to "${contact}" (wire_id ${wireId}).`);
+        const desc = `File "${fname}" (${buf.length} B${mt ? `, ${mt}` : ''})`;
+        switch (v.kind) {
+          case 'refused':
+            log(`[e2e-route] refused cid=${v.cid} wire_id=${v.wireId} (downgrade_refused, file)`);
+            return textResult(
+              `Couldn't send ${desc} to "${contact}" (wire_id ${v.wireId}): their end-to-end encryption must be ` +
+              `re-established after an upgrade first. It was NOT sent and NOT downgraded; the system re-offers ` +
+              `the upgrade automatically — try again shortly.`,
+              true);
+          case 'migrating':
+            // Files are NOT queued (bulk) — surface a retry, not a queue promise.
+            log(`[migration] file-defer cid=${v.cid} wire_id=${v.wireId} (migrating, not queued)`);
+            return textResult(
+              `${desc} not sent to "${contact}" yet — an encryption upgrade is completing; retry the file once ` +
+              `the migration goes active (files aren't auto-queued like messages).`,
+              true);
+          case 'e2e':
+            log(`[e2e-route] cid=${v.cid} wire_id=${v.wireId} verdict=e2e file (core delivered over migrated session)`);
+            return textResult(`${desc} sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`);
+          default:
+            return textResult(`${desc} sent to "${contact}" (wire_id ${v.wireId}).`);
+        }
       } catch (e) {
         return textResult(`send_file failed: ${String(e)}`, true);
       }
