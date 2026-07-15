@@ -1,79 +1,73 @@
-# @ours.network/installer
+# @ours.network/installer — `ours-install`
 
-The one-shot **ours.network** installer — a friendly, guided setup that is the capstone over
-the per-harness plugin installers. Hosted on git and meant to be run as:
+The **unified ours.network stack installer**. ONE guided ~3-minute flow that installs the WHOLE
+stack for someone who already has Claude Code and/or Codex, then hands back a single copy-paste
+prompt to finish setup conversationally. Run it as `ours-install`, or bootstrap over the web:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash
 ```
 
-(A short `https://ours.network/install.sh` redirect to the same file is a future optional
-convenience — the git raw URL above is the canonical source.)
+(A short `https://ours.network/install.sh` redirect is a future convenience — the git raw URL
+above is the canonical source.) `ours-install` is the single front door; `ours-codex-install` is
+kept as a **thin alias** that hands off to it (use `ours-codex-install --codex-only` for the
+legacy Codex-only path).
 
-`install.sh` is a **thin bootstrap**: it checks that Node.js (≥ 20) is present — printing
-friendly, per-OS guidance if it isn't — then hands off to a **Node installer** (`install.mjs`)
-that provides the real experience: an ASCII banner, tasteful colour (degrades under `NO_COLOR`
-/ no-tty), and plain-language explanations of **what** each step does and **why**.
+`install.sh` is a **thin bootstrap**: it checks Node.js (≥ 20), printing friendly per-OS guidance
+if it's missing, then hands off to the **Node installer** (`install.mjs`) — ASCII banner, tasteful
+colour (degrades under `NO_COLOR` / no-tty), plain-language **what + why** for every step.
 
-It:
+## The flow (what the user sees)
 
-1. installs and starts the ours daemon (`@ours.network/mcp`) — ensuring `@latest` and
-   restarting it only when the version actually changed;
-2. offers to install the daemon as a **persistent service** (survives reboot,
-   `ours-mcp install-service`);
-3. lets you set the **broker address** (the relay your node dials to reach peers — keep the
-   default unless you run your own) and the **HTTP port** (default `3050`, with conflict
-   handling that never hands out `3051`, reserved for the Telegram connector);
-4. lets you **toggle** which agent harnesses to set up — **Claude Code**, **Codex**,
-   **Hermes** — via a checkbox picker (arrow keys move, **space** toggles, **enter** confirms)
-   and runs each selected harness's plugin installer;
-5. does everything in one pass — no "now do X, now press start" follow-up — and prints the
-   installed **versions** plus a brief "how to use" recap at the end.
+1. **Pre-flight** — a short checklist, not a wall of logs: platform (Linux / macOS / WSL; native
+   Windows prints a WSL pointer and exits), Node.js, and **harness detection with alias-safety**.
+   Before ever calling `claude` / `codex`, it confirms each resolves to a **real executable** that
+   answers `--version` promptly. A shell alias / hanging wrapper is **never called** (that would
+   hang the run) — it's reported plainly with a fix, and a manual-install path is always offered.
+   If neither harness exists it says so and exits.
+2. **Config-first** (first install only) — the only two settings the user ever types, up front:
+   the **broker** (end-to-end encrypted; the broker never sees message content — almost everyone
+   just presses Enter) and the **port** (probes `3050`; only asks if it's busy; never hands out
+   `3051`, reserved for the Telegram connector). Applied once, then the stack is built with it.
+3. **Four consent gates**, each paced with a clean `✓ … No problems.` line + an explicit
+   **Continue?** — never a start-twice-then-ask, never a silent failure:
+   - **1/4 ours core (the daemon)** — write config → install/start ONCE → boot service. On a
+     re-run it reuses the running config (no re-ask) and only updates when you say yes.
+   - **2/4 harness plugins** — the installer **drives the plugin CLIs itself**
+     (`claude plugin marketplace add …` + `claude plugin install ours@ours.network`;
+     `codex plugin marketplace add …` + `codex plugin add ours@ours-codex-marketplace`). Choosing
+     Codex also installs the `ours-codex` live launcher in the same step. Any failure / alias
+     prints the exact manual commands and continues — it **never dead-ends**.
+   - **3/4 ours-fleet** — makes your harnesses persistent, always-online agent teams that survive
+     a reboot; runs `ours-fleet init`. Default **Yes**.
+   - **4/4 Telegram connector** — install-only (no bot tokens here), then optionally as a
+     boot service.
+4. **Summary + hand-off** — a recap (skipped/failed rows call out the fix), then a **literal
+   copy-paste prompt** (root identity + fleet + Telegram) with the steps for any skipped/failed
+   component dropped out. Copied to the clipboard where supported.
 
-The base install asks **zero** identity/wake questions. For Codex it installs the native
-plugin (skills, MCP servers, and hooks) plus the global `ours-codex` launcher. Standard
-mode starts with `codex`; live mode starts with `ours-codex`. Live monitoring is armed
-only after the user explicitly approves it for the currently bound identity, and stops
-with that CLI session. Standard mode offers a second, explicit-consent foreground fallback
-that blocks the current Codex turn until mail arrives or the user interrupts it.
+The root identity is **deferred to the hand-off** — zero identity typing during install. Because
+`curl … | bash` gives the script its input over the pipe, every prompt is read from the
+controlling terminal (`/dev/tty`), so the flow still works piped.
 
-Because `curl … | bash` gives the script its input over the pipe, every interactive prompt is
-read from the controlling terminal (`/dev/tty`), so the picker still works.
-
-## Per-harness installs still work standalone
-
-The unified installer just orchestrates the same per-harness packages you can install
-directly (each is exactly two commands):
-
-| harness | commands |
-|---|---|
-| Hermes | `npm i -g @ours.network/hermes` · `ours-hermes-install` |
-| Codex | `npm i -g @ours.network/codex` · `ours-codex-install` |
-| Claude Code | `/plugin marketplace add adapt-toolkit/ours-claude-marketplace` · `/plugin install ours` (in-app) |
-
-Claude Code installs from its in-app marketplace rather than a shell bin, so the unified
-installer sets up the daemon and prints those two in-Claude-Code commands.
-
-## Non-interactive / CI
-
-When there is no terminal (headless), drive it with environment variables:
+## Non-interactive / CI / safe dry-run
 
 ```sh
-OURS_HARNESSES="codex hermes" \
-OURS_SERVICE=no \
-OURS_ASSUME_YES=1 \
-  bash install.sh
+OURS_ASSUME_YES=1 bash install.sh          # accept every default, no prompts
+OURS_INSTALL_DRY_RUN=1 bash install.sh     # walk the WHOLE flow, install/change NOTHING
 ```
+
+`OURS_INSTALL_DRY_RUN=1` routes every side-effecting action through a print-only seam — it shows
+exactly the commands it *would* run (npm installs, `ours-mcp start`, plugin adds, `ours-fleet
+init`, service installs) without executing them. That is the safe way to preview the flow on a
+machine you don't want to touch, and how the integration tests drive it.
 
 | var | meaning |
 |---|---|
-| `OURS_HARNESSES` | harnesses to set up (space/comma list of `claude-code codex hermes`, or `all`) |
-| `OURS_SERVICE` | `yes`/`no` — install the daemon as a persistent service |
-| `OURS_BROKER` | broker address to write (default: keep the daemon's current) |
-| `OURS_PORT` | daemon HTTP port to write (default: keep the daemon's current; never `3051`) |
-| `OURS_ASSUME_YES` | accept defaults, never prompt |
+| `OURS_ASSUME_YES` | accept every default, never prompt (implies no tty needed) |
+| `OURS_INSTALL_DRY_RUN` | walk the flow without installing or changing anything |
 | `OURS_NPM` | npm binary to use (default `npm`) |
-| `OURS_CODEX_LIVE` | `yes` reports the `ours-codex` live path; `no` reports standard mode |
+| `OURS_CONFIG` | daemon config file location (default `~/.ours/config.json`) |
 
 ## Uninstall
 
@@ -114,8 +108,11 @@ OURS_UNINSTALL_DAEMON=yes \
 ## Notes
 
 - This package is **not published to npm** (`private: true`); it ships as the hosted
-  `install.sh` bootstrap plus the `install.mjs` Node installer (and its `lib/`). The harness
-  packages it installs (`@ours.network/{hermes,codex}`) and the daemon (`@ours.network/mcp`)
-  are the published pieces.
-- Idempotent end to end: re-running upgrades the daemon + plugins to `@latest`, restarts the
-  daemon only on a version/config change, and each per-harness installer is itself idempotent.
+  `install.sh` bootstrap plus the `install.mjs` Node installer (and its `lib/`), and exposes the
+  `ours-install` bin. The pieces it installs — the daemon (`@ours.network/mcp`), the harness
+  plugins via each marketplace, `@ours.network/fleet`, and `@ours.network/tg-connector` — are the
+  published components.
+- **Idempotent + safe to re-run.** A re-run adds a skipped piece, re-points the plugins, or (only
+  when you say yes) updates a component; an already-current daemon is left untouched, its running
+  port reused everywhere. Deep configuration (identities, bot tokens, fleet roles) is intentionally
+  **not** done here — it's the copy-paste hand-off's job.

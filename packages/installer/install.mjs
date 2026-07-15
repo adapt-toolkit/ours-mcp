@@ -1,96 +1,95 @@
 #!/usr/bin/env node
-// ours.network — the Node installer (the real UX behind install.sh's thin bootstrap).
+// ours.network — the unified `ours-install` experience (the real UX behind install.sh's thin
+// bootstrap, and the `ours-install` command once the stack is on the machine).
 //
-// It installs + starts the ours daemon (your local mesh node), optionally as a persistent
-// service, lets you set the broker + HTTP port the daemon uses, then multi-selects which agent
-// harnesses to wire up and runs each one's plugin installer. Every step explains WHAT it does and
-// WHY, in plain language, with tasteful colour that degrades under NO_COLOR / no-tty.
+// ONE installer for the WHOLE stack — ours core (the daemon) + the harness plugins (Claude Code /
+// Codex) + ours-fleet + the Telegram connector — for someone who ALREADY has Claude and/or Codex.
+// Its whole job: install the stack cleanly, then hand back ONE copy-paste prompt the user drops
+// into their agent to finish all real configuration conversationally. No tokens, no port editing,
+// no config files. See packages/installer/README.md and the UX spec for the full contract.
 //
-// Interactive prompts are drawn on /dev/tty so `curl … | bash` still works. With no controlling
-// terminal (true headless / CI) it falls back to environment variables and makes safe do-nothing
-// choices rather than blocking — see the env overrides in install.sh's header.
+// Design pillars (from the spec): config FIRST then act once; consent-first (Enter = no change);
+// slow, per-step "✓ … no problems" + Continue?; never silently broken; idempotent + safe re-run;
+// alias-safety / never-hang; deep config deferred to the copy-paste hand-off.
+//
+// SAFETY: every side-effecting action goes through act(); with OURS_INSTALL_DRY_RUN=1 nothing is
+// installed/started/restarted — it prints exactly what it WOULD do. That is the safe way to walk
+// the whole flow on a machine you don't want to touch (and how the tests drive it).
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { homedir, userInfo } from 'node:os';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { homedir, platform as osPlatform, release as osRelease } from 'node:os';
 import { join, dirname } from 'node:path';
-import { banner, section, heading, ok, step, info, warn, c, box, withSpinner, openTty, makeWriter, closeSync } from './lib/ui.mjs';
-import { askLine, askYesNo, checkboxSelect } from './lib/prompt.mjs';
+import { banner, heading, ok, info, warn, c, box, withSpinner, openTty, makeWriter, closeSync } from './lib/ui.mjs';
+import { askLine, askYesNo } from './lib/prompt.mjs';
 import {
-  canonHarnesses, suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
-  DEFAULT_BROKER, DEFAULT_PORT, RESERVED_PORTS,
+  suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
+  detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
+  DEFAULT_PORT,
 } from './lib/logic.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
-// All narrative output goes through `sink` so the wizard can redirect it to the tty's alternate
-// screen and hand it back to stdout for the final (persistent) summary.
-let sink = (s) => process.stdout.write(s);
-const say = (s) => sink(`ours: ${s}\n`);
-const line = (s = '') => sink(`${s}\n`);
+const DRY = !!process.env.OURS_INSTALL_DRY_RUN;
+const SELFHOST_URL = 'ours.network';
+const CLAUDE_MARKET = 'adapt-toolkit/ours-claude-marketplace';
+const CODEX_MARKET = 'adapt-toolkit/ours-codex-marketplace';
 
-// --- step-by-step wizard (alternate screen buffer) ----------------------------------------------
-// On a real interactive terminal the installer behaves like an app installer: ONE step per
-// screen on the ANSI alternate buffer — a finished step is REPLACED by the next, never scrolled
-// past — with a "Step k of N" indicator. Piped / no-tty / TERM=dumb / NO_COLOR / OURS_ASSUME_YES
-// runs keep the plain linear log (what tests and logs see). The main buffer is restored BEFORE
-// the closing summary + next-steps panel, so they stay visible after the wizard closes.
-const wizard = { active: false, write: null, step: 0, total: 0 };
-function wizardEnter(write, total) {
-  wizard.active = true; wizard.write = write; wizard.total = total;
-  write('\x1b[?1049h\x1b[2J\x1b[H');
-  sink = write;
-}
-function wizardLeave() {
-  if (!wizard.active) return;
-  wizard.active = false;
-  wizard.write('\x1b[?1049l');
-  sink = (s) => process.stdout.write(s);
-}
-function wizardScreen(title) {
-  wizard.step++;
-  wizard.write('\x1b[2J\x1b[H');
-  const prog = `Step ${wizard.step} of ${wizard.total}`;
-  const pad = ' '.repeat(Math.max(2, 64 - 2 - 'ours.network'.length - prog.length));
-  line('');
-  line('  ' + c.bold(c.cyan('ours')) + c.gray('.network') + pad + c.gray(prog));
-  line('');
-  line('  ' + c.cyan('──') + ' ' + c.bold(title) + ' ' + c.gray('─'.repeat(Math.max(2, 64 - title.length - 7))));
-  line('');
-}
+const sink = (s) => process.stdout.write(s);
+const line = (s = '') => sink(`${s}\n`);
+const say = (s) => sink(`ours: ${s}\n`);
 
 // --- external command helpers (never throw; the installer degrades, it doesn't crash) ----------
-function run(bin, args, { capture = false } = {}) {
+function run(bin, args, { capture = false, timeout } = {}) {
   const r = spawnSync(bin, args, {
     encoding: 'utf8',
+    timeout,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
   });
-  return { code: r.status ?? (r.error ? -1 : 0), out: r.stdout || '', err: r.stderr || '', ok: !r.error && r.status === 0 };
+  const timedOut = !!(r.error && (r.error.code === 'ETIMEDOUT' || r.signal === 'SIGTERM'));
+  return {
+    code: r.status ?? (r.error ? -1 : 0),
+    out: r.stdout || '', err: r.stderr || '',
+    ok: !r.error && r.status === 0,
+    timedOut,
+  };
 }
-// Async twin of run() for the long npm steps, so a spinner can animate while they work. Output is
-// captured (npm's own noise stays off the pretty run) and surfaced by the caller on failure.
 function runAsync(bin, args) {
   return new Promise((resolve) => {
     let child;
     try { child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch { resolve({ code: -1, out: '', err: '', ok: false }); return; }
-    let out = '';
-    let errOut = '';
+    let out = '', errOut = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { errOut += d; });
     child.on('error', () => resolve({ code: -1, out, err: errOut, ok: false }));
     child.on('close', (code) => resolve({ code: code ?? -1, out, err: errOut, ok: code === 0 }));
   });
 }
+
+// act(): the single seam every side-effecting step passes through. In DRY-RUN it prints the exact
+// command instead of running it and reports a synthetic success, so the whole UX can be walked on
+// a machine we must not disturb. `fn` runs the real thing and returns {ok,...}.
+async function act(desc, fn) {
+  if (DRY) { line('  ' + c.dim(`[dry-run] would: ${desc}`)); return { ok: true, dry: true }; }
+  return fn();
+}
+async function actSpin(label, desc, fn) {
+  if (DRY) { line('  ' + c.dim(`[dry-run] would: ${desc}`)); return { ok: true, dry: true }; }
+  return withSpinner(label, fn);
+}
+
+// --- daemon probes (always safe to run — read-only) --------------------------------------------
 const daemonVersionLine = () => (run('ours-mcp', ['--version'], { capture: true }).out.split('\n')[0] || '').trim();
 const daemonStatusText = () => run('ours-mcp', ['status'], { capture: true }).out;
 const daemonRunning = () => run('ours-mcp', ['status'], { capture: true }).code === 0;
+const globalVersion = (pkg) => {
+  const ls = run(NPM, ['ls', '-g', pkg], { capture: true }).out;
+  const m = ls.match(new RegExp(pkg.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') + '@([0-9][0-9.]*)'));
+  return m ? m[1] : '';
+};
 
-// --- config file (fixed home location, independent of stateDir; mirrors core/config.ts) --------
-function configPath() {
-  return process.env.OURS_CONFIG || join(homedir(), '.ours', 'config.json');
-}
-function readConfigObject() {
-  try { return JSON.parse(readFileSync(configPath(), 'utf8')); } catch { return {}; }
-}
+// --- config file (fixed home location; mirrors core/config.ts) ---------------------------------
+function configPath() { return process.env.OURS_CONFIG || join(homedir(), '.ours', 'config.json'); }
+function readConfigObject() { try { return JSON.parse(readFileSync(configPath(), 'utf8')); } catch { return {}; } }
 function writeConfigPatch(patch) {
   const p = configPath();
   mkdirSync(dirname(p), { recursive: true });
@@ -98,12 +97,26 @@ function writeConfigPatch(patch) {
   return p;
 }
 
-// Is `port` already bound by some process? net.Server#listen is async, so we probe in a throwaway
-// child node process and read its exit code — a clean synchronous answer. EADDRINUSE ⇒ taken.
+// Is `port` already bound? Probe in a throwaway child and read its exit code (EADDRINUSE ⇒ taken).
 function portTakenSync(port) {
-  const script = `const net=require('net');const s=net.createServer();s.once('error',e=>{process.exit(e.code==='EADDRINUSE'?3:0)});s.listen(${port},'127.0.0.1',()=>{s.close(()=>process.exit(0))});`;
-  const r = spawnSync(process.execPath, ['-e', script], { timeout: 3000 });
+  const scriptSrc = `const net=require('net');const s=net.createServer();s.once('error',e=>{process.exit(e.code==='EADDRINUSE'?3:0)});s.listen(${port},'127.0.0.1',()=>{s.close(()=>process.exit(0))});`;
+  const r = spawnSync(process.execPath, ['-e', scriptSrc], { timeout: 3000 });
   return r.status === 3;
+}
+
+// --- harness detection with ALIAS-SAFETY (never call an unsafe command) -------------------------
+// Gather three read-only observations, then let the pure classifier decide. We NEVER run the
+// harness in a way that could hang: --version is spawned directly (no shell → real PATH binary)
+// with a hard timeout; the shell `type` lookup is also timeout-guarded.
+function detectHarness(name) {
+  const onPath = run('bash', ['-c', `command -v ${name}`], { capture: true }).ok;
+  const probe = run(name, ['--version'], { capture: true, timeout: 6000 });
+  const versionOk = probe.ok && /\d+\.\d+/.test(probe.out);
+  const shell = process.env.SHELL || '/bin/bash';
+  const typeProbe = run(shell, ['-ic', `type -t ${name} 2>/dev/null`], { capture: true, timeout: 4000 });
+  const shellType = (typeProbe.out || '').trim();
+  const verdict = classifyHarnessProbe({ onPath, versionOk, timedOut: probe.timedOut, shellType });
+  return { name, ...verdict };
 }
 
 // ===============================================================================================
@@ -111,285 +124,356 @@ async function main() {
   const ttyFd = openTty();
   const interactive = ttyFd != null && !process.env.OURS_ASSUME_YES;
   const write = makeWriter(ttyFd);
-  const useWizard = interactive && !process.env.NO_COLOR && (process.env.TERM || '') !== 'dumb';
+  const yes = (prompt, def) => (process.env.OURS_ASSUME_YES ? def : askYesNo(write, ttyFd, prompt, def));
+  const ask = (prompt, def) => (process.env.OURS_ASSUME_YES ? def : askLine(write, ttyFd, prompt, def));
+  // A Continue? beat: one clean acknowledgement between steps (delta #1860). No-op when we can't
+  // prompt (headless / assume-yes) so scripted runs stay linear.
+  const cont = () => { if (interactive) askLine(write, ttyFd, '  ' + c.gray('Continue?  [Enter] '), ''); };
 
-  // Probe up front (cheap) so the wizard knows its step count before the first screen.
-  const versionBefore = daemonVersionLine();
-  const firstInstall = !versionBefore; // absent binary / failed version probe = not installed yet
-
-  if (useWizard) {
-    // A killed wizard must never leave the terminal stranded on the alternate screen.
-    process.on('SIGINT', () => { wizardLeave(); process.exit(130); });
-    process.on('SIGTERM', () => { wizardLeave(); process.exit(143); });
-    wizardEnter(write, firstInstall ? 5 : 4);
-    wizardScreen('welcome');
-  }
   line(banner());
-  say('This sets up your local ours node and connects the AI agents you choose.');
-  line('  ' + c.dim('Takes about a minute — you approve each step, and you can re-run any time.'));
+  say('setting up the ours.network stack — ours core, your harness plugins, ours-fleet, Telegram.');
+  line('  ' + c.dim('~3 minutes. You approve each step; re-run any time to add a piece or update.'));
+  if (DRY) line('  ' + c.yellow('(dry-run: nothing will be installed or changed — this just walks the flow.)'));
 
-  // --- 1) daemon: consent-gated first install; ensure @latest + restart on change otherwise ----
-  if (!useWizard) line(section(1, 'ours daemon'));
-  line(info('The daemon is your local ours node — it keeps your connection to the mesh alive.'));
-  if (firstInstall) {
-    // Never install the shared daemon silently: describe what it is, then ask. The safe default
-    // is NOT installing — a headless/piped run with no tty only proceeds with an explicit
-    // OURS_ASSUME_YES=1 (the same convention as install.sh's other env overrides).
-    line('');
-    line(info('ours.network needs to install one shared background process on this computer.'));
-    line(info("It manages your agents' identities, stores their keys, sends and accepts invites,"));
-    line(info('encrypts and decrypts your messages, and gives your agents access to all of this'));
-    line(info('through the MCP server protocol.'));
-    const consent = process.env.OURS_ASSUME_YES
-      ? true
-      : askYesNo(write, ttyFd, '  Install it now?', false);
-    if (!consent) {
-      wizardLeave();
-      if (ttyFd == null) say('no terminal to ask for consent and OURS_ASSUME_YES=1 not set.');
-      say('okay — nothing was installed. Re-run this installer any time to set up ours.');
-      finish(ttyFd);
-      return;
-    }
-  }
-
-  // First install: ask for the person's name BEFORE the install work (its own wizard step; same
-  // prompt order in linear mode so both modes read one key script). The root identity itself is
-  // created right after the daemon is up.
-  let rootName;
-  if (firstInstall) {
-    if (useWizard) wizardScreen('your identity');
-    line(info('Your agents act for a person — you. This creates your ours identity (their root).'));
-    let defaultName = 'me';
-    try { defaultName = userInfo().username || defaultName; } catch { /* keep the fallback */ }
-    rootName = askLine(write, ttyFd, `  Your name ${c.gray(`[${defaultName}]`)}: `, defaultName).trim() || defaultName;
-  }
-
-  if (useWizard) wizardScreen('install & settings');
-  const before = parseVersion(versionBefore);
-  const ensured = await withSpinner('ensuring @ours.network/mcp@latest…', () => runAsync(NPM, ['i', '-g', '@ours.network/mcp@latest']));
-  if (!ensured.ok) line(warn('npm install of @ours.network/mcp did not finish cleanly — continuing with what is there.'));
-  const after = parseVersion(daemonVersionLine());
-  if (!daemonRunning()) {
-    line(step('starting the daemon…'));
-    if (!run('ours-mcp', ['start']).ok) say("could not auto-start; run 'ours-mcp start' if the tools error.");
-    else line(ok('daemon started.'));
-  } else if (before && before !== after) {
-    line(step(`daemon upgraded (v${before} → v${after}) — restarting…`));
-    if (!run('ours-mcp', ['restart']).ok) run('ours-mcp', ['start']);
-    line(ok(`daemon on v${after}.`));
-  } else {
-    line(ok(`daemon already current${after ? ` (v${after})` : ''}.`));
-  }
-
-  // First install only: create THE root human identity right now, deterministically — no agent
-  // should have to discover and decide this later. `ours-mcp create-root` is a quiet no-op if a
-  // root somehow already exists; a failure degrades (the agent can still create it in-session).
-  let rootIdentity;
-  if (firstInstall) {
-    const created = run('ours-mcp', ['create-root', rootName], { capture: true });
-    if (created.ok) { rootIdentity = rootName; line(ok(`your identity "${rootName}" is created.`)); }
-    else say(`could not create your identity now (non-fatal) — ask your agent to create it later.`);
-  }
-
-  // Read the daemon's RESOLVED broker + port so we prompt with real values, not a hardcoded guess.
-  const status = parseStatus(daemonStatusText());
-  const brokerCurrent = status.broker || DEFAULT_BROKER;
-  const portCurrent = status.port || DEFAULT_PORT;
-
-  // --- 2) persistent service (optional) --------------------------------------------------------
-  if (!useWizard) line(section(2, 'persistent service'));
-  else line('');
-  line(info('A service means ours restarts on its own after a reboot, so you stay reachable.'));
-  const svcEnv = (process.env.OURS_SERVICE || '').toLowerCase();
-  const wantSvc = svcEnv ? svcEnv === 'yes' || svcEnv === 'y' || svcEnv === '1'
-    : askYesNo(write, ttyFd, '  Install the ours daemon as a persistent service?', false);
-  if (wantSvc) {
-    line(step('installing the persistent service…'));
-    if (run('ours-mcp', ['install-service']).ok) line(ok('service installed (survives reboot).'));
-    else say("service install failed (non-fatal) — retry 'ours-mcp install-service' later.");
-  } else {
-    line(info("skipped — start on demand with 'ours-mcp start'."));
-  }
-
-  // --- 3) broker address -----------------------------------------------------------------------
-  if (!useWizard) line(section(3, 'broker address'));
-  else line('');
-  line(info('The broker is the public relay your node dials to reach peers. Keep the default'));
-  line(info('unless you run your own broker.'));
-  const brokerEnv = process.env.OURS_BROKER || process.env.OURS_BROKER_URL || '';
-  let brokerAnswer = brokerEnv
-    || askLine(write, ttyFd, `  Broker address ${c.gray(`[${brokerCurrent}]`)}: `, brokerCurrent);
-  let brokerToWrite;
-  if (brokerAnswer && brokerAnswer !== brokerCurrent) {
-    const v = validateBroker(brokerAnswer);
-    if (!v.ok) { line(warn(`"${brokerAnswer}" doesn't look like a ws:// URL — keeping ${brokerCurrent}.`)); }
-    else { brokerToWrite = v.value; line(ok(`broker set to ${brokerToWrite}.`)); }
-  } else {
-    line(ok(`keeping ${brokerCurrent}.`));
-  }
-
-  // --- 4) HTTP port ----------------------------------------------------------------------------
-  if (!useWizard) line(section(4, 'HTTP port'));
-  else line('');
-  line(info('The local port the daemon listens on for your agent (default ' + DEFAULT_PORT + ').'));
-  const portEnv = process.env.OURS_PORT || '';
-  const portRaw = portEnv || askLine(write, ttyFd, `  HTTP port ${c.gray(`[${portCurrent}]`)}: `, String(portCurrent));
-  const { ok: portOk, port: portWanted } = parsePort(portRaw, portCurrent);
-  if (!portOk) line(warn(`"${portRaw}" isn't a valid port — keeping ${portCurrent}.`));
-  let portToWrite;
-  if (portOk && portWanted !== portCurrent) {
-    // Only probe when the user asks for a DIFFERENT port than the one the daemon already holds
-    // (probing the daemon's own port would always read as "taken"). Never hand out 3051.
-    const finalPort = suggestPort(portWanted, portTakenSync);
-    if (finalPort !== portWanted) {
-      const reason = RESERVED_PORTS.includes(portWanted) ? 'reserved (Telegram connector)' : 'already in use';
-      line(warn(`port ${portWanted} is ${reason} — using ${finalPort} instead.`));
-    }
-    portToWrite = finalPort;
-    line(ok(`port set to ${portToWrite}.`));
-  } else if (portOk) {
-    line(ok(`keeping ${portCurrent}.`));
-  }
-
-  // Apply broker/port to config.json + restart the daemon so it takes effect (only if changed).
-  if (brokerToWrite !== undefined || portToWrite !== undefined) {
-    const patch = {};
-    if (brokerToWrite !== undefined) patch.brokerUrl = brokerToWrite;
-    if (portToWrite !== undefined) patch.port = portToWrite;
-    const p = writeConfigPatch(patch);
-    line(step(`applying config (${p}) and restarting the daemon…`));
-    if (!run('ours-mcp', ['restart']).ok) run('ours-mcp', ['start']);
-  }
-
-  // --- 5) select harnesses ---------------------------------------------------------------------
-  if (useWizard) wizardScreen('agent harnesses');
-  else line(section(5, 'agent harnesses'));
-  line(info('A harness is your AI agent\'s app. The plugin connects it to ours; the bundled skill'));
-  line(info('teaches your agent to send, receive, and monitor messages.'));
-  const HARNESS_SPECS = [
-    { name: 'claude-code', label: 'Claude Code' },
-    { name: 'codex', label: 'Codex' },
-    { name: 'hermes', label: 'Hermes' },
-  ];
-  let selected;
-  if (process.env.OURS_HARNESSES != null) {
-    const { names, unknown } = canonHarnesses(process.env.OURS_HARNESSES);
-    for (const u of unknown) say(`  (ignoring unknown harness '${u}')`);
-    selected = names;
-  } else if (ttyFd != null) {
-    selected = checkboxSelect(write, ttyFd, HARNESS_SPECS, {
-      title: `Choose harnesses to set up — ${c.bold('↑/↓')} move, ${c.bold('Space')} toggle, ${c.bold('Enter')} confirm (a=all, n=none)`,
-    });
-  } else {
-    say('no terminal and no OURS_HARNESSES set — skipping harness setup (daemon is installed).');
-    selected = [];
-  }
-
-  if (selected.length === 0) {
-    wizardLeave(); // the closing summary must persist on the MAIN screen
-    line(heading('Done'));
-    say('Daemon is set up. No harness selected — re-run any time, or install one directly:');
-    say('  npm i -g @ours.network/{hermes,codex} && ours-<harness>-install');
-    if (firstInstall) { line(''); line(nextStepsPanel(rootIdentity)); }
-    finish(ttyFd);
-    return;
-  }
-  say(`setting up: ${selected.join(' ')}`);
-
-  // --- 6) run each selected harness's installer ------------------------------------------------
-  const installed = [];
-  const failed = [];
-  for (const h of selected) {
-    if (h === 'claude-code') {
-      line(heading('claude-code'));
-      say("Claude Code installs its plugin from its in-app marketplace — the installer can't do");
-      say('this part for you. Inside your Claude Code session, run these TWO commands:');
-      line('');
-      line('    /plugin marketplace add adapt-toolkit/ours-claude-marketplace');
-      line('    /plugin install ours');
-      line('');
-      say('(The daemon this installer set up is what that plugin talks to.)');
-      if (interactive) askLine(write, ttyFd, '  Run the 2 commands inside Claude Code, then press Enter to continue… ', '');
-      installed.push('claude-code');
+  // ============================================================================================
+  // PRE-FLIGHT — silent-ish checks, no changes. Detect the disasters up front. A checklist, not
+  // logs. (Native Windows → WSL pointer + exit; no harness at all → tell them + exit.)
+  // ============================================================================================
+  line(heading('Checking your machine'));
+  const plat = detectPlatform({ platform: osPlatform(), release: osRelease(), env: process.env });
+  if (!plat.supported) {
+    if (plat.os === 'windows') {
+      line(warn(`${plat.label} isn't supported directly yet.`));
+      line(info('Install this inside WSL (Windows Subsystem for Linux), then re-run there:'));
+      line('    ' + c.cyan('https://learn.microsoft.com/windows/wsl/install'));
     } else {
-      // hermes | codex — @latest bypasses a stale global so a re-run upgrades the plugin (and its
-      // bundled skill); the bin then does its own daemon-ensure + legacy cleanup.
-      line(heading(h));
-      const plugin = await withSpinner(`installing @ours.network/${h}@latest…`, () => runAsync(NPM, ['i', '-g', `@ours.network/${h}@latest`]));
-      if (!plugin.ok) line(warn(`npm install of @ours.network/${h} did not finish cleanly — trying its installer anyway.`));
-      line(step(`running ours-${h}-install`));
-      if (run(`ours-${h}-install`, []).ok) { line(ok(`${h} installed and working.`)); installed.push(h); }
-      else { line(warn(`${h} setup failed (continuing).`)); failed.push(h); }
+      line(warn(`Platform "${plat.label}" isn't supported. ours runs on Linux, macOS, or WSL.`));
     }
+    finish(ttyFd); return;
+  }
+  line(ok(`Platform: ${plat.label} (supported)`));
+
+  const nodeMajor = Number.parseInt((process.versions.node || '0').split('.')[0], 10);
+  if (nodeMajor >= 20) line(ok(`Node.js ${process.versions.node}`));
+  else { line(warn(`Node.js ${process.versions.node} — ours needs v20 or newer. Update Node and re-run.`)); finish(ttyFd); return; }
+
+  // Harness detection with alias-safety. Report each, keep the drivable ones.
+  const harnessSpecs = [
+    { name: 'claude', label: 'Claude Code' },
+    { name: 'codex', label: 'Codex' },
+  ];
+  const harnesses = harnessSpecs.map((h) => ({ ...h, ...detectHarness(h.name) }));
+  for (const h of harnesses) {
+    if (h.status === 'ok') line(ok(`'${h.name}'  → real program (its plugin can be installed)`));
+    else if (h.status === 'alias') line(warn(`'${h.name}'  → ${h.detail}  (I won't call it — see the note below; you can still install it by hand)`));
+    else if (h.status === 'unsafe') line(warn(`'${h.name}'  → on your PATH but didn't answer safely  (manual install shown below if you want it)`));
+    else line(info(`'${h.name}'  → not installed  (skipped — install it first if you want it wired up)`));
   }
 
-  // --- 7) end screen — brief "how to use" + versions -------------------------------------------
-  wizardLeave(); // the closing summary must persist on the MAIN screen
-  line(heading('Done ✦ welcome to the mesh'));
-  say(`ours daemon: ${run('ours-mcp', ['status'], { capture: true }).ok ? 'running' : 'installed'}`);
-  say('versions:');
-  say(`  daemon: ${daemonVersionLine() || 'unknown'}`);
-  for (const h of installed) {
-    if (h === 'claude-code') { say('  claude-code: installed from the Claude Code in-app marketplace (version shown there)'); continue; }
-    const ls = run(NPM, ['ls', '-g', `@ours.network/${h}`], { capture: true }).out;
-    const m = ls.match(new RegExp(`@ours\\.network/${h}@[0-9][0-9.]*`));
-    say(`  ${h}: ${m ? m[0] : `@ours.network/${h} (not a global install)`}`);
+  const anyHarness = harnesses.some((h) => h.status !== 'absent');
+  if (!anyHarness) {
+    line('');
+    line(warn('No Claude Code or Codex found on this machine.'));
+    line(info('Install one of them first, then re-run ours-install to wire it up.'));
+    finish(ttyFd); return;
   }
-  if (installed.length) { say('installed:'); for (const h of installed) say(`  ✓ ${h}`); }
-  if (failed.length) say(`note: failed to fully set up: ${failed.join(' ')} — re-run or install those directly.`);
+
+  // Daemon state up front (decides first-install vs update, and whether Step 0 runs at all).
+  const versionBefore = daemonVersionLine();
+  const daemonInstalled = !!versionBefore;
+  line(daemonInstalled
+    ? ok(`ours core already present (${versionBefore})`)
+    : ok('No ours daemon yet — will offer to install it'));
   line('');
-  say('Next: reload each harness to load the ours tools (Hermes: \'/reload-mcp\'; Codex: new thread).');
-  say('In your agent: bind or create an identity, then ask it to wake you on new mail.');
-  if (installed.includes('codex')) {
-    const live = (process.env.OURS_CODEX_LIVE || 'yes').toLowerCase() !== 'no';
-    say(live
-      ? 'Codex live mode: start with \'ours-codex\'; bind an identity, then explicitly approve arming.'
-      : 'Codex standard mode: start with \'codex\'; monitoring offers an explicitly approved blocking fallback.');
-    say('Codex will ask you to review the native plugin hooks; the installer never bypasses hook trust.');
+  cont();
+
+  // ============================================================================================
+  // STEP 0 — the two config questions (asked ONCE, up front). SKIPPED entirely when a daemon is
+  // already configured (update path reuses its port/broker; delta #1859).
+  // ============================================================================================
+  const status0 = parseStatus(daemonStatusText());
+  let chosenBroker;     // undefined = keep default / existing
+  let chosenPort = status0.port || DEFAULT_PORT;
+  const configFirst = !daemonInstalled;
+
+  if (configFirst) {
+    line(heading('A couple of quick settings'));
+    // 0a — broker (owner edit #1: SECURE wording; owner edit #2: self-host → website only).
+    line(info('Your agents connect through a "broker" — a shared meeting point that lets them find'));
+    line(info("each other. It's secure: your messages are end-to-end encrypted, so the broker never"));
+    line(info('sees what they say. Almost everyone uses the standard one — just press Enter.'));
+    const custom = yes('  Use a custom broker address?', false);
+    if (custom) {
+      line(info(`(Only needed if you run your own broker. More at ${SELFHOST_URL}.)`));
+      const entered = ask('  Enter the broker address: ', '');
+      const v = validateBroker(entered);
+      if (entered && v.ok && !v.empty) {
+        // Undo safety net: a mistaken custom entry is one keystroke back to the standard broker.
+        const keep = yes(`  Use "${v.value}"?  (No = go back to the standard broker)`, true);
+        if (keep) { chosenBroker = v.value; line(ok(`broker set to ${chosenBroker}.`)); }
+        else line(ok('using the standard broker.'));
+      } else {
+        if (entered) line(warn(`"${entered}" doesn't look like a ws:// address — using the standard broker.`));
+        else line(ok('using the standard broker.'));
+      }
+    } else {
+      line(ok('using the standard broker.'));
+    }
+
+    // 0b — port: probe 3050; only ask if busy. Minimize the concept.
+    if (!portTakenSync(DEFAULT_PORT)) {
+      chosenPort = DEFAULT_PORT;
+      line(ok(`Using local port ${DEFAULT_PORT}.`));
+    } else {
+      line(info(`The standard local port (${DEFAULT_PORT}) is already in use on your machine.`));
+      let candidate = suggestPort(DEFAULT_PORT + 1, portTakenSync);
+      const raw = ask(`  Pick another number for the ours daemon?  ${c.gray(`[Enter for ${candidate}]`)}: `, String(candidate));
+      const parsed = parsePort(raw, candidate);
+      candidate = suggestPort(parsed.ok ? parsed.port : candidate, portTakenSync);
+      chosenPort = candidate;
+      line(ok(`Using local port ${chosenPort}.`));
+    }
+    line('');
+    line(ok(`Config ready — broker: ${chosenBroker ? 'custom' : 'standard'}, port: ${chosenPort}.`));
+    cont();
   }
-  say('Wake-on-mail is always consent-first — see your plugin README. Docs: https://ours.network');
-  if (firstInstall) { line(''); line(nextStepsPanel(rootIdentity)); }
+
+  // Track outcomes for the summary + hand-off.
+  const summary = [];
+  const record = (row) => summary.push(row);
+
+  // ============================================================================================
+  // STEP 1 / 4 — ours core (the daemon). Config-first: write config → install/start ONCE.
+  // ============================================================================================
+  line(heading('1/4 — ours core (the daemon)'));
+  line(info('This is the piece that lets your agents talk to each other securely. Everything else'));
+  line(info('needs it.'));
+  const before = parseVersion(versionBefore);
+
+  if (!daemonInstalled) {
+    const goCore = yes('  Install and start it?', true);
+    if (!goCore) {
+      line(info("skipped — nothing else can run without it. Re-run ours-install when you're ready."));
+      record({ key: 'core', label: 'ours core (daemon)', state: 'skipped', note: 'declined' });
+      // Without a daemon the rest is moot; go straight to the summary.
+      return endScreen({ ttyFd, summary, chosenPort, chosenBroker });
+    }
+    await actSpin('ensuring @ours.network/mcp@latest…', 'npm i -g @ours.network/mcp@latest', () => runAsync(NPM, ['i', '-g', '@ours.network/mcp@latest']));
+    const patch = { port: chosenPort };
+    if (chosenBroker) patch.brokerUrl = chosenBroker;
+    await act(`write config (${configPath()}) with port ${chosenPort}${chosenBroker ? ' + custom broker' : ''}`, async () => { writeConfigPatch(patch); return { ok: true }; });
+    const started = await act(`ours-mcp start (port ${chosenPort})`, async () => run('ours-mcp', ['start']));
+    const svc = await act('ours-mcp install-service (survives reboot)', async () => run('ours-mcp', ['install-service']));
+    if (started.ok) line(ok(`ours core ready — running on port ${chosenPort}. No problems.`));
+    else line(warn(`could not auto-start — run '${c.cyan('ours-mcp start')}' to bring it up.`));
+    if (!svc.ok && !svc.dry) line(warn(`boot-service not installed — retry '${c.cyan('ours-mcp install-service')}' later.`));
+    record({ key: 'core', label: 'ours core (daemon)', state: started.ok ? 'installed' : 'failed', version: parseVersion(daemonVersionLine()), note: 'starts on boot' });
+  } else {
+    // Installed: offer an update; never re-ask config; reuse the running port everywhere.
+    const running = daemonRunning();
+    const upd = yes(`  ours core is installed (${before || '?'}) — check for an update now?`, false);
+    if (upd) {
+      await actSpin('updating @ours.network/mcp@latest…', 'npm i -g @ours.network/mcp@latest', () => runAsync(NPM, ['i', '-g', '@ours.network/mcp@latest']));
+      const after = parseVersion(daemonVersionLine());
+      if (before && after && before !== after) {
+        await act(`ours-mcp restart (now v${after})`, async () => { if (!run('ours-mcp', ['restart']).ok) run('ours-mcp', ['start']); return { ok: true }; });
+        line(ok(`ours core updated (v${before} → v${after}) and restarted. No problems.`));
+      } else {
+        line(ok(`ours core already current${after ? ` (v${after})` : ''} — nothing to change.`));
+      }
+    } else {
+      line(ok(`ours core ready — running on port ${chosenPort}${running ? '' : ' (start with ours-mcp start)'}. No problems.`));
+    }
+    record({ key: 'core', label: 'ours core (daemon)', state: 'current', version: (parseVersion(daemonVersionLine()) || before), note: `port ${chosenPort}` });
+  }
+  cont();
+
+  // Step 2 harness installers (closures — share the helpers + `record` above). Alias / failure →
+  // NEVER dead-end (owner edit #3): plain reason + manual path, always.
+  async function installClaude(h) {
+    if (h.status !== 'ok') { manualClaude(h); record({ key: 'claude', label: 'Claude Code plugin', state: 'skipped', note: h.status === 'alias' ? 'installed as an alias' : 'not drivable' }); return; }
+    const go = yes('  Install the ours plugin into Claude Code?', true);
+    if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'claude', label: 'Claude Code plugin', state: 'skipped' }); return; }
+    const add = await act(`claude plugin marketplace add ${CLAUDE_MARKET}`, async () => run('claude', ['plugin', 'marketplace', 'add', CLAUDE_MARKET], { capture: true }));
+    const inst = add.ok ? await act('claude plugin install ours@ours.network', async () => run('claude', ['plugin', 'install', 'ours@ours.network'], { capture: true })) : add;
+    if (inst.ok) { line(ok(`Claude Code plugin installed — pointed at port ${chosenPort}. No problems.`)); line(info('(restart Claude Code to load it.)')); record({ key: 'claude', label: 'Claude Code plugin', state: 'installed', note: 'restart Claude Code' }); }
+    else { failClaude(); record({ key: 'claude', label: 'Claude Code plugin', state: 'failed', note: 'marketplace/install step failed' }); }
+  }
+  async function installCodex(h) {
+    if (h.status !== 'ok') { manualCodex(h); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'skipped', note: h.status === 'alias' ? 'installed as an alias' : 'not drivable' }); return; }
+    const go = yes('  Install the ours plugin into Codex?', true);
+    if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'skipped' }); return; }
+    const add = await act(`codex plugin marketplace add ${CODEX_MARKET}`, async () => run('codex', ['plugin', 'marketplace', 'add', CODEX_MARKET], { capture: true }));
+    const inst = add.ok ? await act('codex plugin add ours@ours-codex-marketplace', async () => run('codex', ['plugin', 'add', 'ours@ours-codex-marketplace'], { capture: true })) : add;
+    // Owner-mandated: choosing the Codex plugin ALSO installs the ours-codex live launcher, same step.
+    const wrap = inst.ok ? await actSpin('installing the ours-codex live launcher…', 'npm i -g @ours.network/codex@latest (provides ours-codex)', () => runAsync(NPM, ['i', '-g', '@ours.network/codex@latest'])) : inst;
+    if (inst.ok && wrap.ok) { line(ok(`Codex plugin + ours-codex live launcher installed — pointed at port ${chosenPort}. No problems.`)); line(info('(open a new Codex thread and trust its hooks.)')); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'installed', note: 'new Codex thread' }); }
+    else { failCodex(); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'failed', note: 'marketplace/install step failed' }); }
+  }
+
+  // ============================================================================================
+  // STEP 2 / 4 — harness plugins (Claude Code + Codex). The installer drives the plugin CLIs.
+  // ============================================================================================
+  line(heading('2/4 — harness plugins'));
+  line(info('These teach Claude Code and Codex the ours skills, so you can just talk to your agent'));
+  line(info("to message people and set things up. I'll install them for you — no commands to type."));
+  for (const h of harnesses) {
+    if (h.status === 'absent') continue; // nothing to offer; pre-flight already noted it
+    line('');
+    if (h.name === 'claude') await installClaude(h);
+    else await installCodex(h);
+    cont();
+  }
+
+  // ============================================================================================
+  // STEP 3 / 4 — ours-fleet. Appealing wording (owner edit #4); default YES.
+  // ============================================================================================
+  line(heading('3/4 — ours-fleet (your always-online agent team)'));
+  line(info('This makes your harnesses PERSISTENT: Claude Code and Codex stop being just a terminal'));
+  line(info('session and become always-online daemons that survive a reboot. Stand up your own team'));
+  line(info('of always-online developers, combine harnesses, run several Claude Codes, and link them'));
+  line(info('over Telegram so they talk to each other — and it all configures maximally easily.'));
+  const goFleet = yes('  Install it?', true);
+  if (goFleet) {
+    await actSpin('installing @ours.network/fleet@latest…', 'npm i -g @ours.network/fleet@latest', () => runAsync(NPM, ['i', '-g', '@ours.network/fleet@latest']));
+    const init = await act('ours-fleet init (one-time host setup: units, dirs, linger)', async () => run('ours-fleet', ['init']));
+    if (init.ok) { line(ok('ours-fleet ready — Claude and Codex both know the fleet skill. No problems.')); record({ key: 'fleet', label: 'ours-fleet', state: 'installed', version: globalVersion('@ours.network/fleet') }); }
+    else { line(warn(`ours-fleet host setup didn't finish — retry '${c.cyan('ours-fleet init')}'.`)); record({ key: 'fleet', label: 'ours-fleet', state: 'failed', note: 'ours-fleet init failed' }); }
+  } else {
+    line(info('skipped cleanly — re-run ours-install any time to add it.'));
+    record({ key: 'fleet', label: 'ours-fleet', state: 'skipped' });
+  }
+  cont();
+
+  // ============================================================================================
+  // STEP 4 / 4 — Telegram connector. Install-only (no bot tokens here). Then: run as a service?
+  // ============================================================================================
+  line(heading('4/4 — Telegram connector'));
+  line(info('This bridges a Telegram bot to your ours node, so you can talk to your agent from'));
+  line(info("Telegram. (You'll set up the actual bot later, with your agent — not here.)"));
+  const goTg = yes('  Install it?', false);
+  if (goTg) {
+    await actSpin('installing @ours.network/tg-connector@latest…', 'npm i -g @ours.network/tg-connector@latest', () => runAsync(NPM, ['i', '-g', '@ours.network/tg-connector@latest']));
+    const asService = yes('  Keep it running in the background so it starts automatically on boot?', true);
+    if (asService) {
+      const svc = await act('ours-tg-connector install-service (starts on boot)', async () => run('ours-tg-connector', ['install-service']));
+      if (svc.ok) line(ok('Telegram connector installed and running as a service (starts on boot). No problems.'));
+      else line(warn(`connector installed, but the service didn't start — retry '${c.cyan('ours-tg-connector install-service')}'.`));
+      record({ key: 'telegram', label: 'Telegram connector', state: 'installed', version: globalVersion('@ours.network/tg-connector'), note: 'service (boot)' });
+    } else {
+      line(ok(`Telegram connector installed. Start it any time with '${c.cyan('ours-tg-connector start')}'. No problems.`));
+      record({ key: 'telegram', label: 'Telegram connector', state: 'installed', version: globalVersion('@ours.network/tg-connector'), note: 'start on demand' });
+    }
+  } else {
+    line(info('skipped cleanly.'));
+    record({ key: 'telegram', label: 'Telegram connector', state: 'skipped' });
+  }
+  cont();
+
+  return endScreen({ ttyFd, summary, chosenPort, chosenBroker });
+}
+
+// --- never-dead-end messaging (owner edit #3) --------------------------------------------------
+function manualClaude(h) {
+  if (h.status === 'alias') {
+    line(warn('Heads-up: on your machine, "claude" is installed as an alias, not the real command,'));
+    line(info('so I can\'t drive it safely. To fix it: run  ' + c.cyan('type claude') + '  , remove/rename that'));
+    line(info('alias in your shell config, open a new terminal, and re-run ours-install.'));
+  } else {
+    line(warn('I couldn\'t safely drive the "claude" command on this machine.'));
+  }
+  line(info('You can still install the plugin yourself — inside Claude Code, run these two:'));
+  line('    ' + c.cyan(`/plugin marketplace add ${CLAUDE_MARKET}`));
+  line('    ' + c.cyan('/plugin install ours'));
+}
+function failClaude() {
+  line(warn('Couldn\'t install the Claude Code plugin automatically (network or plugin cache).'));
+  line(info('Install it by hand — inside Claude Code, run these two, then re-run ours-install:'));
+  line('    ' + c.cyan(`/plugin marketplace add ${CLAUDE_MARKET}`));
+  line('    ' + c.cyan('/plugin install ours'));
+  line(info('Your daemon and other steps are intact. Continuing.'));
+}
+function manualCodex(h) {
+  if (h.status === 'alias') {
+    line(warn('Heads-up: on your machine, "codex" is installed as an alias, not the real command,'));
+    line(info('so I can\'t drive it safely. To fix it: run  ' + c.cyan('type codex') + '  , remove/rename that'));
+    line(info('alias in your shell config, open a new terminal, and re-run ours-install.'));
+  } else {
+    line(warn('I couldn\'t safely drive the "codex" command on this machine.'));
+  }
+  line(info('You can still install it yourself — run these three in your terminal:'));
+  line('    ' + c.cyan(`codex plugin marketplace add ${CODEX_MARKET}`));
+  line('    ' + c.cyan('codex plugin add ours@ours-codex-marketplace'));
+  line('    ' + c.cyan('npm i -g @ours.network/codex') + c.gray('   (adds the ours-codex live launcher)'));
+}
+function failCodex() {
+  line(warn('Couldn\'t install the Codex plugin automatically (network or plugin cache).'));
+  line(info('Install it by hand — run these three, then re-run ours-install:'));
+  line('    ' + c.cyan(`codex plugin marketplace add ${CODEX_MARKET}`));
+  line('    ' + c.cyan('codex plugin add ours@ours-codex-marketplace'));
+  line('    ' + c.cyan('npm i -g @ours.network/codex'));
+  line(info('Your daemon and other steps are intact. Continuing.'));
+}
+
+// --- final summary + copy-paste hand-off -------------------------------------------------------
+function endScreen({ ttyFd, summary, chosenPort, chosenBroker }) {
+  line('');
+  line('  ' + c.cyan('═'.repeat(64)));
+  line('  ' + c.bold('ours.network — install complete'));
+  line('  ' + c.gray(`Daemon port: ${chosenPort}   •   Broker: ${chosenBroker ? 'custom' : 'standard'}`));
+  line('  ' + c.cyan('═'.repeat(64)));
+  for (const row of summary) {
+    const m = row.state === 'failed' ? c.red('✗') : row.state === 'skipped' ? c.gray('·') : c.green('✓');
+    const label = row.label.padEnd(26);
+    const ver = (row.version ? `v${row.version}` : '').padEnd(9);
+    const state = (row.state === 'installed' || row.state === 'current') ? (row.note || 'ready')
+      : row.state === 'skipped' ? c.gray('skipped' + (row.note ? ` (${row.note})` : ''))
+        : c.red('needs attention' + (row.note ? ` — ${row.note}` : ''));
+    line(`  ${m} ${label}${ver}${state}`);
+  }
+  const anyFail = summary.some((r) => r.state === 'failed');
+  line('');
+  line(anyFail
+    ? '  ' + c.yellow('Some pieces need a hand — see the notes above; re-run ours-install after fixing.')
+    : '  ' + c.green('Everything installed cleanly. No problems.'));
+
+  // The literal copy-paste hand-off — skipped/failed components drop out.
+  const has = (k) => summary.some((r) => r.key === k && (r.state === 'installed' || r.state === 'current'));
+  if (has('core')) {
+    const { text } = buildHandoffPrompt({ fleet: has('fleet'), telegram: has('telegram') });
+    line('');
+    line('  ' + c.gray('─'.repeat(64)));
+    line('  ' + c.bold('ONE LAST STEP') + ' — copy the prompt below and paste it into Claude Code');
+    line('  (or Codex). Your agent walks you through the rest, conversationally.');
+    line('  ' + c.gray('─'.repeat(64)));
+    line('');
+    line(box(text.split('\n'), 'paste this into your agent'));
+    copyToClipboard(text);
+  }
+  line('');
+  line('  ' + c.gray('Re-run  ') + c.cyan('ours-install') + c.gray('  any time to add a skipped piece or update.'));
+  line('  ' + c.cyan('═'.repeat(64)));
   finish(ttyFd);
 }
 
-// The framed send-off after a successful FIRST install (never on upgrade runs) — the owner's
-// finalized 4-step how-to + the optional auto-wake line. When the root identity could not be
-// created, the first line degrades to the generic "create your identity".
-function nextStepsPanel(rootIdentity) {
-  const opener = rootIdentity
-    ? [`Your ours identity "${rootIdentity}" is set up — that's you (the human).`]
-    : ["You're set up. First tell your agent to create your (human) identity."];
-  return box([
-    ...opener,
-    '',
-    'Now open your harness (Claude Code / Codex / Hermes) — the ours',
-    'skill is already installed — and just tell your agent:',
-    '',
-    '  1. "Create an agent identity called <agent-name>"',
-    '       -> gives your agent its own identity under you.',
-    '  2. "Generate an invite for <friend>"',
-    '       -> share the invite text it prints.',
-    '  3. Your friend, in their agent: "Add this contact" + paste it.',
-    '  4. Then either side: "Send a message to <name>: hi"',
-    '       · "Check my messages"',
-    '',
-    'Optional - auto-wake: tell Codex "watch for messages". ours-codex gives',
-    'background wake; normal codex offers a consent-gated foreground fallback.',
-    '',
-    'To link two of your OWN agents: open a second harness window,',
-    '"create an agent identity" there too, "generate an invite" in one,',
-    '"add this contact" (paste) in the other - now they can chat.',
-  ], 'next steps');
+// Best-effort clipboard copy (pbcopy/wl-copy/xclip/clip). Silent when unsupported.
+function copyToClipboard(text) {
+  if (DRY) return;
+  const tools = [['pbcopy', []], ['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['clip.exe', []]];
+  for (const [bin, args] of tools) {
+    try {
+      const r = spawnSync(bin, args, { input: text });
+      if (!r.error && (r.status === 0 || r.status == null)) { line('  ' + c.gray('(copied to your clipboard.)')); return; }
+    } catch { /* try the next one */ }
+  }
 }
 
 function finish(ttyFd) {
-  wizardLeave(); // idempotent — never leave the terminal on the alternate screen
   if (ttyFd != null) { try { closeSync(ttyFd); } catch { /* ignore */ } }
 }
 
 main().catch((e) => {
   // Same philosophy as everywhere else: degrade, don't crash — one honest line, non-zero exit.
-  wizardLeave();
   say(`unexpected error: ${String(e)}`);
   process.exitCode = 1;
 });

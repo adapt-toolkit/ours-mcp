@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canonHarnesses, suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
+  detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
   DEFAULT_PORT, DEFAULT_BROKER, RESERVED_PORTS,
 } from '../lib/logic.mjs';
 
@@ -71,4 +72,48 @@ test('parseVersion / parseStatus: pull versions + resolved broker/port out of CL
 test('defaults mirror the daemon core config', () => {
   assert.equal(DEFAULT_PORT, 3050);
   assert.equal(DEFAULT_BROKER, 'wss://broker1.ours.network');
+});
+
+// --- v2 unified-installer logic ----------------------------------------------------------------
+
+test('detectPlatform: macOS/Linux/WSL supported, native Windows not, unknown not', () => {
+  assert.deepEqual(detectPlatform({ platform: 'darwin' }), { os: 'macos', label: 'macOS', supported: true });
+  assert.deepEqual(detectPlatform({ platform: 'linux', release: '6.5.0-generic' }), { os: 'linux', label: 'Linux', supported: true });
+  // WSL by kernel release string…
+  assert.equal(detectPlatform({ platform: 'linux', release: '5.15.0-microsoft-standard-WSL2' }).os, 'wsl');
+  // …or by the WSL env markers.
+  assert.equal(detectPlatform({ platform: 'linux', release: '6.5.0', env: { WSL_DISTRO_NAME: 'Ubuntu' } }).os, 'wsl');
+  assert.equal(detectPlatform({ platform: 'win32' }).supported, false);
+  assert.equal(detectPlatform({ platform: 'win32' }).os, 'windows');
+  assert.equal(detectPlatform({ platform: 'sunos' }).supported, false);
+});
+
+test('classifyHarnessProbe: real binary ok; hang/alias/function never dead-end; absent skipped', () => {
+  assert.equal(classifyHarnessProbe({ onPath: true, versionOk: true }).status, 'ok');
+  // A wrapper that never answered --version had to be killed → treat as unsafe alias, never call it.
+  assert.equal(classifyHarnessProbe({ onPath: true, versionOk: false, timedOut: true }).status, 'alias');
+  // Shadowed by a shell alias/function even when no real binary is on PATH.
+  assert.equal(classifyHarnessProbe({ onPath: false, shellType: 'alias' }).status, 'alias');
+  assert.equal(classifyHarnessProbe({ onPath: false, shellType: 'function' }).status, 'alias');
+  // On PATH but the probe just didn't look right → don't auto-drive, still offer a manual path.
+  assert.equal(classifyHarnessProbe({ onPath: true, versionOk: false, shellType: 'file' }).status, 'unsafe');
+  // Genuinely not there.
+  assert.equal(classifyHarnessProbe({ onPath: false, versionOk: false, shellType: '' }).status, 'absent');
+});
+
+test('buildHandoffPrompt: identity always; fleet/telegram steps drop out and renumber', () => {
+  const all = buildHandoffPrompt({ fleet: true, telegram: true }).text;
+  assert.match(all, /Create my root ours identity/);
+  assert.match(all, /1\. Create my root ours identity/);
+  assert.match(all, /2\. Set up ours-fleet/);
+  assert.match(all, /3\. Set up my Telegram bot/);
+
+  const fleetOnly = buildHandoffPrompt({ fleet: true, telegram: false }).text;
+  assert.match(fleetOnly, /2\. Set up ours-fleet/);
+  assert.doesNotMatch(fleetOnly, /Telegram/, 'a skipped Telegram must not appear in the hand-off');
+
+  const bare = buildHandoffPrompt({}).text;
+  assert.match(bare, /1\. Create my root ours identity/);
+  assert.doesNotMatch(bare, /ours-fleet/);
+  assert.doesNotMatch(bare, /Telegram/);
 });

@@ -1,26 +1,25 @@
 #!/usr/bin/env bash
-# ours.network — installer bootstrap. Meant to be run as:
+# ours.network — unified stack installer bootstrap (the `ours-install` experience). Meant to be run
+# as:
 #
 #     curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash
 #
 # This file is a THIN bootstrap: it checks that Node.js is present (and prints friendly, per-OS
 # guidance if it isn't), then hands off to the real experience — a Node installer (install.mjs)
-# with an ASCII banner, colours, plain-language explanations, and interactive broker/port/harness
-# prompts. All the actual work (daemon @latest + restart, persistent service, broker/port config,
-# harness plugins, legacy cleanup, version echo) lives in the Node installer.
+# that guides the WHOLE stack in ~3 minutes: pre-flight (platform / node / harness alias-safety),
+# config-first (broker + port), then four consent-gated steps — ours core (the daemon), the harness
+# plugins (Claude Code + Codex), ours-fleet, and the Telegram connector — ending in ONE copy-paste
+# hand-off prompt. All the real work lives in the Node installer.
 #
 # Piped as `curl … | bash` there is no install.mjs on disk next to us, so we download the small
 # installer file set into a temp dir and run it. Run from a clone, we use the local files.
 #
 # Non-interactive env overrides (all optional) — consumed by the Node installer:
-#   OURS_HARNESSES="codex hermes"            harnesses to set up (space/comma; or "all"/"none")
-#   OURS_SERVICE=yes|no                      install the daemon as a persistent service
-#   OURS_BROKER="wss://broker1.ours.network" broker address (default: keep the daemon's current)
-#   OURS_PORT=3050                           daemon HTTP port (default: keep the daemon's current)
-#   OURS_ASSUME_YES=1                        accept defaults; never prompt (implies no tty needed)
+#   OURS_ASSUME_YES=1                        accept every default; never prompt (no tty needed)
+#   OURS_INSTALL_DRY_RUN=1                   walk the whole flow WITHOUT installing/changing anything
+#                                            (prints exactly what it WOULD do — safe on any machine)
 #   OURS_NPM="npm"                           npm binary to use
-#   OURS_CODEX_LIVE=yes|no                   report Codex live launcher or standard mode
-#   OURS_CODEX_MARKETPLACE_SOURCE=<source>   override Codex marketplace (testing/dev)
+#   OURS_CONFIG=/path/config.json            daemon config file (default ~/.ours/config.json)
 #   OURS_INSTALLER_MJS=/path/install.mjs     run this Node installer directly (dev/testing)
 #   OURS_INSTALLER_BASE=<url>                base URL to download the installer file set from
 #   OURS_INSTALL_REF=<git ref>               piped runs fetch the installer from this branch/tag
