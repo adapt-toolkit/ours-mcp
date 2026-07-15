@@ -1526,6 +1526,13 @@ function appendNotifyLog(id: Identity, event: Record<string, unknown>): void {
   fireNotifyWaiters(id.name); // wake held-open long-poll streams for this identity
 }
 
+// Hex a binary AdaptValue field (session_id / epoch are `bin` per the #1867 §4 log contract —
+// DAEMON-INTEGRATION.md §4). Returns '' when the field is absent (pre-app-e2e core builds).
+function binHexField(av: AdaptValue, field: string): string {
+  const x = av.Reduce(field);
+  return x.IsNil() ? '' : Buffer.from(x.GetBinary()).toString('hex');
+}
+
 // Long-poll cap and re-check cadence for the notification stream. The cap keeps
 // a held-open request from lingering forever (a client re-issues on return); the
 // recheck picks up file appends this process did not originate (whoever writes
@@ -1897,29 +1904,49 @@ function wireHandlers(id: Identity): void {
         log(`[${id.name}] contact "${name}" restored (re-keyed)`);
         process.nextTick(() => void flushDeferredFor(id, String(cid)));
       } else if (event === 'migration_active') {
-        // The e2e migration pin is set for this contact (DAEMON-INTEGRATION.md §3): subsequent app
-        // sends to $cid now route "e2e". CORE owns the §4 `[migration] active … session_id=` proof
-        // line + the actual delivery (Option B); the daemon just records the cue at event level.
+        // The e2e migration pin is set for this contact. Core emits this notify (extended with the
+        // $epoch + $session_id of the migrated session); the DAEMON formats the §4 proof line
+        // (DAEMON-INTEGRATION.md §4, #1867). epoch/session_id are `bin` → hex.
         const cid = payload.Reduce('cid').Visualize();
         const role = payload.Reduce('role').Visualize();
-        appendNotifyLog(id, { event: 'migration_active', cid: String(cid), role: String(role) });
-        log(`[migration] active-notify cid=${cid} role=${role} (pin set; app sends now route e2e)`);
+        const epoch = binHexField(payload, 'epoch');
+        const sid = binHexField(payload, 'session_id');
+        appendNotifyLog(id, { event: 'migration_active', cid: String(cid), role: String(role), ...(epoch ? { epoch } : {}), ...(sid ? { session_id: sid } : {}) });
+        log(`[migration] active cid=${cid} role=${role}${epoch ? ` epoch=${epoch}` : ''}${sid ? ` session_id=${sid}` : ''}`);
+      } else if (event === 'e2e_app_send') {
+        // §4 app-SEND proof line (#1867): core delivered an app message over the migrated session and
+        // emits this notify; the daemon formats it. session_id (bin→hex) MUST equal active_session_id.
+        const cid = payload.Reduce('cid').Visualize();
+        const sid = binHexField(payload, 'session_id');
+        const olm = payload.Reduce('olm_type').Visualize();
+        const wireId = payload.Reduce('wire_id').Visualize();
+        appendNotifyLog(id, { event: 'e2e_app_send', cid: String(cid), session_id: sid, olm_type: String(olm), wire_id: String(wireId) });
+        log(`[e2e-app] send cid=${cid} session_id=${sid} olm_type=${olm} wire_id=${wireId}`);
+      } else if (event === 'e2e_app_recv') {
+        // §4 app-RECV proof line (#1867): core decrypted an inbound app message over the migrated
+        // session. session_id (bin→hex) MUST equal active_session_id on this peer.
+        const cid = payload.Reduce('cid').Visualize();
+        const sid = binHexField(payload, 'session_id');
+        const ok = payload.Reduce('ok').GetBoolean();
+        const wireId = payload.Reduce('wire_id').Visualize();
+        appendNotifyLog(id, { event: 'e2e_app_recv', cid: String(cid), session_id: sid, ok, wire_id: String(wireId) });
+        log(`[e2e-app] recv cid=${cid} session_id=${sid} ok=${ok} wire_id=${wireId}`);
       } else if (event === 'migration_deferred_flush') {
         // One notify per queued message drained on active (DAEMON-INTEGRATION.md §3), FIFO order.
-        // Option B: CORE performs the actual boxed e2e re-drive; the daemon does NOT deliver here —
-        // it records the event + surfaces order at the event level. NEVER box, NEVER drop silently.
+        // Option B: CORE performs the boxed e2e re-drive (each drained msg surfaces as an e2e_app_send
+        // §4 line); this handler is observability only — NEVER box, NEVER drop silently.
         const cid = payload.Reduce('cid').Visualize();
         const wireId = payload.Reduce('wire_id').Visualize();
         appendNotifyLog(id, { event: 'migration_deferred_flush', cid: String(cid), wire_id: String(wireId) });
         log(`[migration] flush-notify cid=${cid} wire_id=${wireId} (deferred→e2e; core delivers)`);
       } else if (event === 'migration_stalled') {
-        // The migration didn't reach active in its window (DAEMON-INTEGRATION.md §0.1). UX/log only —
-        // core drives recovery via the sweep. (Field set beyond $cid pending §4 log-surface align.)
+        // Migration didn't reach active in its window (DAEMON-INTEGRATION.md §0.1). UX/log only —
+        // core re-drives via the sweep. Emit: $event=migration_stalled,$cid,$phase,$attempts.
         const cid = payload.Reduce('cid').Visualize();
-        const reasonAv = payload.Reduce('reason');
-        const reason = reasonAv.IsNil() ? '' : String(reasonAv.Visualize());
-        appendNotifyLog(id, { event: 'migration_stalled', cid: String(cid), ...(reason ? { reason } : {}) });
-        log(`[migration] stalled-notify cid=${cid}${reason ? ` (${reason})` : ''} (core re-drives via sweep)`);
+        const phase = payload.Reduce('phase').Visualize();
+        const attempts = payload.Reduce('attempts').Visualize();
+        appendNotifyLog(id, { event: 'migration_stalled', cid: String(cid), phase: String(phase), attempts: String(attempts) });
+        log(`[migration] stalled-notify cid=${cid} phase=${phase} attempts=${attempts} (core re-drives via sweep)`);
       } else if (event === 'downgrade_refused') {
         // SECURITY: core dropped an inbound LEGACY plaintext app message from an epoch-pinned (migrated)
         // contact — post-migration all app data is e2e, so a legacy plaintext is a downgrade attack
