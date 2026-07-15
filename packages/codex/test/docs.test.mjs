@@ -8,7 +8,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const docs = ['README.md', 'AGENTS.snippet.md', 'skills/ours/SKILL.md', 'skills/ours/references/configuration.md'].map((p) => readFileSync(join(root, p), 'utf8')).join('\n');
 
 test('Codex docs describe native plugin standard/live modes and consent', () => {
-  for (const pattern of [/standard mode/i, /live mode/i, /ours-codex/, /explicit.*arm/i, /foreground_monitor/, /blocking foreground/i, /stops?.*session/i, /SessionStart/, /marketplace/i, /--ours-port/, /OURS_CONFIG/, /hooks?/i]) assert.match(docs, pattern);
+  for (const pattern of [/standard mode/i, /live mode/i, /ours-codex/, /explicit.*arm/i, /foreground_monitor/, /blocking foreground/i, /ours-codex` provides background\s+monitoring/i, /never omit/i, /stops?.*session/i, /SessionStart/, /marketplace/i, /--ours-port/, /OURS_CONFIG/, /hooks?/i]) assert.match(docs, pattern);
 });
 
 test('Codex docs contain no obsolete Claude or polling claims', () => {

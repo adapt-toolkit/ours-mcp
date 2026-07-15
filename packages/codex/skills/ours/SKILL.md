@@ -171,7 +171,9 @@ the bio, so a persona prompt is only needed if they want to role-play it).
    `arm_monitor({ identity: "<bound name>" })`. In `ours-codex`, that arms background
    wake immediately. In standard `codex`, the tool instead explains the better
    `ours-codex` experience and tells you to ask separately whether the user accepts a
-   blocking foreground monitor. Only after that second explicit yes call
+   blocking foreground monitor. **Relay the `ours-codex` background-monitor
+   recommendation to the user verbatim; never omit it, even when the user already asked
+   to monitor.** Only after that second explicit yes call
    `get_messages` once for existing unread mail, then
    `foreground_monitor({ identity: "<bound name>" })`. Before switching identities, call
    `disarm_monitor`; the PostToolUse hook also disarms defensively on a changed bind.
@@ -313,8 +315,10 @@ When you bind an identity, offer the user, in plain language:
     start a fixed drain turn on body-free notification events. It coalesces events and
     never injects sender or body text.
   - In **standard `codex` mode**, `arm_monitor` does not silently start a blocking call.
-    It recommends restarting with `ours-codex`, explains that the fallback occupies the
-    current turn, and asks you to obtain separate explicit consent. If the user agrees,
+    You MUST tell the user: *"This standard `codex` session only supports a blocking
+    foreground monitor. For background monitoring, restart the session with
+    `ours-codex` instead."* Never collapse or omit this recommendation. Then explain that
+    the fallback occupies the current turn and obtain separate explicit consent. If the user agrees,
     first call `get_messages` once to drain existing unread mail, then call
     `foreground_monitor` for the bound identity. When it returns an arrival, call
     `get_messages`, handle the mail, then call `foreground_monitor` again without asking

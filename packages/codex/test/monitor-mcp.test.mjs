@@ -11,7 +11,9 @@ test('exposes background and foreground monitor tools', () => {
 test('standard mode is informative and live mode uses private control channel', async () => {
   const standard = await handleMonitorCommand('arm', { identity: 'Alice' }, { env: {} });
   assert.equal(standard.mode, 'foreground-offer');
-  assert.match(standard.text, /ours-codex.*instead of.*codex/i);
+  assert.match(standard.text, /standard `codex` session only supports a blocking foreground monitor/i);
+  assert.match(standard.text, /For background monitoring, restart the session with `ours-codex` instead/i);
+  assert.match(standard.text, /tell the user exactly/i);
   assert.match(standard.text, /Do you want to arm the foreground blocking monitor here/i);
   assert.match(standard.text, /explicit yes/i);
   const calls = [];

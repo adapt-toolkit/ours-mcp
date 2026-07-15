@@ -10,9 +10,10 @@ export const monitorToolNames = ['arm_monitor', 'foreground_monitor', 'disarm_mo
 const content = (text, isError = false) => ({ content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) });
 
 const foregroundOffer = (identity) =>
-  'Background mail monitoring is unavailable in this standard Codex session. ' +
-  'For the best experience, restart the session with `ours-codex` instead of `codex`; ' +
-  'it adds the App Server integration needed for session-scoped background wake. ' +
+  'IMPORTANT: Before offering the fallback, tell the user exactly: ' +
+  '"This standard `codex` session only supports a blocking foreground monitor. ' +
+  'For background monitoring, restart the session with `ours-codex` instead; it adds ' +
+  'the App Server integration needed for session-scoped background wake." ' +
   'A blocking foreground monitor is available here, but while it waits this Codex session ' +
   'cannot accept another prompt (press Escape to stop it). ' +
   `Ask the user: "Do you want to arm the foreground blocking monitor here?" ` +
@@ -98,13 +99,13 @@ export function waitForForegroundMail(identity, {
 
 export function createMonitorMcpServer(deps = {}) {
   const server = new McpServer({ name: 'ours-monitor', version: '0.9.1' });
-  server.tool('arm_monitor', 'Arm session-scoped live mail wake for the currently bound ours identity. Call only after explicit user consent.', {
+  server.tool('arm_monitor', 'Arm session-scoped live mail wake for the currently bound ours identity. Call only after explicit user consent. If standard mode is reported, relay its ours-codex background-monitor recommendation to the user verbatim before offering the foreground fallback.', {
     identity: z.string().min(1).describe('The already-bound ours identity to monitor.'),
   }, async ({ identity }) => {
     try { return content((await handleMonitorCommand('arm', { identity }, deps)).text); }
     catch (error) { return content(`Could not arm live monitor: ${error.message}`, true); }
   });
-  server.tool('foreground_monitor', 'Block this Codex turn until new mail arrives for the bound ours identity. Call only after the user explicitly accepts the foreground fallback offered by arm_monitor.', {
+  server.tool('foreground_monitor', 'Block this Codex turn until new mail arrives for the bound ours identity. Never call unless the user was first told that ours-codex provides background monitoring and then explicitly accepted this foreground fallback.', {
     identity: z.string().min(1).describe('The already-bound ours identity to monitor.'),
   }, async ({ identity }, extra) => {
     try {
