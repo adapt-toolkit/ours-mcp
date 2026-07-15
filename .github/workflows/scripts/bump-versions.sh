@@ -12,8 +12,9 @@
 #   @ours.network/claude-code packages/claude-code (pins @ours.network/mcp)
 #   @ours.network/hermes     packages/hermes       (no internal deps)
 #   @ours.network/codex      packages/codex        (pins @ours.network/mcp)
-# (packages/installer is private → never bumped or published. Claude Code and Codex plugin
-# manifests are not npm packages, but their user-visible versions stay at the suite version.)
+#   @ours.network/install    packages/installer    (self-contained — no internal deps)
+# (Claude Code and Codex plugin manifests are not npm packages, but their user-visible versions
+# stay at the suite version.)
 #
 # Bump level comes from the HEAD commit subject (Conventional Commits):
 #   feat: minor · fix: patch · !/BREAKING: major
@@ -32,6 +33,7 @@ MANAGED=(
   "@ours.network/claude-code|packages/claude-code/package.json|@ours.network/mcp"
   "@ours.network/hermes|packages/hermes/package.json|"
   "@ours.network/codex|packages/codex/package.json|@ours.network/mcp"
+  "@ours.network/install|packages/installer/package.json|"
 )
 
 # Every native plugin manifest in the repo — bumped to the same suite version.
@@ -123,7 +125,7 @@ for f in "${PLUGIN_MANIFESTS[@]}"; do
   patch_version "$f" "$old" "$UNIFIED"
   files+=("$f")
 done
-summary="v${UNIFIED} lockstep (mcp, claude-code, hermes, codex + plugin manifests)"
+summary="v${UNIFIED} lockstep (mcp, claude-code, hermes, codex, install + plugin manifests)"
 
 # Pass 2: PIN-SYNC — each plugin depends on the exact internal version it ships with.
 for entry in "${MANAGED[@]}"; do
@@ -182,3 +184,4 @@ emit "core-version=${NEWV[@ours.network/mcp]}"
 emit "plugin-version=${NEWV[@ours.network/claude-code]}"
 emit "hermes-version=${NEWV[@ours.network/hermes]}"
 emit "codex-version=${NEWV[@ours.network/codex]}"
+emit "install-version=${NEWV[@ours.network/install]}"

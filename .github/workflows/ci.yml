@@ -74,6 +74,7 @@ jobs:
       plugin-version: ${{ steps.bump.outputs.plugin-version }}
       hermes-version: ${{ steps.bump.outputs.hermes-version }}
       codex-version: ${{ steps.bump.outputs.codex-version }}
+      install-version: ${{ steps.bump.outputs.install-version }}
     steps:
       - name: Generate app token
         id: app-token
@@ -133,6 +134,21 @@ jobs:
             if (!files.has(path)) throw new Error(`@ours.network/codex package is missing ${path}`);
           }
           NODE
+      - name: Verify install artifact ships the ours-install bin + files
+        run: |
+          npm pack --workspace @ours.network/install --dry-run --json > /tmp/ours-install-pack.json
+          node - <<'NODE'
+          const pack = require('/tmp/ours-install-pack.json')[0];
+          const files = new Set(pack.files.map((entry) => entry.path));
+          for (const path of [
+            'install.mjs', 'install.sh', 'lib/ui.mjs', 'lib/logic.mjs', 'lib/prompt.mjs',
+            'uninstall.mjs', 'uninstall.sh', 'README.md', 'LICENSE',
+          ]) {
+            if (!files.has(path)) throw new Error(`@ours.network/install package is missing ${path}`);
+          }
+          const pkg = require(`${process.cwd()}/packages/installer/package.json`);
+          if (pkg.bin['ours-install'] !== 'install.mjs') throw new Error('@ours.network/install must expose the ours-install bin');
+          NODE
       - name: Compile MUFL packet
         run: scripts/compile-mufl.sh
       - run: npm run build
@@ -157,6 +173,10 @@ jobs:
         run: npm publish --workspace @ours.network/codex --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish @ours.network/install
+        run: npm publish --workspace @ours.network/install --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Summary
         run: |
           {
@@ -165,5 +185,6 @@ jobs:
             echo "- @ours.network/claude-code@${{ needs.version-bump.outputs.plugin-version }}"
             echo "- @ours.network/hermes@${{ needs.version-bump.outputs.hermes-version }}"
             echo "- @ours.network/codex@${{ needs.version-bump.outputs.codex-version }}"
+            echo "- @ours.network/install@${{ needs.version-bump.outputs.install-version }}"
             echo "- plugin manifests (.claude-plugin/plugin.json) at v${{ needs.version-bump.outputs.unified-version }}"
           } >> "$GITHUB_STEP_SUMMARY"
