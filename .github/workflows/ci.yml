@@ -1,14 +1,14 @@
 name: CI
 
 # Gates → Conventional-Commits LOCKSTEP version bump (one suite version for every
-# @ours.network package + every .claude-plugin/plugin.json manifest) → publish
+# @ours.network package + every native plugin manifest) → publish
 # @ours.network/mcp then the plugins (strict order: each plugin's exact core
 # dependency is re-pinned to the same suite version before anything publishes —
 # see scripts/bump-versions.sh PIN-SYNC).
 #
 # Prerequisites (one-time, GitHub repo settings → secrets):
 #   - NPM_TOKEN: npm automation token with publish rights to the
-#     @ours.network scope (covers BOTH packages).
+#     @ours.network scope (covers all published packages).
 #   - VERSION_BUMP_APP_ID / VERSION_BUMP_APP_PRIVATE_KEY: the version-bump
 #     GitHub App (must be installed on this repo) so the bump commit can push
 #     past branch protection.
@@ -55,8 +55,8 @@ jobs:
           test -f packages/claude-code/dist/hooks/runner.js
       - run: npm test
 
-  # Bumps BOTH workspace versions in one [skip ci] commit (each from
-  # max(local, npm-published)), pins the plugin's core dependency, and pushes
+  # Bumps every managed workspace package and native plugin manifest in one
+  # [skip ci] commit, pins plugin core dependencies, and pushes
   # back to main via a GitHub App token. Gated on gates going green.
   version-bump:
     needs: gates
@@ -113,6 +113,26 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
       - run: npm ci
+      - name: Verify Codex release metadata and npm artifact
+        run: |
+          core_version="$(jq -r .version packages/core/package.json)"
+          codex_version="$(jq -r .version packages/codex/package.json)"
+          test "$codex_version" = "$core_version"
+          test "$(jq -r .version packages/codex/.codex-plugin/plugin.json)" = "$codex_version"
+          test "$(jq -r '.dependencies["@ours.network/mcp"]' packages/codex/package.json)" = "$core_version"
+          npm pack --workspace @ours.network/codex --dry-run --json > /tmp/ours-codex-pack.json
+          node - <<'NODE'
+          const pack = require('/tmp/ours-codex-pack.json')[0];
+          const files = new Set(pack.files.map((entry) => entry.path));
+          for (const path of [
+            '.codex-plugin/plugin.json', '.mcp.json', 'hooks/hooks.json',
+            'bin/ours-codex.mjs', 'bin/monitor-mcp.mjs', 'bin/proxy.mjs',
+            'src/monitor-mcp.mjs', 'src/launcher.mjs', 'skills/ours/SKILL.md',
+            'install.sh', 'README.md', 'LICENSE',
+          ]) {
+            if (!files.has(path)) throw new Error(`@ours.network/codex package is missing ${path}`);
+          }
+          NODE
       - name: Compile MUFL packet
         run: scripts/compile-mufl.sh
       - run: npm run build
