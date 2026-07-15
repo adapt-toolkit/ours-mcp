@@ -212,12 +212,27 @@ elif st=="reaped": print("EXIT_UNKNOWN")
 elif os.WIFEXITED(st): print("EXIT", os.WEXITSTATUS(st))
 elif os.WIFSIGNALED(st): print("SIGNAL", os.WTERMSIG(st))
 `;
+// A hermetic env for the pty tests: fake bins on PATH so the flow REACHES prompts on any machine
+// (a clean CI runner has no claude/codex/ours-mcp, so without this the installer would take the
+// "no harness" early-exit and never prompt). Returns { env, tmp }.
+function ptyBins() {
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
+  const bin = join(tmp, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const log = join(tmp, 'calls.log');
+  writeFileSync(log, '');
+  fakeBins(bin, { daemon: 'installed' });
+  return { tmp, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log, HOME: tmp, SHELL: '/bin/bash' } };
+}
+
 test('Ctrl+C at a prompt aborts cleanly (exit 130 + message), never hangs',
   { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const out = execFileSync('python3', ['-c', PTY_SIGINT, INSTALL_MJS], { encoding: 'utf8', timeout: 60_000 });
+  const { env, tmp } = ptyBins();
+  const out = execFileSync('python3', ['-c', PTY_SIGINT, INSTALL_MJS], { encoding: 'utf8', timeout: 60_000, env });
   assert.match(out, /MSG_OK/, 'prints a friendly cancellation message');
   assert.match(out, /EXIT 130/, 'exits with code 130, not a hang or a bare signal kill');
   assert.doesNotMatch(out, /HUNG/, 'must never hang after Ctrl+C');
+  rmSync(tmp, { recursive: true, force: true });
 });
 
 // A full interactive happy-path run must TERMINATE on its own after the summary (the owner hit a
@@ -251,8 +266,10 @@ print("EXIT", os.WEXITSTATUS(st)) if isinstance(st,int) and os.WIFEXITED(st) els
 `;
 test('a full happy-path run terminates on its own after the summary (no end-hang)',
   { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const out = execFileSync('python3', ['-c', PTY_HAPPY, INSTALL_MJS], { encoding: 'utf8', timeout: 90_000 });
+  const { env, tmp } = ptyBins();
+  const out = execFileSync('python3', ['-c', PTY_HAPPY, INSTALL_MJS], { encoding: 'utf8', timeout: 90_000, env });
   assert.match(out, /EXIT 0/, 'the installer exits cleanly on its own after the final summary');
+  rmSync(tmp, { recursive: true, force: true });
 });
 
 // --- packaging: publishable standalone @ours.network/install (bin ships + zero external deps) ---
