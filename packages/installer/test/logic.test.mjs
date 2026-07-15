@@ -108,17 +108,20 @@ test('buildHandoffPrompt: identity is a fallback step; fleet/telegram drop out; 
   assert.match(all, /1\. Create my Ours human identity/);
   assert.match(all, /my agents act on\s+my behalf/);
   assert.doesNotMatch(all, /root/i, 'user-facing hand-off must not use the "root" jargon');
-  assert.match(all, /2\. Set up ours-fleet/);
+  // Fleet step: stand up a PERMANENT team, not a temp-agent demo.
+  assert.match(all, /2\. Set up my ours-fleet/);
+  assert.match(all, /PERMANENT use/);
+  assert.doesNotMatch(all, /temporary agent/, 'fleet step must not demo a temporary agent');
   assert.match(all, /3\. Set up my Telegram bot/);
 
   // Identity already created in-install → its step drops; remaining steps renumber.
   const noId = buildHandoffPrompt({ fleet: true, telegram: true }).text;
   assert.doesNotMatch(noId, /human identity/i, 'identity created in-install drops out of the hand-off');
-  assert.match(noId, /1\. Set up ours-fleet/);
+  assert.match(noId, /1\. Set up my ours-fleet/);
   assert.match(noId, /2\. Set up my Telegram bot/);
 
   const fleetOnly = buildHandoffPrompt({ fleet: true }).text;
-  assert.match(fleetOnly, /1\. Set up ours-fleet/);
+  assert.match(fleetOnly, /1\. Set up my ours-fleet/);
   assert.doesNotMatch(fleetOnly, /Telegram/, 'a skipped Telegram must not appear in the hand-off');
 
   // Everything done in-install (identity created, no fleet/telegram) → nothing to hand off.

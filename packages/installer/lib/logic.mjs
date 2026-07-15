@@ -162,8 +162,9 @@ export function buildHandoffPrompt({ identity = false, fleet = false, telegram =
   }
   if (fleet) {
     steps.push(
-      "Set up ours-fleet: confirm it's ready and show me how to spawn a\n" +
-      '   temporary agent, then spawn one so I can see it.',
+      'Set up my ours-fleet: ask me what agents I want in my fleet for\n' +
+      '   PERMANENT use (a name + role/purpose for each), then create and\n' +
+      '   configure those permanent fleet agents for me.',
     );
   }
   if (telegram) {
