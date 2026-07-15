@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/hermes",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Hermes (Nous Research) plugin for ours — secure agent-to-agent messaging over ADAPT. Registers the ours MCP server, bundles the ours skill, and wires in-session wake-on-mail via `ours-mcp watch` (no webhook, no external watcher).",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
