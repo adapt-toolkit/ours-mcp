@@ -93,3 +93,100 @@ export function parseStatus(text) {
     port: pm ? Number.parseInt(pm[1], 10) : null,
   };
 }
+
+// ===============================================================================================
+// v2 unified-installer logic (all pure — the orchestrator injects the real probe/uname/env).
+// ===============================================================================================
+
+// detectPlatform: classify the host from process.platform + the kernel release string + env.
+// - darwin              → macOS  (supported)
+// - linux + microsoft/WSL in release, or WSL_* env  → WSL  (supported)
+// - linux               → Linux  (supported)
+// - win32               → Windows (NOT supported in v1 — the caller prints a WSL pointer + exits)
+// - anything else       → unknown (unsupported)
+// Returns { os, label, supported }.
+export function detectPlatform({ platform, release = '', env = {} } = {}) {
+  const rel = String(release).toLowerCase();
+  const isWsl = !!(env.WSL_DISTRO_NAME || env.WSL_INTEROP) || /microsoft|wsl/.test(rel);
+  switch (platform) {
+    case 'darwin': return { os: 'macos', label: 'macOS', supported: true };
+    case 'linux':
+      return isWsl
+        ? { os: 'wsl', label: 'Windows (WSL)', supported: true }
+        : { os: 'linux', label: 'Linux', supported: true };
+    case 'win32': return { os: 'windows', label: 'Windows (native)', supported: false };
+    default: return { os: 'unknown', label: platform || 'unknown', supported: false };
+  }
+}
+
+// classifyHarnessProbe: turn what we observed about a harness command into a safety verdict,
+// WITHOUT ever having called it unsafely. Inputs (all gathered by the orchestrator):
+//   onPath      — `command -v <name>` found an executable on PATH
+//   versionOk   — a non-interactive `<name> --version` returned 0 promptly with sane output
+//   timedOut    — that probe had to be killed (an interactive/hanging wrapper — NEVER call it)
+//   shellType   — `type -t <name>` in the user's shell: 'alias' | 'function' | 'file' | ''
+// Verdict.status:
+//   'ok'      — a real binary that answers --version → safe to drive
+//   'alias'   — shadowed by a shell alias/function (or a wrapper that hangs) → do NOT call it,
+//               tell the user plainly + how to fix, and ALWAYS still offer a manual path
+//   'unsafe'  — on PATH but the probe failed/looked wrong → don't auto-drive; offer manual path
+//   'absent'  — genuinely not installed → this harness is skipped (with a note)
+// The golden rule (owner edit #3): 'alias'/'unsafe'/'absent' NEVER dead-end — the caller always
+// prints a manual-install path so the component still gets installed.
+export function classifyHarnessProbe({ onPath, versionOk, timedOut, shellType = '' } = {}) {
+  if (versionOk) return { status: 'ok', detail: 'real program' };
+  if (timedOut) return { status: 'alias', detail: 'a wrapper that did not answer --version' };
+  const t = String(shellType).toLowerCase();
+  if (t === 'alias' || t === 'function') {
+    return { status: 'alias', detail: `a shell ${t}, not the real command` };
+  }
+  if (onPath) return { status: 'unsafe', detail: 'found, but did not answer --version' };
+  return { status: 'absent', detail: 'not installed' };
+}
+
+// harnessAvailable: a harness we can safely DRIVE headlessly right now.
+export function harnessAvailable(status) { return status === 'ok'; }
+
+// buildHandoffPrompt: the literal copy-paste hand-off text (delta #1861). Steps for components
+// that were NOT installed drop out and the remaining steps renumber, so the user never sees an
+// instruction for a piece they don't have. The human identity is normally created DURING install,
+// so its step is included ONLY as a fallback (identity: true) when in-install creation was skipped
+// or failed. Returns { text, empty } — empty is true when there is nothing left to finish.
+export function buildHandoffPrompt({ identity = false, fleet = false, telegram = false } = {}) {
+  const steps = [];
+  if (identity) {
+    steps.push(
+      'Create my Ours human identity — this is me, the human; my agents act on\n' +
+      '   my behalf. Ask me what name others should see, then create it.',
+    );
+  }
+  if (fleet) {
+    steps.push(
+      "Set up ours-fleet: confirm it's ready and show me how to spawn a\n" +
+      '   temporary agent, then spawn one so I can see it.',
+    );
+  }
+  if (telegram) {
+    steps.push(
+      'Set up my Telegram bot: ask me for my bot\'s name and its token from\n' +
+      '   @BotFather, register the bot, create a chat↔agent connection, and\n' +
+      '   give me the invite link to send.',
+    );
+  }
+  if (steps.length === 0) return { text: '', empty: true };
+  const numbered = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  const text =
+    'I just installed the ours.network stack. Please help me finish setup, one\n' +
+    'step at a time, explaining as you go:\n\n' +
+    numbered + '\n\n' +
+    'Do these in order, wait for my answers, and tell me if you need anything\n' +
+    "from me. Don't assume — ask.";
+  return { text, empty: false };
+}
+
+// summarizeComponent: normalize one component's outcome into a summary row the final screen and
+// the report share. state ∈ 'installed'|'skipped'|'failed'|'current'. Pure formatting only.
+export function summarizeComponent({ key, label, state, version = '', note = '' }) {
+  const mark = state === 'failed' ? '✗' : state === 'skipped' ? '·' : '✓';
+  return { key, label, state, version, note, mark };
+}
