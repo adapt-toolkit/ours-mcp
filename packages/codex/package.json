@@ -30,6 +30,7 @@
     "skills",
     "hooks",
     "src",
+    "dist",
     "bin",
     "install.sh",
     "AGENTS.snippet.md",
@@ -49,10 +50,15 @@
     "ws": "^8.21.0",
     "zod": "^3.25.76"
   },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
+    "build": "esbuild src/monitor-mcp.mjs --bundle --platform=node --format=esm --external:@ours.network/mcp --outfile=dist/monitor-mcp.mjs",
+    "prepack": "npm run build",
     "install-plugin": "bash install.sh",
     "test": "node --test"
   }

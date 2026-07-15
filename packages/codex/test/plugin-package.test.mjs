@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { cpSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -10,7 +11,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 test('npm artifact contains a valid native Codex plugin and all entry points', () => {
   const packed = JSON.parse(execFileSync('npm', ['pack', '--json', '--dry-run'], { cwd: root, encoding: 'utf8' }))[0];
   const files = new Set(packed.files.map((file) => file.path));
-  for (const path of ['.codex-plugin/plugin.json', '.mcp.json', 'hooks/hooks.json', 'bin/ours-codex.mjs', 'bin/proxy.mjs', 'bin/monitor-mcp.mjs', 'skills/ours/SKILL.md', 'LICENSE', 'README.md']) {
+  for (const path of ['.codex-plugin/plugin.json', '.mcp.json', 'hooks/hooks.json', 'bin/ours-codex.mjs', 'bin/proxy.mjs', 'bin/monitor-mcp.mjs', 'dist/monitor-mcp.mjs', 'skills/ours/SKILL.md', 'LICENSE', 'README.md']) {
     assert.ok(files.has(path), `package includes ${path}`);
   }
   const manifest = JSON.parse(readFileSync(join(root, '.codex-plugin/plugin.json'), 'utf8'));
@@ -37,5 +38,20 @@ test('npm artifact contains a valid native Codex plugin and all entry points', (
 test('shipped command entry points parse as JavaScript', () => {
   for (const file of ['ours-codex-install.mjs', 'ours-codex.mjs', 'monitor-mcp.mjs', 'proxy.mjs']) {
     assert.doesNotThrow(() => execFileSync(process.execPath, ['--check', join(root, 'bin', file)]));
+  }
+});
+
+test('monitor MCP artifact runs without an installed dependency tree', () => {
+  const isolated = mkdtempSync(join(tmpdir(), 'ours-codex-monitor-artifact-'));
+  try {
+    mkdirSync(join(isolated, 'bin'));
+    mkdirSync(join(isolated, 'dist'));
+    cpSync(join(root, 'bin/monitor-mcp.mjs'), join(isolated, 'bin/monitor-mcp.mjs'));
+    cpSync(join(root, 'dist/monitor-mcp.mjs'), join(isolated, 'dist/monitor-mcp.mjs'));
+    assert.doesNotThrow(() => execFileSync(process.execPath, [join(isolated, 'bin/monitor-mcp.mjs')], {
+      input: '', timeout: 5_000,
+    }));
+  } finally {
+    rmSync(isolated, { recursive: true, force: true });
   }
 });
