@@ -17,7 +17,7 @@
 // the whole flow on a machine you don't want to touch (and how the tests drive it).
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { homedir, platform as osPlatform, release as osRelease } from 'node:os';
+import { homedir, userInfo, platform as osPlatform, release as osRelease } from 'node:os';
 import { join, dirname } from 'node:path';
 import { banner, heading, ok, info, warn, c, box, withSpinner, openTty, makeWriter, closeSync } from './lib/ui.mjs';
 import { askLine, askYesNo, isCancel } from './lib/prompt.mjs';
@@ -28,7 +28,7 @@ import {
 } from './lib/logic.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
-const DRY = !!process.env.OURS_INSTALL_DRY_RUN;
+let DRY = !!process.env.OURS_INSTALL_DRY_RUN;
 const SELFHOST_URL = 'ours.network';
 const CLAUDE_MARKET = 'adapt-toolkit/ours-claude-marketplace';
 const CODEX_MARKET = 'adapt-toolkit/ours-codex-marketplace';
@@ -97,6 +97,12 @@ function writeConfigPatch(patch) {
   return p;
 }
 
+// Block the thread for `ms` without a subprocess — used for the brief daemon-reachability wait
+// before creating the human identity (a freshly-started daemon needs a moment to bind its port).
+function sleepMs(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* ignore */ }
+}
+
 // Is `port` already bound? Probe in a throwaway child and read its exit code (EADDRINUSE ⇒ taken).
 function portTakenSync(port) {
   const scriptSrc = `const net=require('net');const s=net.createServer();s.once('error',e=>{process.exit(e.code==='EADDRINUSE'?3:0)});s.listen(${port},'127.0.0.1',()=>{s.close(()=>process.exit(0))});`;
@@ -123,8 +129,37 @@ function detectHarness(name) {
 // clean-exit path as the SIGINT handler.
 let cancelHandler = null;
 
+// A tiny package version read (best-effort) for `--version`.
+function pkgVersion() {
+  try { return JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version || '?'; }
+  catch { return '?'; }
+}
+const USAGE = `ours-install — the unified ours.network stack installer.
+
+  Install:  npm i -g @ours.network/install && ours-install   (recommended)
+            npx @ours.network/install                          (one-off)
+
+  ours-install [--dry-run] [--help] [--version]
+
+Guided ~3-minute setup for the whole stack: ours core (the daemon), the harness
+plugins (Claude Code + Codex), ours-fleet, and the Telegram connector — then one
+copy-paste hand-off prompt. You approve each step; re-run any time to add a piece
+or update.
+
+  --dry-run    walk the whole flow and print what it WOULD do — install/change nothing
+  --help       show this help and exit
+  --version    print the installer version and exit
+
+Env: OURS_ASSUME_YES=1 (accept defaults, no prompts) · OURS_INSTALL_DRY_RUN=1 ·
+     OURS_NPM · OURS_CONFIG (default ~/.ours/config.json). Docs: https://ours.network`;
+
 // ===============================================================================================
 async function main() {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--help') || argv.includes('-h')) { process.stdout.write(USAGE + '\n'); return; }
+  if (argv.includes('--version') || argv.includes('-V')) { process.stdout.write(`ours-install v${pkgVersion()}\n`); return; }
+  if (argv.includes('--dry-run')) DRY = true;
+
   const ttyFd = openTty();
   const interactive = ttyFd != null && !process.env.OURS_ASSUME_YES;
   const write = makeWriter(ttyFd);
@@ -143,9 +178,10 @@ async function main() {
   if (interactive) process.on('SIGINT', cancel);
   const yes = (prompt, def) => (process.env.OURS_ASSUME_YES ? def : askYesNo(write, ttyFd, prompt, def));
   const ask = (prompt, def) => (process.env.OURS_ASSUME_YES ? def : askLine(write, ttyFd, prompt, def));
-  // A Continue? beat: one clean acknowledgement between steps (delta #1860). No-op when we can't
-  // prompt (headless / assume-yes) so scripted runs stay linear.
-  const cont = () => { if (interactive) askLine(write, ttyFd, '  ' + c.gray('Continue?  [Enter] '), ''); };
+  // A Continue? beat: one clean acknowledgement AFTER a step that actually did something (delta
+  // #1860). A step the user SKIPPED (answered No) shows no "you skipped — press Enter" pause — we
+  // move straight on. No-op when we can't prompt (headless / assume-yes) so scripted runs stay linear.
+  const cont = (acted = true) => { if (interactive && acted) askLine(write, ttyFd, '  ' + c.gray('Continue?  [Enter] '), ''); };
 
   line(banner());
   say('setting up the ours.network stack — ours core, your harness plugins, ours-fleet, Telegram.');
@@ -305,27 +341,85 @@ async function main() {
   }
   cont();
 
+  // ============================================================================================
+  // Human identity — created DURING install, right after the daemon is confirmed reachable (the
+  // owner change that supersedes "defer to the hand-off"). `ours-mcp create-root` is the internal
+  // seam; ALL user-facing copy says "human identity". Already-exists is a friendly keep, not an
+  // error; an unreachable daemon gives an exact retry command (never "ask your agent later").
+  // ============================================================================================
+  const coreReady = summary.some((r) => r.key === 'core' && (r.state === 'installed' || r.state === 'current'));
+  if (coreReady) {
+    line(heading('Your human identity'));
+    line(info('This is you — the human. Your agents act on your behalf, and it lets you message'));
+    line(info('people. (Internally this is your ours root; you just give it a name.)'));
+    let defName = 'me';
+    try { defName = userInfo().username || defName; } catch { /* keep fallback */ }
+    const name = (ask(`  What name should others see?  ${c.gray(`[${defName}]`)}: `, defName) || defName).trim() || defName;
+    let idActed = true;
+    if (DRY) {
+      line('  ' + c.dim(`[dry-run] would: ours-mcp create-root "${name}"`));
+      line(ok(`Your human identity "${name}" is created.`));
+      record({ key: 'identity', label: 'Human identity', state: 'installed', note: name });
+    } else {
+      // A freshly-started daemon may need a moment to bind its port before create-root can reach it.
+      let reachable = daemonRunning();
+      for (let i = 0; i < 6 && !reachable; i++) { sleepMs(400); reachable = daemonRunning(); }
+      const r = reachable ? run('ours-mcp', ['create-root', name], { capture: true }) : { ok: false, out: '', err: 'daemon not running' };
+      const outText = `${r.out} ${r.err}`;
+      const existing = outText.match(/already exists \("([^"]+)"\)/);
+      if (r.ok && existing) {
+        line(ok(`You already have a human identity ("${existing[1]}") — keeping it.`));
+        record({ key: 'identity', label: 'Human identity', state: 'current', note: existing[1] });
+      } else if (r.ok) {
+        line(ok(`Your human identity "${name}" is created.`));
+        record({ key: 'identity', label: 'Human identity', state: 'installed', note: name });
+      } else if (!reachable || /not running|not reachable/i.test(outText)) {
+        line(warn("The daemon isn't reachable yet — couldn't create your human identity."));
+        line(info(`Fix: run '${c.cyan('ours-mcp start')}', then '${c.cyan(`ours-mcp create-root "${name}"`)}'.`));
+        record({ key: 'identity', label: 'Human identity', state: 'failed', note: 'daemon not reachable' });
+      } else {
+        const msg = (r.err || r.out || '').trim().split('\n')[0] || 'unknown error';
+        line(warn(`Couldn't create your human identity: ${msg}`));
+        line(info(`Retry any time: '${c.cyan(`ours-mcp create-root "${name}"`)}'.`));
+        record({ key: 'identity', label: 'Human identity', state: 'failed', note: 'create-root failed' });
+      }
+    }
+    cont(idActed);
+  }
+
   // Step 2 harness installers (closures — share the helpers + `record` above). Alias / failure →
-  // NEVER dead-end (owner edit #3): plain reason + manual path, always.
+  // NEVER dead-end (owner edit #3): plain reason + manual path, always. Each returns whether it
+  // ACTED (so a plain user-No skip shows no Continue pause).
   async function installClaude(h) {
-    if (h.status !== 'ok') { manualClaude(h); record({ key: 'claude', label: 'Claude Code plugin', state: 'skipped', note: h.status === 'alias' ? 'installed as an alias' : 'not drivable' }); return; }
+    if (h.status !== 'ok') { manualClaude(h); record({ key: 'claude', label: 'Claude Code plugin', state: 'skipped', note: h.status === 'alias' ? 'installed as an alias' : 'not drivable' }); return true; }
     const go = yes('  Install the ours plugin into Claude Code?', true);
-    if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'claude', label: 'Claude Code plugin', state: 'skipped' }); return; }
+    if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'claude', label: 'Claude Code plugin', state: 'skipped' }); return false; }
     const add = await act(`claude plugin marketplace add ${CLAUDE_MARKET}`, async () => run('claude', ['plugin', 'marketplace', 'add', CLAUDE_MARKET], { capture: true }));
     const inst = add.ok ? await act('claude plugin install ours@ours.network', async () => run('claude', ['plugin', 'install', 'ours@ours.network'], { capture: true })) : add;
     if (inst.ok) { line(ok(`Claude Code plugin installed — pointed at port ${chosenPort}. No problems.`)); line(info('(restart Claude Code to load it.)')); record({ key: 'claude', label: 'Claude Code plugin', state: 'installed', note: 'restart Claude Code' }); }
     else { failClaude(); record({ key: 'claude', label: 'Claude Code plugin', state: 'failed', note: 'marketplace/install step failed' }); }
+    return true;
   }
   async function installCodex(h) {
-    if (h.status !== 'ok') { manualCodex(h); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'skipped', note: h.status === 'alias' ? 'installed as an alias' : 'not drivable' }); return; }
+    if (h.status !== 'ok') { manualCodex(h); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'skipped', note: h.status === 'alias' ? 'installed as an alias' : 'not drivable' }); return true; }
     const go = yes('  Install the ours plugin into Codex?', true);
-    if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'skipped' }); return; }
+    if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'skipped' }); return false; }
     const add = await act(`codex plugin marketplace add ${CODEX_MARKET}`, async () => run('codex', ['plugin', 'marketplace', 'add', CODEX_MARKET], { capture: true }));
     const inst = add.ok ? await act('codex plugin add ours@ours-codex-marketplace', async () => run('codex', ['plugin', 'add', 'ours@ours-codex-marketplace'], { capture: true })) : add;
     // Owner-mandated: choosing the Codex plugin ALSO installs the ours-codex live launcher, same step.
     const wrap = inst.ok ? await actSpin('installing the ours-codex live launcher…', 'npm i -g @ours.network/codex@latest (provides ours-codex)', () => runAsync(NPM, ['i', '-g', '@ours.network/codex@latest'])) : inst;
-    if (inst.ok && wrap.ok) { line(ok(`Codex plugin + ours-codex live launcher installed — pointed at port ${chosenPort}. No problems.`)); line(info('(open a new Codex thread and trust its hooks.)')); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'installed', note: 'new Codex thread' }); }
-    else { failCodex(); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'failed', note: 'marketplace/install step failed' }); }
+    if (inst.ok && wrap.ok) {
+      line(ok(`Codex plugin + ours-codex live launcher installed — pointed at port ${chosenPort}. No problems.`));
+      // Plain-language: what ours-codex is and why you'd use it (background wake vs blocking).
+      line(info('Two ways to run Codex now:'));
+      line(info('  • plain "codex" — waits for mail in the foreground: it EITHER watches for new'));
+      line(info('    messages OR takes your typing, one at a time — not both at once.'));
+      line(info('  • "ours-codex" — our wrapper that turns on AUTO wake-up: it uses Codex\'s built-in'));
+      line(info('    app server to watch for new mail in the BACKGROUND while you keep typing, so a'));
+      line(info("    reply wakes it without interrupting you. Use 'ours-codex' for hands-off replies."));
+      record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'installed', note: 'new Codex thread' });
+    } else { failCodex(); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'failed', note: 'marketplace/install step failed' }); }
+    return true;
   }
 
   // ============================================================================================
@@ -337,9 +431,8 @@ async function main() {
   for (const h of harnesses) {
     if (h.status === 'absent') continue; // nothing to offer; pre-flight already noted it
     line('');
-    if (h.name === 'claude') await installClaude(h);
-    else await installCodex(h);
-    cont();
+    const acted = h.name === 'claude' ? await installClaude(h) : await installCodex(h);
+    cont(acted);
   }
 
   // ============================================================================================
@@ -360,7 +453,7 @@ async function main() {
     line(info('skipped cleanly — re-run ours-install any time to add it.'));
     record({ key: 'fleet', label: 'ours-fleet', state: 'skipped' });
   }
-  cont();
+  cont(goFleet);
 
   // ============================================================================================
   // STEP 4 / 4 — Telegram connector. Install-only (no bot tokens here). Then: run as a service?
@@ -385,7 +478,7 @@ async function main() {
     line(info('skipped cleanly.'));
     record({ key: 'telegram', label: 'Telegram connector', state: 'skipped' });
   }
-  cont();
+  cont(goTg);
 
   return endScreen({ ttyFd, summary, chosenPort, chosenBroker });
 }
@@ -454,33 +547,46 @@ function endScreen({ ttyFd, summary, chosenPort, chosenBroker }) {
     ? '  ' + c.yellow('Some pieces need a hand — see the notes above; re-run ours-install after fixing.')
     : '  ' + c.green('Everything installed cleanly. No problems.'));
 
-  // The literal copy-paste hand-off — skipped/failed components drop out.
+  // The literal copy-paste hand-off — skipped/failed components drop out. The human identity is
+  // normally created in-install, so its step appears ONLY as a fallback when that didn't succeed.
   const has = (k) => summary.some((r) => r.key === k && (r.state === 'installed' || r.state === 'current'));
   if (has('core')) {
-    const { text } = buildHandoffPrompt({ fleet: has('fleet'), telegram: has('telegram') });
-    line('');
-    line('  ' + c.gray('─'.repeat(64)));
-    line('  ' + c.bold('ONE LAST STEP') + ' — copy the prompt below and paste it into Claude Code');
-    line('  (or Codex). Your agent walks you through the rest, conversationally.');
-    line('  ' + c.gray('─'.repeat(64)));
-    line('');
-    line(box(text.split('\n'), 'paste this into your agent'));
-    copyToClipboard(text);
+    const identityDone = has('identity');
+    const { text, empty } = buildHandoffPrompt({ identity: !identityDone, fleet: has('fleet'), telegram: has('telegram') });
+    if (empty) {
+      // Nothing left to finish (identity created in-install, no fleet/Telegram). Don't show an empty box.
+      line('');
+      line('  ' + c.green("You're all set — open Claude Code or Codex and just start talking to your agent."));
+    } else {
+      line('');
+      line('  ' + c.gray('─'.repeat(64)));
+      line('  ' + c.bold('ONE LAST STEP') + ' — copy the prompt below and paste it into Claude Code');
+      line('  (or Codex). Your agent walks you through the rest, conversationally.');
+      line('  ' + c.gray('─'.repeat(64)));
+      line('');
+      line(box(text.split('\n'), 'paste this into your agent'));
+      copyToClipboard(text);
+    }
   }
   line('');
   line('  ' + c.gray('Re-run  ') + c.cyan('ours-install') + c.gray('  any time to add a skipped piece or update.'));
   line('  ' + c.cyan('═'.repeat(64)));
   finish(ttyFd);
+  // Exit CLEANLY right after the summary — never leave the user at a hung installer (the tty is
+  // closed above; a lingering clipboard child or signal listener must not keep us alive).
+  process.exit(0);
 }
 
-// Best-effort clipboard copy (pbcopy/wl-copy/xclip/clip). Silent when unsupported.
+// Best-effort clipboard copy (pbcopy/wl-copy/xclip/clip). Silent when unsupported. A hard timeout
+// keeps a lingering/blocking clipboard helper (e.g. xclip holding the selection) from ever stalling
+// the exit.
 function copyToClipboard(text) {
   if (DRY) return;
   const tools = [['pbcopy', []], ['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['clip.exe', []]];
   for (const [bin, args] of tools) {
     try {
-      const r = spawnSync(bin, args, { input: text });
-      if (!r.error && (r.status === 0 || r.status == null)) { line('  ' + c.gray('(copied to your clipboard.)')); return; }
+      const r = spawnSync(bin, args, { input: text, timeout: 2000 });
+      if (!r.error && !r.timedOut && (r.status === 0 || r.status == null)) { line('  ' + c.gray('(copied to your clipboard.)')); return; }
     } catch { /* try the next one */ }
   }
 }

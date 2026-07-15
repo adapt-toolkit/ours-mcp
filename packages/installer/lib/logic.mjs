@@ -149,14 +149,17 @@ export function harnessAvailable(status) { return status === 'ok'; }
 
 // buildHandoffPrompt: the literal copy-paste hand-off text (delta #1861). Steps for components
 // that were NOT installed drop out and the remaining steps renumber, so the user never sees an
-// instruction for a piece they don't have. `opts` flags which optional components are present.
-// Returns { text } — the exact prompt string the user pastes into Claude Code / Codex.
-export function buildHandoffPrompt({ fleet = false, telegram = false } = {}) {
+// instruction for a piece they don't have. The human identity is normally created DURING install,
+// so its step is included ONLY as a fallback (identity: true) when in-install creation was skipped
+// or failed. Returns { text, empty } — empty is true when there is nothing left to finish.
+export function buildHandoffPrompt({ identity = false, fleet = false, telegram = false } = {}) {
   const steps = [];
-  steps.push(
-    'Create my Ours human identity — this is me, the human; my agents act on\n' +
-    '   my behalf. Ask me what name others should see, then create it.',
-  );
+  if (identity) {
+    steps.push(
+      'Create my Ours human identity — this is me, the human; my agents act on\n' +
+      '   my behalf. Ask me what name others should see, then create it.',
+    );
+  }
   if (fleet) {
     steps.push(
       "Set up ours-fleet: confirm it's ready and show me how to spawn a\n" +
@@ -170,6 +173,7 @@ export function buildHandoffPrompt({ fleet = false, telegram = false } = {}) {
       '   give me the invite link to send.',
     );
   }
+  if (steps.length === 0) return { text: '', empty: true };
   const numbered = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
   const text =
     'I just installed the ours.network stack. Please help me finish setup, one\n' +
@@ -177,7 +181,7 @@ export function buildHandoffPrompt({ fleet = false, telegram = false } = {}) {
     numbered + '\n\n' +
     'Do these in order, wait for my answers, and tell me if you need anything\n' +
     "from me. Don't assume — ask.";
-  return { text };
+  return { text, empty: false };
 }
 
 // summarizeComponent: normalize one component's outcome into a summary row the final screen and

@@ -1,21 +1,39 @@
-# @ours.network/installer — `ours-install`
+# @ours.network/install — `ours-install`
 
 The **unified ours.network stack installer**. ONE guided ~3-minute flow that installs the WHOLE
 stack for someone who already has Claude Code and/or Codex, then hands back a single copy-paste
-prompt to finish setup conversationally. Run it as `ours-install`, or bootstrap over the web:
+prompt to finish setup conversationally.
+
+## Install
+
+**Recommended — a persistent, versioned, integrity-checked command on your PATH:**
+
+```sh
+npm i -g @ours.network/install && ours-install
+```
+
+Re-run (or update / add a skipped piece) any time with just `ours-install`.
+
+**One-off, no global install:**
+
+```sh
+npx @ours.network/install
+```
+
+**Fallback for machines without npm** (least secure — pipes a script straight into your shell):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash
 ```
 
-(A short `https://ours.network/install.sh` redirect is a future convenience — the git raw URL
-above is the canonical source.) `ours-install` is the single front door; `ours-codex-install` is
-kept as a **thin alias** that hands off to it (use `ours-codex-install --codex-only` for the
-legacy Codex-only path).
+The `curl … | bash` bootstrap simply gets Node.js/npm sorted, then does the `npm i -g
+@ours.network/install` and runs `ours-install` for you. `ours-install` is the single front door;
+`ours-codex-install` is kept as a **thin alias** that hands off to it (use
+`ours-codex-install --codex-only` for the legacy Codex-only path).
 
-`install.sh` is a **thin bootstrap**: it checks Node.js (≥ 20), printing friendly per-OS guidance
-if it's missing, then hands off to the **Node installer** (`install.mjs`) — ASCII banner, tasteful
-colour (degrades under `NO_COLOR` / no-tty), plain-language **what + why** for every step.
+The installer is a small **self-contained** Node package (Node built-ins only — no runtime
+dependency on the things it installs): an ASCII banner, tasteful colour (degrades under `NO_COLOR`
+/ no-tty), and plain-language **what + why** for every step.
 
 ## The flow (what the user sees)
 
