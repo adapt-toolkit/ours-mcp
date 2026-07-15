@@ -30,13 +30,12 @@ It:
 5. does everything in one pass — no "now do X, now press start" follow-up — and prints the
    installed **versions** plus a brief "how to use" recap at the end.
 
-The base install asks **zero** identity/wake questions — it sets up only the daemon plus
-each harness's MCP server + skill. Wake-on-mail is enabled later, **in-session**, by asking
-the `ours` skill to wake the agent for a bound identity.
-
-> Claude Code has the most tested, reliable wake-on-mail monitor; Codex/Hermes support is
-> newer and may have rough edges — please report anything off:
-> https://github.com/adapt-toolkit/ours-mcp/issues
+The base install asks **zero** identity/wake questions. For Codex it installs the native
+plugin (skills, MCP servers, and hooks) plus the global `ours-codex` launcher. Standard
+mode starts with `codex`; live mode starts with `ours-codex`. Live monitoring is armed
+only after the user explicitly approves it for the currently bound identity, and stops
+with that CLI session. Standard mode offers a second, explicit-consent foreground fallback
+that blocks the current Codex turn until mail arrives or the user interrupts it.
 
 Because `curl … | bash` gives the script its input over the pipe, every interactive prompt is
 read from the controlling terminal (`/dev/tty`), so the picker still works.
@@ -74,6 +73,7 @@ OURS_ASSUME_YES=1 \
 | `OURS_PORT` | daemon HTTP port to write (default: keep the daemon's current; never `3051`) |
 | `OURS_ASSUME_YES` | accept defaults, never prompt |
 | `OURS_NPM` | npm binary to use (default `npm`) |
+| `OURS_CODEX_LIVE` | `yes` reports the `ours-codex` live path; `no` reports standard mode |
 
 ## Uninstall
 

@@ -19,6 +19,8 @@
 #   OURS_PORT=3050                           daemon HTTP port (default: keep the daemon's current)
 #   OURS_ASSUME_YES=1                        accept defaults; never prompt (implies no tty needed)
 #   OURS_NPM="npm"                           npm binary to use
+#   OURS_CODEX_LIVE=yes|no                   report Codex live launcher or standard mode
+#   OURS_CODEX_MARKETPLACE_SOURCE=<source>   override Codex marketplace (testing/dev)
 #   OURS_INSTALLER_MJS=/path/install.mjs     run this Node installer directly (dev/testing)
 #   OURS_INSTALLER_BASE=<url>                base URL to download the installer file set from
 #   OURS_INSTALL_REF=<git ref>               piped runs fetch the installer from this branch/tag

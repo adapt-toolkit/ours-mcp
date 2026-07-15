@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
-# Install the ours.network plugin into the OpenAI Codex CLI:
+# Install the native ours.network plugin into the OpenAI Codex CLI:
 #   1. ensure the ours daemon (@ours.network/mcp) is installed + running
-#   2. install the ours + writing-agent-bios skills into ~/.agents/skills/ (USER scope)
-#   3. register the `ours` MCP server ([mcp_servers.ours]) in ~/.codex/config.toml
-#      (idempotent — appends the table only if it is not already defined)
-#   4. append a sentinel-guarded ours pointer to ~/.codex/AGENTS.md (create if missing)
-#
-# That's it — no identities, no gateway, no watcher, no connector. Wake-on-mail is the agent
-# tailing `ours-mcp watch <identity>` (or a short get_messages poll) IN-SESSION (see the ours
-# skill), the same stream Claude Code's Monitor tails. Codex is a session/invocation CLI, so this
-# is reactive while the agent is live — it checks for mail as it works and when it expects a reply.
+#   2. add/upgrade adapt-toolkit/ours-codex-marketplace
+#   3. install the native `ours` plugin (skills, MCP servers, and hooks)
+#   4. back up and remove installer-owned legacy config only after verification
 #
 # Idempotent: safe to re-run. Test/CI knobs (all optional):
 #   CODEX_DIR                  config+AGENTS.md root      (default ~/.codex)
@@ -50,7 +44,35 @@ ensure_daemon_latest(){
 # --- 1) daemon (ensure @latest + restart on change) ---
 ensure_daemon_latest
 
-# --- 2) skills (USER scope: ~/.agents/skills/<name>/) ---
+# --- native Codex plugin ------------------------------------------------------
+# Codex owns the plugin cache and hook-trust workflow. Only remove the legacy
+# config/skills/AGENTS wiring after Codex confirms the native plugin installed.
+if [ "${OURS_CODEX_SKIP_NATIVE:-}" != "1" ]; then
+  if ! command -v codex >/dev/null 2>&1; then
+    say "Codex CLI is required; install Codex first. Existing ours setup was left unchanged."
+    exit 1
+  fi
+  MARKETPLACE_SOURCE="${OURS_CODEX_MARKETPLACE_SOURCE:-adapt-toolkit/ours-codex-marketplace}"
+  say "adding/updating Codex marketplace: $MARKETPLACE_SOURCE"
+  if ! codex plugin marketplace add "$MARKETPLACE_SOURCE" >/dev/null 2>&1; then
+    codex plugin marketplace upgrade ours-codex-marketplace >/dev/null 2>&1 || {
+      say "could not configure the ours Codex marketplace; existing setup was left unchanged."
+      exit 1
+    }
+  fi
+  say "installing native Codex plugin: ours@ours-codex-marketplace"
+  if ! codex plugin add ours@ours-codex-marketplace; then
+    say "native plugin installation failed; existing setup was left unchanged."
+    exit 1
+  fi
+  CODEX_DIR="$CODEX_DIR" SKILLS_DIR="$SKILLS_DIR" node "$SELFDIR/bin/codex-legacy-cleanup.mjs"
+  say "native plugin installed. Review and trust its hooks in Codex, then start a new thread."
+  say "standard mode: codex"
+  say "live mode:     ours-codex${OURS_PORT:+ --ours-port $OURS_PORT}"
+  exit 0
+fi
+
+# --- legacy test/fallback path (not used by production installs) -------------
 mkdir -p "$SKILLS_DIR"
 for s in ours writing-agent-bios; do
   rm -rf "${SKILLS_DIR:?}/$s"

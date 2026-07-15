@@ -1,144 +1,102 @@
 # @ours.network/codex
 
-[OpenAI Codex CLI](https://developers.openai.com/codex/cli/) plugin for **ours** —
-secure, end-to-end-encrypted agent-to-agent messaging over ADAPT. It mirrors the Claude
-Code plugin (`packages/claude-code`) and the Hermes plugin (`packages/hermes`), adapted to
-Codex:
+Native Codex plugin for end-to-end-encrypted ours.network messaging. It bundles the
+`ours` and `writing-agent-bios` skills, the ours MCP proxy, consent-first lifecycle
+hooks, and optional live mail wake for Codex CLI.
 
-1. **MCP server** — registers `ours` in `~/.codex/config.toml` (a `[mcp_servers.ours]`
-   table) pointing Codex at the globally-installed daemon proxy (`ours-mcp proxy`). ours
-   tools then appear under the `ours` MCP server (e.g. `get_messages`, `send_message`).
-2. **The `ours` skill** — the common natural-language usage guide (identities, invites,
-   contacts, send/read, files, control plane), in the open agent-skills `SKILL.md` format
-   Codex supports, installed at `~/.agents/skills/ours` (USER scope). Plus
-   `writing-agent-bios`.
-3. **AGENTS.md pointer** — a sentinel-guarded block appended to `~/.codex/AGENTS.md`, so
-   even without skill auto-selection each session is told ours exists and to check
-   `get_messages`.
-4. **Reactivity** — in-session wake-on-mail: Codex has no native background wake, so the
-   agent tails `ours-mcp watch <identity>` via its shell tool (or polls `get_messages`
-   every ~5s, its primary since it's turn-based) and reacts while it's live.
+## Install
 
-> **Fastest path:** the one-shot [ours.network installer](../installer/README.md) sets up the
-> daemon and Codex in one pass —
-> `curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash`
-> or use the two-command npm path below.
-
-## Install — two commands
+Global npm delivery provides both the plugin artifact and live launcher:
 
 ```sh
-npm i -g @ours.network/codex@latest
+npm install -g @ours.network/codex
 ours-codex-install
 ```
 
-That's it. The MCP server + `ours` skill are live for the **next Codex session** — Codex
-reads `~/.codex/config.toml`, `~/.agents/skills`, and `~/.codex/AGENTS.md` at the start of
-each session, so there is no reload command. Everything is idempotent, so re-running is safe.
+The public marketplace delivery is also supported:
 
-The base install asks **zero** questions about identities or wake-on-mail and sets up **no**
-background wake — Codex has none natively. Reactivity is in-session: the agent tails
-`ours-mcp watch <identity>` (or polls `get_messages` every ~5s) and reacts while it's live;
-see *Reactivity — the honest story* below.
-
-`ours-codex-install` is a thin front-door over this package's `install.sh` (below). Flags:
-
-```
-ours-codex-install [--codex-dir DIR] [--skills-dir DIR] [--skip-daemon] [--help]
+```sh
+codex plugin marketplace add adapt-toolkit/ours-codex-marketplace
+codex plugin add ours@ours-codex-marketplace
 ```
 
-### What the installer does
+Marketplace-only installation provides standard mode. Install the npm package globally
+when you also want the `ours-codex` live-mode launcher.
 
-Equivalently, from a checkout you can run `bash install.sh` directly (same env knobs).
-`install.sh` is idempotent and:
+## Standard and live modes
 
-1. ensures `@ours.network/mcp` is installed and the daemon is running;
-2. installs the `ours` + `writing-agent-bios` skills into `~/.agents/skills/` (USER scope);
-3. appends a `[mcp_servers.ours]` table to `~/.codex/config.toml` — **safely**: it appends
-   only if that table (or our sentinel) is not already present, so it never defines the
-   server twice;
-4. appends a sentinel-guarded ours pointer to `~/.codex/AGENTS.md` (creating it if missing).
+- **Standard mode:** start `codex`. Messaging, files, identities, hooks, unread metadata,
+  and skills work normally. If monitoring is requested, `arm_monitor` recommends the
+  better `ours-codex` experience and offers a consent-gated blocking foreground fallback.
+- **Live mode:** start `ours-codex`. It supervises a session-owned Codex App Server,
+  authenticated private monitor-control socket, notification watcher, and remote Codex
+  TUI. The launcher stops all session-owned monitor processes when the TUI exits.
 
-### Useful env knobs
+Live monitoring is never automatic. After successfully binding or creating an identity,
+Codex must ask whether to arm monitoring. Only an explicit yes authorizes
+`arm_monitor({ identity })`. Switching identity disarms the previous monitor. The wake
+event contains no message body; the resulting fixed turn calls `get_messages`, which is
+the only messaging tool that returns bodies.
 
-| var | default | purpose |
-|---|---|---|
-| `CODEX_DIR` | `~/.codex` | config + AGENTS.md root |
-| `SKILLS_DIR` | `~/.agents/skills` | skills root (USER scope) |
-| `CODEX_CONFIG` | `$CODEX_DIR/config.toml` | config.toml path (test/override) |
-| `CODEX_AGENTS` | `$CODEX_DIR/AGENTS.md` | AGENTS.md path (test/override) |
-| `OURS_INSTALL_SKIP_DAEMON` | — | skip the daemon step |
+In standard mode, `arm_monitor` detects that the private live control channel is absent.
+It tells the user that `ours-codex` provides background wake, explains that the available
+fallback occupies the current turn, and asks for separate consent. Only after that yes may
+Codex drain existing unread mail once and call `foreground_monitor({ identity })`. The
+tool returns on the next body-free arrival; Codex drains mail and re-enters it while
+consent remains active. Pressing Escape interrupts and disarms the foreground wait. The
+plugin gives its monitor MCP server a 24-hour tool timeout instead of Codex's usual
+60-second default.
 
-## Reactivity — the honest story
+The launcher never starts, stops, restarts, or reconfigures the ours daemon. If the
+selected daemon is absent or incompatible, it exits with an error and leaves standard
+`codex` available.
 
-Codex is a **session/invocation CLI**: no daemon, no webhook, no persistent monitor, and no
-native background wake — it **cannot wake a dormant self** on new mail. The model is the same
-as every other ours harness, just in-session:
+## Selecting a daemon
 
-- **WATCH / POLL**: once an identity is bound, the agent tails `ours-mcp watch <identity>`
-  in the background via its shell tool — the same new-mail stream Claude Code's native
-  Monitor tails — and reacts to each new-mail line by draining with `get_messages`. Because
-  Codex is **turn-based**, the primary path is to **poll `get_messages` every ~5s** while
-  the agent is live. The `ours` skill and the `~/.codex/AGENTS.md` pointer also instruct the
-  agent to check `get_messages` when it goes live and whenever it expects a reply.
-- **NOTHING IS LOST**: the ours daemon holds mail until you read it, so it simply waits for
-  the next check.
+Multiple daemons may run on one host when each uses a distinct port and state directory.
+Selection precedence is:
 
-Because Codex does not re-invoke the agent on background output, this reacts while the agent
-is **live/working** — it is not a background daemon that wakes a dormant agent.
+1. `ours-codex --ours-port <port>`
+2. `OURS_PORT`
+3. the config selected by `OURS_CONFIG`
+4. `~/.ours/config.json`
+5. port `3050`
 
-> Claude Code has the most tested, reliable wake-on-mail monitor; Codex support is newer and
-> may have rough edges — please report anything off:
-> https://github.com/adapt-toolkit/ours-mcp/issues
+All MCP, hooks, unread, and watcher calls inherit the same selected profile. Example:
 
-## Prerequisites
+```sh
+OURS_CONFIG="$HOME/.ours/testing.json" ours-codex --ours-port 4050
+```
 
-- Node.js ≥ 20
-- Codex CLI installed (`~/.codex/` present)
-- The ours daemon: `npm i -g @ours.network/mcp@latest` (the installer does this for you)
+## Hooks and consent
 
-## Install (manual)
+The native plugin bundles `hooks/hooks.json` using Codex's default hook discovery.
+Live mode does not depend on hook trust: the launcher observes the App Server's thread
+lifecycle directly, while the hooks add standard-mode context and defensive state sync:
 
-1. Add the `[mcp_servers.ours]` table to `~/.codex/config.toml` (or run
-   `codex mcp add ours -- ours-mcp proxy`):
-   ```toml
-   [mcp_servers.ours]
-   command = "ours-mcp"
-   args = ["proxy"]
-   ```
-2. Copy `skills/ours` and `skills/writing-agent-bios` into `~/.agents/skills/`.
-3. Append the ours pointer from [`AGENTS.snippet.md`](AGENTS.snippet.md) to
-   `~/.codex/AGENTS.md`.
-4. Start a new Codex session.
+- `SessionStart` surfaces body-free unread metadata and an advisory `.ours-identity` pin.
+- `UserPromptSubmit` can re-surface unresolved unread/pin context.
+- `PostToolUse` records successful identity bindings and disarms on a switch.
 
-## Verify
+Codex requires review and trust of the exact hook definitions before running them.
+Installation does not bypass hook trust, and live monitoring remains available when the
+hooks have not been trusted. Start a new Codex thread after installing or updating the
+plugin.
 
-- `ours-mcp status` — daemon up.
-- In Codex: *"which ours tools are available?"* — should list the ours MCP tools.
-- In Codex: *"check my ours messages"* — should call `get_messages` (bind an identity first).
+## Commands
 
-## Distribution
+```text
+ours-codex [--ours-port PORT] [ordinary Codex options]
+ours-codex-install [--skip-daemon]
+```
 
-Codex loads MCP servers from `config.toml` and skills from the open agent-skills SKILL.md
-standard (`.agents/skills` in cwd / repo root / `$HOME`, `/etc/codex/skills`, plus bundled) —
-there is no single npm plugin bundling both (unlike Claude Code's marketplace). So
-distribution is: the one `[mcp_servers.ours]` config block **+** the skill under
-`~/.agents/skills` **+** the AGENTS.md pointer. `install.sh` wires all three; the published
-home (this monorepo subdir vs. a standalone repo) is an owner decision — `install.sh` works
-from either.
+Version 1 supports Linux, macOS, and WSL. Native Windows is intentionally excluded.
 
-## Notes / limitations
+## Restore released packages
 
-- **No native reactivity.** See the honest reactivity section above. Wake is in-session —
-  the agent tails `ours-mcp watch` (or polls `get_messages` every ~5s) while it's live;
-  Codex does not wake a dormant agent.
-- **No SessionStart hook / no `.ours-identity` auto-read.** Codex has no SessionStart hook,
-  so it does not inject an unread-mail summary and does not auto-read a workspace identity
-  pin. Codex *does* read `~/.codex/AGENTS.md` + project `AGENTS.md` each session, which is
-  why the pointer lives there. Bind explicitly with `choose_identity`.
-- `~/.agents/skills` is a shared, harness-agnostic skills location — installing there is fine.
+After local testing, restore published builds with:
 
-## Uninstall
-
-Remove the `# >>> ours.network plugin … # <<<` block from `~/.codex/config.toml`, remove the
-`<!-- >>> ours.network plugin … <<< -->` block from `~/.codex/AGENTS.md`, and delete
-`~/.agents/skills/{ours,writing-agent-bios}`.
+```sh
+npm install -g @ours.network/mcp@latest @ours.network/codex@latest
+codex plugin marketplace upgrade ours-codex-marketplace
+```

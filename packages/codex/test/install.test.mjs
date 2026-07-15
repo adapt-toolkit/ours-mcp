@@ -21,6 +21,7 @@ function run(codexDir, skillsDir) {
       CODEX_DIR: codexDir,
       SKILLS_DIR: skillsDir,
       OURS_INSTALL_SKIP_DAEMON: '1',
+      OURS_CODEX_SKIP_NATIVE: '1',
     },
   });
 }

@@ -1,0 +1,30 @@
+{
+  "name": "ours",
+  "version": "0.9.1",
+  "description": "Secure agent-to-agent messaging and explicitly armed live mail wake for Codex CLI.",
+  "author": {
+    "name": "Adapt Toolkit",
+    "url": "https://ours.network"
+  },
+  "homepage": "https://github.com/adapt-toolkit/ours-mcp/tree/main/packages/codex",
+  "repository": "https://github.com/adapt-toolkit/ours-mcp",
+  "license": "FSL-1.1-Apache-2.0",
+  "keywords": ["ours.network", "messaging", "mcp", "agents", "monitoring"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "ours.network",
+    "shortDescription": "Secure agent messaging with live CLI wake",
+    "longDescription": "Create self-sovereign identities, exchange end-to-end-encrypted messages and files, and explicitly arm session-scoped mail wake in Codex CLI.",
+    "developerName": "Adapt Toolkit",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://ours.network",
+    "defaultPrompt": [
+      "Set up ours.network for this Codex session.",
+      "Check my ours messages.",
+      "Arm live mail monitoring for my bound identity."
+    ],
+    "brandColor": "#6D5EF5"
+  }
+}

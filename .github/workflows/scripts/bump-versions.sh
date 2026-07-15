@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # LOCKSTEP release versioning: computes ONE next version for the whole @ours.network suite and
-# sets it on EVERY managed package.json AND every packages/*/.claude-plugin/plugin.json manifest,
+# sets it on EVERY managed package.json AND every native plugin manifest,
 # re-pins each plugin's exact internal dependency to that same version, refreshes the lockfile,
 # and pushes — one [skip ci] commit. The single bump is applied to the MAX of every package's
 # max(local, npm-published) version, so the unified version is always publishable for all of
@@ -11,9 +11,9 @@
 #   @ours.network/mcp        packages/core         (no internal deps)
 #   @ours.network/claude-code packages/claude-code (pins @ours.network/mcp)
 #   @ours.network/hermes     packages/hermes       (no internal deps)
-#   @ours.network/codex      packages/codex        (no internal deps)
-# (packages/installer is private → never bumped or published. Claude-Code plugin manifests are
-# not npm packages, but their "version" is user-visible in /plugin — kept at the suite version.)
+#   @ours.network/codex      packages/codex        (pins @ours.network/mcp)
+# (packages/installer is private → never bumped or published. Claude Code and Codex plugin
+# manifests are not npm packages, but their user-visible versions stay at the suite version.)
 #
 # Bump level comes from the HEAD commit subject (Conventional Commits):
 #   feat: minor · fix: patch · !/BREAKING: major
@@ -31,13 +31,13 @@ MANAGED=(
   "@ours.network/mcp|packages/core/package.json|"
   "@ours.network/claude-code|packages/claude-code/package.json|@ours.network/mcp"
   "@ours.network/hermes|packages/hermes/package.json|"
-  "@ours.network/codex|packages/codex/package.json|"
+  "@ours.network/codex|packages/codex/package.json|@ours.network/mcp"
 )
 
-# Every Claude-Code plugin manifest in the repo — bumped to the same suite version.
+# Every native plugin manifest in the repo — bumped to the same suite version.
 PLUGIN_MANIFESTS=()
 while IFS= read -r f; do PLUGIN_MANIFESTS+=("$f"); done \
-  < <(git ls-files 'packages/*/.claude-plugin/plugin.json')
+  < <(git ls-files 'packages/*/.claude-plugin/plugin.json' 'packages/*/.codex-plugin/plugin.json')
 
 emit() { [[ -n "${GITHUB_OUTPUT:-}" ]] && printf '%s\n' "$1" >> "$GITHUB_OUTPUT" || true; }
 log()  { printf '[bump] %s\n' "$*"; }
@@ -134,6 +134,22 @@ for entry in "${MANAGED[@]}"; do
 done
 
 npm install --package-lock-only --ignore-scripts >/dev/null
+
+# Load-bearing publish invariant: do not push a release commit with mismatched package,
+# native-manifest, or internal-dependency versions.
+for entry in "${MANAGED[@]}"; do
+  IFS='|' read -r name path pin <<<"$entry"
+  [[ "$(jq -r .version "$path")" == "$UNIFIED" ]] \
+    || { echo "[bump] invariant failed: $path is not v$UNIFIED" >&2; exit 1; }
+  if [[ -n "$pin" ]]; then
+    [[ "$(jq -r ".dependencies[\"$pin\"]" "$path")" == "$UNIFIED" ]] \
+      || { echo "[bump] invariant failed: $name does not pin $pin@$UNIFIED" >&2; exit 1; }
+  fi
+done
+for f in "${PLUGIN_MANIFESTS[@]}"; do
+  [[ "$(jq -r .version "$f")" == "$UNIFIED" ]] \
+    || { echo "[bump] invariant failed: $f is not v$UNIFIED" >&2; exit 1; }
+done
 
 if [[ -n "${OURS_BUMP_DRY_RUN:-}" ]]; then
   log "DRY RUN — no commit/push. Resulting versions:"

@@ -59,6 +59,7 @@ function run(dir, { bin, state }) {
       OURS_FAKE_STATE: state,
       CODEX_DIR: join(dir, '.codex'),
       SKILLS_DIR: join(dir, '.agents/skills'),
+      OURS_CODEX_SKIP_NATIVE: '1',
     },
   });
 }
