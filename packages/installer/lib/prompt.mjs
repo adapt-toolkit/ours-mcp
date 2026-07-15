@@ -8,6 +8,17 @@ import { c } from './ui.mjs';
 
 const ASSUME_YES = () => !!process.env.OURS_ASSUME_YES;
 
+// A Ctrl+C at any prompt must abort cleanly — never the old "^C^C^C… and keeps going" bug. Two
+// things conspire: (1) the process must have a SIGINT handler (installed by the orchestrator) so
+// Node doesn't just hard-kill, and (2) that handler can't run while a synchronous fs.readSync
+// blocks the event loop. So readByte turns an interrupted read (EINTR) — and a literal Ctrl+C byte
+// 0x03, in case the tty's signal generation is off — into this sentinel error, which unwinds the
+// blocked read; the orchestrator catches it (or its own SIGINT handler fires) and exits(130).
+export class InstallCancelled extends Error {
+  constructor() { super('SIGINT'); this.code = 'OURS_SIGINT'; }
+}
+export const isCancel = (e) => !!e && e.code === 'OURS_SIGINT';
+
 // Read raw bytes one at a time from the tty fd. Returns the byte (0-255) or null at EOF/error.
 function readByte(fd) {
   const buf = Buffer.alloc(1);
@@ -19,17 +30,34 @@ function readByte(fd) {
   }
 }
 
-// askLine: print `prompt` to the tty and read a line (cooked). Empty input or no-tty/assume-yes
-// → `def`. Returns the trimmed answer.
+// askLine: print `prompt` and read a line. We read in RAW mode with signal generation OFF (stty
+// -icanon -echo -isig) so Ctrl+C arrives as the byte 0x03 that we turn into a clean InstallCancelled
+// — rather than a SIGINT that a blocked synchronous readSync would defer forever (the old
+// "^C^C^C… and keeps going" bug). We echo/backspace ourselves since -echo is off. If stty isn't
+// available (not a real tty), fall back to a plain cooked read. Throws InstallCancelled on Ctrl+C.
 export function askLine(write, fd, prompt, def = '') {
   if (fd == null || ASSUME_YES()) return def;
   write(prompt);
+
+  const saved = spawnSync('stty', ['-g'], { stdio: [fd, 'pipe', 'ignore'], encoding: 'utf8' });
+  const rawOk = saved.status === 0
+    && spawnSync('stty', ['-icanon', '-echo', '-isig', 'min', '1', 'time', '0'], { stdio: [fd, 'ignore', 'ignore'] }).status === 0;
+  const restore = () => { if (rawOk) spawnSync('stty', (saved.stdout || '').trim() ? [(saved.stdout || '').trim()] : ['sane'], { stdio: [fd, 'ignore', 'ignore'] }); };
+
   let s = '';
-  for (;;) {
-    const b = readByte(fd);
-    if (b === null) break;
-    if (b === 0x0a || b === 0x0d) break; // \n or \r
-    s += String.fromCharCode(b);
+  try {
+    for (;;) {
+      const b = readByte(fd);
+      if (b === null || b === 0x04) break;               // EOF / Ctrl+D → take the default
+      if (b === 0x03) { restore(); write('^C'); throw new InstallCancelled(); } // Ctrl+C
+      if (b === 0x0a || b === 0x0d) { if (rawOk) write('\n'); break; }          // Enter
+      if (b === 0x7f || b === 0x08) { if (s.length) { s = s.slice(0, -1); if (rawOk) write('\b \b'); } continue; } // backspace
+      if (b < 0x20) continue;                            // ignore other control bytes
+      s += String.fromCharCode(b);
+      if (rawOk) write(String.fromCharCode(b));           // manual echo
+    }
+  } finally {
+    restore();
   }
   const ans = s.trim();
   return ans === '' ? def : ans;

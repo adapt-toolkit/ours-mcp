@@ -154,6 +154,53 @@ test('no harness at all: explains + exits cleanly, installs nothing', () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
+// --- Ctrl+C at a prompt must abort cleanly (exit 130 + message), never hang -------------------
+// Needs a real pty (a prompt only blocks with a controlling terminal); skipped without python3.
+function hasPython3() {
+  try { execFileSync('python3', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; }
+}
+const PTY_SIGINT = `
+import os, pty, sys, time, select
+env=dict(os.environ); env["OURS_INSTALL_DRY_RUN"]="1"; env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
+pid,fd=pty.fork()
+if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
+buf=b""
+def drain(t=0.8):
+    global buf; end=time.time()+t
+    while time.time()<end:
+        r,_,_=select.select([fd],[],[],0.1)
+        if r:
+            try:d=os.read(fd,4096)
+            except OSError:break
+            if not d:break
+            buf+=d
+        elif buf and buf.rstrip().endswith(b"[Enter]"):break
+# wait for the first prompt, then send Ctrl+C
+for _ in range(40):
+    drain(0.3)
+    if b"Continue?" in buf: break
+os.write(fd,b"\\x03"); time.sleep(0.3); drain(1.5)
+st=None
+for _ in range(40):
+    try: w,s=os.waitpid(pid,os.WNOHANG)
+    except ChildProcessError: st="reaped";break
+    if w: st=s;break
+    drain(0.15); time.sleep(0.1)
+tail=buf.decode(errors="replace")
+if "cancelled" in tail.lower(): print("MSG_OK")
+if st is None: print("HUNG")
+elif st=="reaped": print("EXIT_UNKNOWN")
+elif os.WIFEXITED(st): print("EXIT", os.WEXITSTATUS(st))
+elif os.WIFSIGNALED(st): print("SIGNAL", os.WTERMSIG(st))
+`;
+test('Ctrl+C at a prompt aborts cleanly (exit 130 + message), never hangs',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const out = execFileSync('python3', ['-c', PTY_SIGINT, INSTALL_MJS], { encoding: 'utf8', timeout: 60_000 });
+  assert.match(out, /MSG_OK/, 'prints a friendly cancellation message');
+  assert.match(out, /EXIT 130/, 'exits with code 130, not a hang or a bare signal kill');
+  assert.doesNotMatch(out, /HUNG/, 'must never hang after Ctrl+C');
+});
+
 // --- install.sh bootstrap: Node.js check (unchanged contract) ----------------------------------
 test('install.sh with no Node.js prints friendly per-OS guidance and exits 0', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'installer-'));

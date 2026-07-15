@@ -165,7 +165,7 @@ function main() {
   // --- 3) data directory (destructive, guarded) ------------------------------------------------
   if (wantData) {
     line(heading('→ ours data directory'));
-    say(`This holds your ours IDENTITIES and private KEYS (${OURS_STATE_DIR}). Removing it is`);
+    say(`This holds your Ours IDENTITIES and private KEYS (${OURS_STATE_DIR}). Removing it is`);
     say('permanent and cannot be undone — you would lose those identities.');
     if (confirmDestructive(write, ttyFd, `the ours data directory (${OURS_STATE_DIR})`)) { rmDir(OURS_STATE_DIR); removed.push('data-dir'); }
     else say('  kept the data directory.');
@@ -188,7 +188,7 @@ function main() {
   line(heading('Done'));
   if (removed.length) { say('removed:'); for (const r of removed) say(`  ${c.green('✓')} ${r}`); }
   else say('nothing was removed.');
-  if (!wantData) say(`Your ours identities/keys in ${OURS_STATE_DIR} were left in place.`);
+  if (!wantData) say(`Your Ours identities/keys in ${OURS_STATE_DIR} were left in place.`);
   say("Reload each harness to drop the ours tools (Hermes: '/reload-mcp'; Codex: next session).");
   finish(ttyFd);
 }

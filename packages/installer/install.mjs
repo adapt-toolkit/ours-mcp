@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir, platform as osPlatform, release as osRelease } from 'node:os';
 import { join, dirname } from 'node:path';
 import { banner, heading, ok, info, warn, c, box, withSpinner, openTty, makeWriter, closeSync } from './lib/ui.mjs';
-import { askLine, askYesNo } from './lib/prompt.mjs';
+import { askLine, askYesNo, isCancel } from './lib/prompt.mjs';
 import {
   suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
   detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
@@ -119,11 +119,28 @@ function detectHarness(name) {
   return { name, ...verdict };
 }
 
+// Set by main() so the top-level catch can route a Ctrl+C (InstallCancelled) through the same
+// clean-exit path as the SIGINT handler.
+let cancelHandler = null;
+
 // ===============================================================================================
 async function main() {
   const ttyFd = openTty();
   const interactive = ttyFd != null && !process.env.OURS_ASSUME_YES;
   const write = makeWriter(ttyFd);
+
+  // Ctrl+C at ANY prompt aborts cleanly (never the old "^C^C^C and keeps going"): print one line
+  // and exit 130. The SIGINT handler covers a ^C while we're idle/spinning; the InstallCancelled
+  // thrown out of a blocked prompt read covers a ^C mid-prompt (both routed here, guarded once).
+  let cancelling = false;
+  const cancel = () => {
+    if (cancelling) return; cancelling = true;
+    try { process.stdout.write('\n' + warn('Installation cancelled — re-run any time.') + '\n'); } catch { /* ignore */ }
+    finish(ttyFd);
+    process.exit(130);
+  };
+  cancelHandler = cancel;
+  if (interactive) process.on('SIGINT', cancel);
   const yes = (prompt, def) => (process.env.OURS_ASSUME_YES ? def : askYesNo(write, ttyFd, prompt, def));
   const ask = (prompt, def) => (process.env.OURS_ASSUME_YES ? def : askLine(write, ttyFd, prompt, def));
   // A Continue? beat: one clean acknowledgement between steps (delta #1860). No-op when we can't
@@ -349,7 +366,7 @@ async function main() {
   // STEP 4 / 4 — Telegram connector. Install-only (no bot tokens here). Then: run as a service?
   // ============================================================================================
   line(heading('4/4 — Telegram connector'));
-  line(info('This bridges a Telegram bot to your ours node, so you can talk to your agent from'));
+  line(info('This bridges a Telegram bot to your Ours node, so you can talk to your agent from'));
   line(info("Telegram. (You'll set up the actual bot later, with your agent — not here.)"));
   const goTg = yes('  Install it?', false);
   if (goTg) {
@@ -473,7 +490,9 @@ function finish(ttyFd) {
 }
 
 main().catch((e) => {
-  // Same philosophy as everywhere else: degrade, don't crash — one honest line, non-zero exit.
+  // A Ctrl+C thrown out of a blocked prompt read → the clean cancel path (exit 130).
+  if (isCancel(e)) { if (cancelHandler) return cancelHandler(); process.exit(130); }
+  // Otherwise: degrade, don't crash — one honest line, non-zero exit.
   say(`unexpected error: ${String(e)}`);
   process.exitCode = 1;
 });
