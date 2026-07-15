@@ -34,7 +34,8 @@ The base install asks **zero** identity/wake questions. For Codex it installs th
 plugin (skills, MCP servers, and hooks) plus the global `ours-codex` launcher. Standard
 mode starts with `codex`; live mode starts with `ours-codex`. Live monitoring is armed
 only after the user explicitly approves it for the currently bound identity, and stops
-with that CLI session.
+with that CLI session. Standard mode offers a second, explicit-consent foreground fallback
+that blocks the current Codex turn until mail arrives or the user interrupts it.
 
 Because `curl … | bash` gives the script its input over the pipe, every interactive prompt is
 read from the controlling terminal (`/dev/tty`), so the picker still works.

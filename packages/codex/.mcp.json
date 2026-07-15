@@ -10,7 +10,8 @@
       "command": "node",
       "args": ["bin/monitor-mcp.mjs"],
       "cwd": ".",
-      "env_vars": ["OURS_CODEX_CONTROL_SOCKET", "OURS_CODEX_CAPABILITY"]
+      "tool_timeout_sec": 86400,
+      "env_vars": ["OURS_CODEX_CONTROL_SOCKET", "OURS_CODEX_CAPABILITY", "OURS_PORT", "OURS_CONFIG", "OURS_API_TOKEN", "OURS_STATE_DIR"]
     }
   }
 }

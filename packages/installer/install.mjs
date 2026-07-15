@@ -344,7 +344,7 @@ async function main() {
     const live = (process.env.OURS_CODEX_LIVE || 'yes').toLowerCase() !== 'no';
     say(live
       ? 'Codex live mode: start with \'ours-codex\'; bind an identity, then explicitly approve arming.'
-      : 'Codex standard mode: start with \'codex\'; messaging works, live wake stays unavailable.');
+      : 'Codex standard mode: start with \'codex\'; monitoring offers an explicitly approved blocking fallback.');
     say('Codex will ask you to review the native plugin hooks; the installer never bypasses hook trust.');
   }
   say('Wake-on-mail is always consent-first — see your plugin README. Docs: https://ours.network');
@@ -373,8 +373,8 @@ function nextStepsPanel(rootIdentity) {
     '  4. Then either side: "Send a message to <name>: hi"',
     '       · "Check my messages"',
     '',
-    'Optional - auto-wake: in Codex, launch with ours-codex; after binding,',
-    'tell your agent "watch for messages" and explicitly approve arming.',
+    'Optional - auto-wake: tell Codex "watch for messages". ours-codex gives',
+    'background wake; normal codex offers a consent-gated foreground fallback.',
     '',
     'To link two of your OWN agents: open a second harness window,',
     '"create an agent identity" there too, "generate an invite" in one,',

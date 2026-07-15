@@ -168,9 +168,13 @@ the bio, so a persona prompt is only needed if they want to role-play it).
    operate normally. **Never adopt a persona silently.**
 2. **Wake check.** Ask: *"Arm live mail monitoring for this identity in this session?"*
    This question is mandatory but arming is optional. Only after an explicit yes call
-   `arm_monitor({ identity: "<bound name>" })`. If the monitor tool reports standard
-   mode, explain that `ours-codex` live mode is required. Before switching identities,
-   call `disarm_monitor`; the PostToolUse hook also disarms defensively on a changed bind.
+   `arm_monitor({ identity: "<bound name>" })`. In `ours-codex`, that arms background
+   wake immediately. In standard `codex`, the tool instead explains the better
+   `ours-codex` experience and tells you to ask separately whether the user accepts a
+   blocking foreground monitor. Only after that second explicit yes call
+   `get_messages` once for existing unread mail, then
+   `foreground_monitor({ identity: "<bound name>" })`. Before switching identities, call
+   `disarm_monitor`; the PostToolUse hook also disarms defensively on a changed bind.
 
 ### Other identity tools
 
@@ -304,12 +308,23 @@ When you bind an identity, offer the user, in plain language:
 > "Want this session to **auto-wake** when a new message arrives, or **check manually**?"
 
 - **Auto-wake** → only after explicit consent, call `arm_monitor` for the currently bound
-  identity. The session-owned watcher uses Codex App Server to start a fixed drain turn on
-  body-free notification events. It coalesces events and never injects sender or body text.
+  identity. The tool detects the available mode:
+  - In **`ours-codex` live mode**, the session-owned watcher uses Codex App Server to
+    start a fixed drain turn on body-free notification events. It coalesces events and
+    never injects sender or body text.
+  - In **standard `codex` mode**, `arm_monitor` does not silently start a blocking call.
+    It recommends restarting with `ours-codex`, explains that the fallback occupies the
+    current turn, and asks you to obtain separate explicit consent. If the user agrees,
+    first call `get_messages` once to drain existing unread mail, then call
+    `foreground_monitor` for the bound identity. When it returns an arrival, call
+    `get_messages`, handle the mail, then call `foreground_monitor` again without asking
+    while the original consent remains active. Escape/interruption stops and disarms it.
 - **Manual** → do not arm it; call `get_messages` when the user asks.
 
-The live watcher stops when the `ours-codex` TUI exits. `disarm_monitor` stops it earlier;
-`monitor_status` reports availability and the armed identity.
+The background watcher stops when the `ours-codex` TUI exits. `disarm_monitor` stops it
+earlier; `monitor_status` reports availability and the armed identity. A foreground
+monitor is a blocking tool call, so the session cannot accept another prompt until mail
+arrives or the user presses Escape.
 
 ## Control plane — bind a monitoring proxy (human oversight of a fleet)
 
@@ -362,8 +377,10 @@ requests, and each agent's monitoring ON/off. Works whenever the Human identity 
   event (sender + id + date) to `$OURS_STATE_DIR/<identity>/notifications.log` (the wake
   signal `ours-mcp watch` reads) and refreshes a body-free `unread.json`. Text lives in the
   packet and leaves it solely via `get_messages`.
-- **Codex live wake is native-plugin plumbing.** `ours-codex` owns the App Server and
+- **Codex monitoring uses capability detection.** `ours-codex` owns the App Server and
   watcher for exactly one TUI session. The launcher observes that session's thread
   directly; monitor MCP tools carry explicit arm/disarm consent, while trusted hooks add
-  defensive identity-state synchronization. Authenticated daemon notification endpoints
-  remain body-free. Only `get_messages` releases message text to the agent.
+  defensive identity-state synchronization. Standard `codex` falls back, after separate
+  consent, to a foreground `ours-mcp watch` call that returns on the next body-free event.
+  Authenticated daemon notification endpoints remain body-free. Only `get_messages`
+  releases message text to the agent.
