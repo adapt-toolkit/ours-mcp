@@ -154,8 +154,8 @@ export function harnessAvailable(status) { return status === 'ok'; }
 export function buildHandoffPrompt({ fleet = false, telegram = false } = {}) {
   const steps = [];
   steps.push(
-    'Create my root Ours identity — the root all my agents grow from. It lets\n' +
-    '   me message people; ask me what name others should see, then create it.',
+    'Create my Ours human identity — this is me, the human; my agents act on\n' +
+    '   my behalf. Ask me what name others should see, then create it.',
   );
   if (fleet) {
     steps.push(

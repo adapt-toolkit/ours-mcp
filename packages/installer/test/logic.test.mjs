@@ -103,11 +103,11 @@ test('classifyHarnessProbe: real binary ok; hang/alias/function never dead-end; 
 
 test('buildHandoffPrompt: identity always; fleet/telegram steps drop out and renumber', () => {
   const all = buildHandoffPrompt({ fleet: true, telegram: true }).text;
-  // Clarity fix: capitalized "Ours" (not the "your ours" collision), plain "root all my agents
-  // grow from", and no cryptic "(their root)".
-  assert.match(all, /1\. Create my root Ours identity/);
-  assert.match(all, /root all my agents grow from/);
-  assert.doesNotMatch(all, /their root/);
+  // Wording: user-facing "human identity" (capital "Ours", no "root" jargon — the CLI seam stays
+  // create-root, but the copy never says "root").
+  assert.match(all, /1\. Create my Ours human identity/);
+  assert.match(all, /my agents act on\s+my behalf/);
+  assert.doesNotMatch(all, /root/i, 'user-facing hand-off must not use the "root" jargon');
   assert.doesNotMatch(all, /your ours identity/i);
   assert.match(all, /2\. Set up ours-fleet/);
   assert.match(all, /3\. Set up my Telegram bot/);
@@ -117,7 +117,7 @@ test('buildHandoffPrompt: identity always; fleet/telegram steps drop out and ren
   assert.doesNotMatch(fleetOnly, /Telegram/, 'a skipped Telegram must not appear in the hand-off');
 
   const bare = buildHandoffPrompt({}).text;
-  assert.match(bare, /1\. Create my root Ours identity/);
+  assert.match(bare, /1\. Create my Ours human identity/);
   assert.doesNotMatch(bare, /ours-fleet/);
   assert.doesNotMatch(bare, /Telegram/);
 });
