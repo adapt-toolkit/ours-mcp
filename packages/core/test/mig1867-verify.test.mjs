@@ -30,11 +30,17 @@ export function parseE2eLogs(text) {
 // app data actually traversed it).
 //
 // `snap.pre` / `snap.post` are AUTHORITATIVE active_session_id(cid) snapshots taken by the harness via
-// the readonly trn — pre-migration and post-active. Passing `snap.post` breaks the circularity
-// MigrationReview flagged: if the app-send session_id in the log ONLY matched the pin because both were
-// re-reads of active_session_id, they could agree while masking a send-on-a-stale-session bug. Anchoring
-// on the independent authoritative snapshot (`session_id == snap.post ∧ snap.post != snap.pre`) makes
-// the proof non-circular from the readout side, regardless of how core sources the notify session_id.
+// the readonly trn — pre-migration and post-active. Passing `snap.post` hardens the ROTATION REFERENCE:
+// it proves the pin ROTATED against an INDEPENDENT value (`snap.post != snap.pre`, not a notify) and
+// catches a wrong/untrustworthy pin (`pin != snap.post`).
+//
+// IMPORTANT (per MigrationReview): anchoring does NOT close the app-line circularity. If core sources
+// the [e2e-app] notify session_id by RE-READING active_session_id, a stale-session send (app actually
+// rode PRE) is LOGGED as POST — which equals the authoritative post, so it PASSES here (masked). The
+// app-line is made truthful ONLY by core sourcing session_id from the REAL send/recv envelope
+// (encrypt_to's result / the decrypted envelope). That core-side fix is REQUIRED and COMPLEMENTARY —
+// this anchoring hardens the reference; the real-envelope sourcing makes the measured line honest.
+// Together = a real #1867 proof.
 export function verify1867ForCid(logs, cid, snap = {}) {
   const pre = typeof snap === 'string' ? snap : snap.pre;  // back-compat: a bare string == pre snapshot
   const post = typeof snap === 'string' ? undefined : snap.post;
@@ -139,16 +145,20 @@ test('verify1867ForCid: PASSES against the authoritative {pre,post} active_sessi
   assert.equal(r.ok, true, JSON.stringify(r.problems));
 });
 
-test('verify1867ForCid: CATCHES a stale-session send that a circular (pin-only) check would miss', () => {
-  // The notify pin re-read active_session_id (== POST) but the app actually sent on the OLD session
-  // (PRE). A pin-only check would pass; anchoring on the authoritative POST snapshot catches it.
+test('verify1867ForCid: authoritative anchoring catches a WRONG PIN that pin-only self-consistency accepts', () => {
+  // What {pre,post} anchoring adds OVER pin-only: the [migration] active pin is internally consistent
+  // (all app lines == pin, pin != pre) so pin-only PASSES — but the pin is a WRONG value W, not the
+  // authoritative post. Anchoring catches `pin != authoritative post`. (This is a reference/pin check,
+  // NOT app-line de-circularization — see the header note; the app-line honesty is core's job.)
+  const W = 'dd'.repeat(16); // a wrong session id, != PRE and != POST
   const logs = [
-    `[migration] active cid=${CID} role=initiator epoch=${'ee'.repeat(16)} session_id=${POST}`,
-    `[e2e-app] send cid=${CID} session_id=${PRE} olm_type=1 wire_id=w1`,
+    `[migration] active cid=${CID} role=initiator epoch=${'ee'.repeat(16)} session_id=${W}`,
+    `[e2e-app] send cid=${CID} session_id=${W} olm_type=1 wire_id=w1`,
+    `[e2e-app] recv cid=${CID} session_id=${W} ok=true wire_id=w2`,
   ].join('\n');
-  assert.equal(verify1867ForCid(logs, CID, PRE).ok, false, 'even pin-only catches PRE != POST pin here');
+  assert.equal(verify1867ForCid(logs, CID, PRE).ok, true, 'pin-only self-consistency accepts a wrong-but-consistent pin');
   const r = verify1867ForCid(logs, CID, { pre: PRE, post: POST });
-  assert.equal(r.ok, false);
+  assert.equal(r.ok, false, 'anchoring rejects: pin != authoritative post');
   assert.match(r.problems.join('|'), /!= authoritative/);
 });
 
