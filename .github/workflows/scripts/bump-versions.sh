@@ -22,10 +22,25 @@
 #
 # OURS_BUMP_DRY_RUN=1: compute + patch the files in the working tree, print the resulting
 # versions/pins, and exit WITHOUT committing or pushing (verification; caller reverts).
+#
+# OURS_RELEASE_MODE selects the release channel (default: stable):
+#   stable   main → publish @latest. Conventional-Commits bump over max(local, published-latest).
+#            (Unchanged legacy behaviour — this is also the target the promote cut lands on.)
+#   nightly  prerelease → publish the npm `nightly` tag. Version = <next-minor(base)>-nightly.N
+#            where base = max(local, published-latest) across the suite and N = 1 + the highest
+#            existing <minor>-nightly.* index on npm (lockstep, collision-free). EPHEMERAL: the
+#            files are patched in the working tree for the publish job and NEVER committed, so
+#            N re-derives from npm every run and prerelease history stays clean. By semver every
+#            X.Y.0-nightly.N sorts BELOW X.Y.0, so it can never move @latest.
+#   promote  prerelease→main cut → clean minor (strips the -nightly.N suffix), committed + pushed
+#            + published @latest via the same stable machinery. Deterministic (level-independent).
 
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
+
+# Release channel. Validated after the helpers are defined (needs log()).
+MODE="${OURS_RELEASE_MODE:-stable}"
 
 # name|json-path|pin-dep (pin-dep empty = none). Order matters: publish/bump in this order.
 MANAGED=(
@@ -44,6 +59,24 @@ while IFS= read -r f; do PLUGIN_MANIFESTS+=("$f"); done \
 emit() { [[ -n "${GITHUB_OUTPUT:-}" ]] && printf '%s\n' "$1" >> "$GITHUB_OUTPUT" || true; }
 log()  { printf '[bump] %s\n' "$*"; }
 
+case "$MODE" in stable|nightly|promote) ;; *) echo "[bump] unknown OURS_RELEASE_MODE '$MODE' (want stable|nightly|promote)" >&2; exit 1 ;; esac
+log "release mode: $MODE"
+
+# Highest existing <minor_base>-nightly.<N> index published for a package on npm, else 0.
+# Robust against npm view returning a JSON array, a single JSON string, or nothing.
+nightly_max_index() { # <pkg-name> <minor_base>
+  npm view "$1" versions --json 2>/dev/null | node -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      let a; try { a = JSON.parse(s || "[]"); } catch { a = []; }
+      if (!Array.isArray(a)) a = [a];
+      const re = new RegExp("^" + process.argv[1].replace(/[.]/g,"\\.") + "-nightly\\.(\\d+)$");
+      let max = 0;
+      for (const v of a) { const m = re.exec(String(v)); if (m) max = Math.max(max, parseInt(m[1],10)); }
+      process.stdout.write(String(max));
+    });
+  ' "$2"
+}
+
 no_bump() {
   log "no bump: $1"
   emit "bumped=false"
@@ -51,27 +84,31 @@ no_bump() {
   exit 0
 }
 
-msg=$(git log -1 --pretty=%B HEAD)
-subject=$(printf '%s\n' "$msg" | head -n1)
-body=$(printf '%s\n' "$msg" | tail -n +2)
-log "head subject: $subject"
+# Conventional-Commits level drives stable bumps only. nightly ignores commit type (every
+# prerelease push yields a nightly); promote is deterministic (always the clean minor).
+if [[ "$MODE" == stable ]]; then
+  msg=$(git log -1 --pretty=%B HEAD)
+  subject=$(printf '%s\n' "$msg" | head -n1)
+  body=$(printf '%s\n' "$msg" | tail -n +2)
+  log "head subject: $subject"
 
-printf '%s\n' "$msg" | grep -qiE '\[skip ci\]|\[ci skip\]' && no_bump "[skip ci] marker present"
+  printf '%s\n' "$msg" | grep -qiE '\[skip ci\]|\[ci skip\]' && no_bump "[skip ci] marker present"
 
-if printf '%s\n' "$subject" | grep -qE '^[a-z]+(\([^)]+\))?!:' \
-   || printf '%s\n' "$body" | grep -qE '^BREAKING CHANGE:'; then
-  level=major
-else
-  type=$(printf '%s\n' "$subject" | grep -oE '^[a-z]+' || true)
-  case "$type" in
-    feat)                                level=minor ;;
-    fix)                                 level=patch ;;
-    ci|test|docs|chore)                  level=none  ;;
-    *)                                   level=patch ;;
-  esac
+  if printf '%s\n' "$subject" | grep -qE '^[a-z]+(\([^)]+\))?!:' \
+     || printf '%s\n' "$body" | grep -qE '^BREAKING CHANGE:'; then
+    level=major
+  else
+    type=$(printf '%s\n' "$subject" | grep -oE '^[a-z]+' || true)
+    case "$type" in
+      feat)                                level=minor ;;
+      fix)                                 level=patch ;;
+      ci|test|docs|chore)                  level=none  ;;
+      *)                                   level=patch ;;
+    esac
+  fi
+  [[ "$level" == none ]] && no_bump "non-shipping commit type (${type:-<empty>})"
+  log "bump level: $level"
 fi
-[[ "$level" == none ]] && no_bump "non-shipping commit type (${type:-<empty>})"
-log "bump level: $level"
 
 bump() { # <version> <level>
   local a b c; IFS=. read -r a b c <<<"$1"
@@ -95,18 +132,42 @@ pin_dep() { # <pkg-json> <dep-name> <dep-new-version>
     || { echo "[bump] failed to pin ${2}@${3} in $1" >&2; exit 1; }
 }
 
-# Pass 0: ONE suite version — bump from the MAX of every managed package's max(local, published),
-# so the result is strictly greater than anything npm has for ANY of them (all publishable).
+# Pass 0: ONE suite base — the MAX of every managed package's max(local, published-@latest),
+# so any bump over it is strictly greater than anything npm has for ANY of them (all publishable).
+# `npm view <pkg> version` is the LATEST dist-tag only, so nightly prereleases never raise the base.
 base="0.0.0"
 for entry in "${MANAGED[@]}"; do
   IFS='|' read -r name path _pin <<<"$entry"
   local_v=$(jq -r .version "$path")
   pub_v=$(npm view "$name" version 2>/dev/null || echo "0.0.0")
   base=$(printf '%s\n%s\n%s\n' "$base" "$local_v" "$pub_v" | sort -V | tail -1)
-  log "$name: local $local_v, published $pub_v"
+  log "$name: local $local_v, published(@latest) $pub_v"
 done
-UNIFIED=$(bump "$base" "$level")
-log "suite version: $base -> $UNIFIED (single $level bump over the max across all packages)"
+
+case "$MODE" in
+  stable)
+    UNIFIED=$(bump "$base" "$level")
+    log "suite version: $base -> $UNIFIED (single $level bump over the max across all packages)"
+    ;;
+  promote)
+    # Deterministic cycle cut: the clean minor this prerelease cycle targeted, no -nightly suffix.
+    UNIFIED=$(bump "$base" minor)
+    log "promote: $base -> $UNIFIED (clean @latest minor; strips the -nightly.N suffix)"
+    ;;
+  nightly)
+    minor_base=$(bump "$base" minor)                      # e.g. 0.11.2 -> 0.12.0
+    # N = 1 + highest existing <minor_base>-nightly.* across the WHOLE suite (lockstep + no collision).
+    maxn=0
+    for entry in "${MANAGED[@]}"; do
+      IFS='|' read -r name _path _pin <<<"$entry"
+      n=$(nightly_max_index "$name" "$minor_base")
+      log "$name: highest $minor_base-nightly.* on npm = $n"
+      [[ "$n" -gt "$maxn" ]] && maxn=$n
+    done
+    UNIFIED="${minor_base}-nightly.$((maxn + 1))"
+    log "nightly: base $base -> minor $minor_base -> $UNIFIED (N = max($maxn) + 1 across suite)"
+    ;;
+esac
 
 # Pass 1: apply the suite version to every managed package.json + every plugin manifest.
 declare -A NEWV
@@ -135,7 +196,9 @@ for entry in "${MANAGED[@]}"; do
   log "pinned ${pin}@${NEWV[$pin]} in ${name}"
 done
 
-npm install --package-lock-only --ignore-scripts >/dev/null
+# The committed release channels refresh the lockfile; nightly is ephemeral (never committed),
+# and its internal pins resolve to the local workspace, so it neither needs nor touches the lock.
+[[ "$MODE" != nightly ]] && npm install --package-lock-only --ignore-scripts >/dev/null
 
 # Load-bearing publish invariant: do not push a release commit with mismatched package,
 # native-manifest, or internal-dependency versions.
@@ -167,6 +230,22 @@ if [[ -n "${OURS_BUMP_DRY_RUN:-}" ]]; then
   exit 0
 fi
 
+# nightly is EPHEMERAL: the working tree now carries the -nightly.N version for the publish job to
+# consume; we do NOT commit or push (keeps prerelease history clean; N re-derives from npm each run).
+if [[ "$MODE" == nightly ]]; then
+  log "nightly: version $UNIFIED set in the working tree; NOT committing (publish runs from here)."
+  emit "bumped=true"
+  emit "new-sha=${GITHUB_SHA:-$(git rev-parse HEAD)}"
+  emit "unified-version=${UNIFIED}"
+  emit "core-version=${NEWV[@ours.network/mcp]}"
+  emit "plugin-version=${NEWV[@ours.network/claude-code]}"
+  emit "hermes-version=${NEWV[@ours.network/hermes]}"
+  emit "codex-version=${NEWV[@ours.network/codex]}"
+  emit "install-version=${NEWV[@ours.network/install]}"
+  exit 0
+fi
+
+# stable + promote: commit the release and push (promote lands on main via the same machinery).
 git config user.name  "ours-ci-version-bump[bot]"
 git config user.email "ours-ci-version-bump[bot]@users.noreply.github.com"
 git add "${files[@]}"
@@ -174,7 +253,7 @@ git diff --cached --quiet && no_bump "no changes after patch"
 
 git commit -m "chore(release): ${summary} [skip ci]
 
-Triggered by $(git rev-parse --short HEAD): $(printf '%s' "$subject" | head -c 200)"
+Triggered by $(git rev-parse --short HEAD): $(printf '%s' "${subject:-${MODE} cut}" | head -c 200)"
 git push origin "HEAD:${GITHUB_REF_NAME:-main}"
 
 emit "bumped=true"
