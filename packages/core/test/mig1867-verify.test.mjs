@@ -68,7 +68,9 @@ export function verify1867ForCid(logs, cid, snap = {}) {
   const preSids = [...new Set(preApp.map((x) => x.session_id))];
   const baseline = preSnap ?? (preSids.length ? preSids[0] : undefined);
   let rotationProven = false;
-  if (baseline !== undefined) {
+  if (baseline !== undefined && active) {
+    // rotation is only meaningful against a REAL active pin; without [migration] active there is
+    // nothing to compare (an undefined pin trivially != baseline — the spurious-true trap).
     if (pin === baseline) problems.push(`session did NOT rotate: active pin == pre-migration baseline ${baseline}`);
     else rotationProven = true;
   } else if (active) {
@@ -123,6 +125,18 @@ test('verify1867ForCid: does NOT overclaim — FAILS when there is NO pre-migrat
   assert.equal(r.ok, false);
   assert.equal(r.rotationProven, false);
   assert.match(r.problems.join('|'), /rotation NOT proven/);
+});
+
+test('verify1867ForCid: baseline present but NO [migration] active must NOT claim rotation (spurious-true trap)', () => {
+  // The both-caps-from-boot determinism case: pre-migration baseline forms (e2e-pinned), but
+  // migration never triggers (no active line). rotationProven must stay FALSE — an undefined pin
+  // trivially differs from the baseline, which previously read as a false rotation proof.
+  const logs = [PRELINE('p0'), PRELINE('p1')].join('\n');          // baseline lines only, no ACTIVE
+  const r = verify1867ForCid(logs, CID);
+  assert.equal(r.baseline, PRE);
+  assert.equal(r.rotationProven, false);                           // NOT spuriously true
+  assert.equal(r.ok, false);
+  assert.match(r.problems.join('|'), /no \[migration\] active/);
 });
 
 test('verify1867ForCid: FAILS when the session did not rotate (pin == pre-migration baseline)', () => {
