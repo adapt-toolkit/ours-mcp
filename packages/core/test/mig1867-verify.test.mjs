@@ -11,59 +11,71 @@ import assert from 'node:assert/strict';
 //   [e2e-app] recv cid=<cid> session_id=<hex> ok=<bool> wire_id=<id>
 //   [migration] active cid=<cid> role=<initiator|responder> epoch=<hex> session_id=<hex>
 export function parseE2eLogs(text) {
+  // Each record carries `at` (line index) so the verifier can split [e2e-app] lines PRE vs POST the
+  // [migration] active line — the pre ones are the pre-migration baseline for the rotation proof.
   const sends = [], recvs = [], actives = [];
-  for (const line of String(text).split('\n')) {
+  String(text).split('\n').forEach((line, at) => {
     let m;
     if ((m = line.match(/\[e2e-app\] send cid=(\S+) session_id=(\S+) olm_type=(\S+) wire_id=(\S+)/)))
-      sends.push({ cid: m[1], session_id: m[2], olm_type: m[3], wire_id: m[4] });
+      sends.push({ at, cid: m[1], session_id: m[2], olm_type: m[3], wire_id: m[4] });
     else if ((m = line.match(/\[e2e-app\] recv cid=(\S+) session_id=(\S+) ok=(\S+) wire_id=(\S+)/)))
-      recvs.push({ cid: m[1], session_id: m[2], ok: m[3] === 'true', wire_id: m[4] });
+      recvs.push({ at, cid: m[1], session_id: m[2], ok: m[3] === 'true', wire_id: m[4] });
     else if ((m = line.match(/\[migration\] active cid=(\S+) role=(\S+) epoch=(\S+) session_id=(\S+)/)))
-      actives.push({ cid: m[1], role: m[2], epoch: m[3], session_id: m[4] });
-  }
+      actives.push({ at, cid: m[1], role: m[2], epoch: m[3], session_id: m[4] });
+  });
   return { sends, recvs, actives };
 }
 
-// #1867 assertion for ONE migrated contact on ONE node's logs. The session_id in every [e2e-app]
-// send/recv MUST equal the [migration] active pin, the pin MUST differ from the pre-migration session
-// id (it rotated), and there MUST be at least one app send/recv over the migrated session (proof that
-// app data actually traversed it).
+// #1867 assertion for ONE migrated contact on ONE node's logs. A real proof needs BOTH halves:
+//   (1) CONSISTENCY — every POST-migration [e2e-app] send/recv session_id == the [migration] active
+//       pin, and recv ok=true (app data actually rode the migrated session), AND
+//   (2) ROTATION — the active pin DIFFERS from the PRE-migration baseline session (MR2's DRY fix): the
+//       migrated session is a NEW ratchet, not the old one. Consistency alone is NOT #1867 — a session
+//       that never rotated would still be internally consistent. So rotation is REQUIRED, not optional.
 //
-// `snap.pre` / `snap.post` are AUTHORITATIVE active_session_id(cid) snapshots taken by the harness via
-// the readonly trn — pre-migration and post-active. Passing `snap.post` hardens the ROTATION REFERENCE:
-// it proves the pin ROTATED against an INDEPENDENT value (`snap.post != snap.pre`, not a notify) and
-// catches a wrong/untrustworthy pin (`pin != snap.post`).
+// The baseline comes from EITHER an authoritative `snap.pre` (a pre-migration active_session_id snapshot
+// the harness captured) OR — since the e2e_active_session trn was dropped @407a3ad — the session_id of a
+// PRE-migration [e2e-app] line (an [e2e-app] emit that appears in the log BEFORE the [migration] active
+// line). If NEITHER exists, rotation CANNOT be proven and the verdict FAILS (it must not overclaim):
+// the log-shape must include a pre-migration [e2e-app] baseline (guide §3 establishes a pre-migration
+// e2e session before the migration triggers) or a snap.pre snapshot.
 //
-// IMPORTANT (per MigrationReview): anchoring does NOT close the app-line circularity. If core sources
-// the [e2e-app] notify session_id by RE-READING active_session_id, a stale-session send (app actually
-// rode PRE) is LOGGED as POST — which equals the authoritative post, so it PASSES here (masked). The
-// app-line is made truthful ONLY by core sourcing session_id from the REAL send/recv envelope
-// (encrypt_to's result / the decrypted envelope). That core-side fix is REQUIRED and COMPLEMENTARY —
-// this anchoring hardens the reference; the real-envelope sourcing makes the measured line honest.
-// Together = a real #1867 proof.
+// `snap.post` (if provided) additionally anchors the pin on an INDEPENDENT authoritative value
+// (pin == snap.post), hardening the reference. NOTE (MR2): app-line truthfulness (that a POST line's
+// session_id came from the REAL send/recv envelope, not a re-read of active_session_id) is a
+// COMPLEMENTARY core-side guarantee this readout can't establish from logs alone.
 export function verify1867ForCid(logs, cid, snap = {}) {
-  const pre = typeof snap === 'string' ? snap : snap.pre;  // back-compat: a bare string == pre snapshot
+  const preSnap = typeof snap === 'string' ? snap : snap.pre;   // back-compat: a bare string == pre snapshot
   const post = typeof snap === 'string' ? undefined : snap.post;
   const { sends, recvs, actives } = parseE2eLogs(logs);
   const active = actives.find((a) => a.cid === cid);
   const problems = [];
   if (!active) problems.push('no [migration] active line for cid');
   const pin = active?.session_id;
-  if (active && pre && pin === pre) problems.push('active session_id did not rotate (== pre-migration)');
-  // Anchor on the authoritative post-migration snapshot when available (non-circular proof).
-  if (active && post) {
-    if (pin !== post) problems.push(`active pin ${pin} != authoritative active_session_id ${post}`);
-    if (pre && post === pre) problems.push('authoritative active_session_id did not rotate (post == pre)');
+  const activeAt = active ? active.at : Infinity;
+  const truth = post || pin;
+  const mine = [...sends.filter((s) => s.cid === cid), ...recvs.filter((r) => r.cid === cid)];
+  const preApp = mine.filter((x) => x.at < activeAt);            // pre-migration [e2e-app] = baseline
+  const postApp = mine.filter((x) => x.at > activeAt);           // migrated [e2e-app] = must == pin
+
+  // (1) CONSISTENCY — post-migration app lines ride the pin; recvs decrypt.
+  for (const x of postApp) if (x.session_id !== truth) problems.push(`post wire_id=${x.wire_id} session_id ${x.session_id} != ${post ? 'authoritative' : 'active pin'} ${truth}`);
+  for (const r of recvs.filter((r) => r.cid === cid && r.at > activeAt)) if (!r.ok) problems.push(`recv wire_id=${r.wire_id} ok=false (decrypt failed)`);
+  if (active && postApp.length === 0) problems.push('no POST-migration [e2e-app] for cid — no app data proven over the migrated session');
+  if (active && post && pin !== post) problems.push(`active pin ${pin} != authoritative active_session_id ${post}`);
+
+  // (2) ROTATION — active pin must differ from the pre-migration baseline (snap.pre OR a pre-active line).
+  const preSids = [...new Set(preApp.map((x) => x.session_id))];
+  const baseline = preSnap ?? (preSids.length ? preSids[0] : undefined);
+  let rotationProven = false;
+  if (baseline !== undefined) {
+    if (pin === baseline) problems.push(`session did NOT rotate: active pin == pre-migration baseline ${baseline}`);
+    else rotationProven = true;
+  } else if (active) {
+    problems.push('rotation NOT proven: no pre-migration baseline (no [e2e-app] session_id before [migration] active, and no snap.pre) — consistency-only, does not establish #1867');
   }
-  const truth = post || pin; // compare app lines against the authoritative value when we have it
-  const mySends = sends.filter((s) => s.cid === cid);
-  const myRecvs = recvs.filter((r) => r.cid === cid);
-  for (const s of mySends) if (s.session_id !== truth) problems.push(`send wire_id=${s.wire_id} session_id ${s.session_id} != ${post ? 'authoritative' : 'active pin'} ${truth}`);
-  for (const r of myRecvs) if (r.session_id !== truth) problems.push(`recv wire_id=${r.wire_id} session_id ${r.session_id} != ${post ? 'authoritative' : 'active pin'} ${truth}`);
-  for (const r of myRecvs) if (!r.ok) problems.push(`recv wire_id=${r.wire_id} ok=false (decrypt failed)`);
-  const appLines = mySends.length + myRecvs.length;
-  if (active && appLines === 0) problems.push('no [e2e-app] send/recv for cid — no app data proven over the migrated session');
-  return { ok: problems.length === 0, pin, appLines, sends: mySends.length, recvs: myRecvs.length, problems };
+
+  return { ok: problems.length === 0, pin, baseline, rotationProven, appLines: postApp.length, sends: postApp.filter((x) => 'olm_type' in x).length, recvs: postApp.filter((x) => 'ok' in x).length, problems };
 }
 
 // --- tests against synthetic FROZEN-format lines ----------------------------------------------
@@ -85,89 +97,86 @@ test('parseE2eLogs: extracts send/recv/active from the frozen §4 format', () =>
   assert.equal(p.recvs[0].ok, true);
 });
 
-test('verify1867ForCid: PASSES when app data rides the rotated session on both send + recv', () => {
+const ACTIVE = (pin, role = 'responder') => `[migration] active cid=${CID} role=${role} epoch=${'ee'.repeat(16)} session_id=${pin}`;
+const PRELINE = (w = 'p0') => `[e2e-app] send cid=${CID} session_id=${PRE} olm_type=1 wire_id=${w}`;  // pre-migration baseline
+
+test('verify1867ForCid: PASSES with rotation proven from a PRE-migration [e2e-app] baseline (log-derived)', () => {
   const logs = [
-    `[migration] active cid=${CID} role=responder epoch=${'ee'.repeat(16)} session_id=${POST}`,
+    PRELINE(),                                                    // pre-migration session = PRE (baseline)
+    ACTIVE(POST),                                                 // migrated pin = POST (rotated)
     `[e2e-app] send cid=${CID} session_id=${POST} olm_type=0 wire_id=w1`,
     `[e2e-app] recv cid=${CID} session_id=${POST} ok=true wire_id=w2`,
   ].join('\n');
-  const r = verify1867ForCid(logs, CID, PRE);
+  const r = verify1867ForCid(logs, CID);                         // no snap — baseline from the pre line
   assert.equal(r.ok, true, JSON.stringify(r.problems));
-  assert.equal(r.pin, POST);
-  assert.equal(r.appLines, 2);
+  assert.equal(r.rotationProven, true);
+  assert.equal(r.pin, POST); assert.equal(r.baseline, PRE); assert.equal(r.appLines, 2);
 });
 
-test('verify1867ForCid: FAILS when the session did not rotate (pin == pre-migration)', () => {
+test('verify1867ForCid: does NOT overclaim — FAILS when there is NO pre-migration baseline (consistency-only)', () => {
   const logs = [
-    `[migration] active cid=${CID} role=initiator epoch=${'ee'.repeat(16)} session_id=${PRE}`,
-    `[e2e-app] send cid=${CID} session_id=${PRE} olm_type=1 wire_id=w1`,
+    ACTIVE(POST),
+    `[e2e-app] send cid=${CID} session_id=${POST} olm_type=0 wire_id=w1`,
+    `[e2e-app] recv cid=${CID} session_id=${POST} ok=true wire_id=w2`,
   ].join('\n');
-  const r = verify1867ForCid(logs, CID, PRE);
+  const r = verify1867ForCid(logs, CID);                         // no snap, no pre-migration [e2e-app] line
   assert.equal(r.ok, false);
-  assert.match(r.problems.join('|'), /did not rotate/);
+  assert.equal(r.rotationProven, false);
+  assert.match(r.problems.join('|'), /rotation NOT proven/);
 });
 
-test('verify1867ForCid: FAILS when an app send used a different session than the active pin', () => {
-  const logs = [
-    `[migration] active cid=${CID} role=initiator epoch=${'ee'.repeat(16)} session_id=${POST}`,
-    `[e2e-app] send cid=${CID} session_id=${'cc'.repeat(16)} olm_type=1 wire_id=w1`,
-  ].join('\n');
-  const r = verify1867ForCid(logs, CID, PRE);
+test('verify1867ForCid: FAILS when the session did not rotate (pin == pre-migration baseline)', () => {
+  const logs = [PRELINE(), ACTIVE(PRE, 'initiator'), `[e2e-app] send cid=${CID} session_id=${PRE} olm_type=1 wire_id=w1`].join('\n');
+  const r = verify1867ForCid(logs, CID);
+  assert.equal(r.ok, false);
+  assert.match(r.problems.join('|'), /did NOT rotate/);
+});
+
+test('verify1867ForCid: FAILS when a POST-migration app send used a different session than the pin', () => {
+  const logs = [PRELINE(), ACTIVE(POST), `[e2e-app] send cid=${CID} session_id=${'cc'.repeat(16)} olm_type=1 wire_id=w1`].join('\n');
+  const r = verify1867ForCid(logs, CID);
   assert.equal(r.ok, false);
   assert.match(r.problems.join('|'), /!= active pin/);
 });
 
-test('verify1867ForCid: FAILS when active is present but NO app data traversed the migrated session', () => {
-  const logs = `[migration] active cid=${CID} role=initiator epoch=${'ee'.repeat(16)} session_id=${POST}`;
-  const r = verify1867ForCid(logs, CID, PRE);
+test('verify1867ForCid: FAILS when there is NO post-migration app data over the migrated session', () => {
+  const logs = [PRELINE(), ACTIVE(POST)].join('\n');             // baseline present, but nothing rode the new session
+  const r = verify1867ForCid(logs, CID);
   assert.equal(r.ok, false);
-  assert.match(r.problems.join('|'), /no \[e2e-app\] send\/recv/);
+  assert.match(r.problems.join('|'), /no POST-migration/);
 });
 
 test('verify1867ForCid: FAILS on a recv that did not decrypt (ok=false)', () => {
-  const logs = [
-    `[migration] active cid=${CID} role=responder epoch=${'ee'.repeat(16)} session_id=${POST}`,
-    `[e2e-app] recv cid=${CID} session_id=${POST} ok=false wire_id=w2`,
-  ].join('\n');
-  const r = verify1867ForCid(logs, CID, PRE);
+  const logs = [PRELINE(), ACTIVE(POST), `[e2e-app] recv cid=${CID} session_id=${POST} ok=false wire_id=w2`].join('\n');
+  const r = verify1867ForCid(logs, CID);
   assert.equal(r.ok, false);
   assert.match(r.problems.join('|'), /ok=false/);
 });
 
-// --- authoritative-snapshot anchoring (non-circular, per MigrationReview's soundness note) -----
-test('verify1867ForCid: PASSES against the authoritative {pre,post} active_session_id snapshot', () => {
-  const logs = [
-    `[migration] active cid=${CID} role=initiator epoch=${'ee'.repeat(16)} session_id=${POST}`,
+// --- authoritative-snapshot anchoring (non-circular; supplies the baseline when there's no pre line) --
+test('verify1867ForCid: PASSES against the authoritative {pre,post} snapshot (rotation via snap.pre)', () => {
+  const logs = [                                                 // NO pre-migration [e2e-app] line…
+    ACTIVE(POST),
     `[e2e-app] send cid=${CID} session_id=${POST} olm_type=1 wire_id=w1`,
     `[e2e-app] recv cid=${CID} session_id=${POST} ok=true wire_id=w2`,
   ].join('\n');
-  const r = verify1867ForCid(logs, CID, { pre: PRE, post: POST });
+  const r = verify1867ForCid(logs, CID, { pre: PRE, post: POST });  // …snap.pre supplies the baseline
   assert.equal(r.ok, true, JSON.stringify(r.problems));
+  assert.equal(r.rotationProven, true);
 });
 
-test('verify1867ForCid: authoritative anchoring catches a WRONG PIN that pin-only self-consistency accepts', () => {
-  // What {pre,post} anchoring adds OVER pin-only: the [migration] active pin is internally consistent
-  // (all app lines == pin, pin != pre) so pin-only PASSES — but the pin is a WRONG value W, not the
-  // authoritative post. Anchoring catches `pin != authoritative post`. (This is a reference/pin check,
-  // NOT app-line de-circularization — see the header note; the app-line honesty is core's job.)
+test('verify1867ForCid: authoritative anchoring catches a WRONG PIN that a log-only check accepts', () => {
   const W = 'dd'.repeat(16); // a wrong session id, != PRE and != POST
-  const logs = [
-    `[migration] active cid=${CID} role=initiator epoch=${'ee'.repeat(16)} session_id=${W}`,
-    `[e2e-app] send cid=${CID} session_id=${W} olm_type=1 wire_id=w1`,
-    `[e2e-app] recv cid=${CID} session_id=${W} ok=true wire_id=w2`,
-  ].join('\n');
-  assert.equal(verify1867ForCid(logs, CID, PRE).ok, true, 'pin-only self-consistency accepts a wrong-but-consistent pin');
+  const logs = [PRELINE(), ACTIVE(W), `[e2e-app] send cid=${CID} session_id=${W} olm_type=1 wire_id=w1`, `[e2e-app] recv cid=${CID} session_id=${W} ok=true wire_id=w2`].join('\n');
+  assert.equal(verify1867ForCid(logs, CID).ok, true, 'log-only: W is consistent + rotated vs PRE baseline');
   const r = verify1867ForCid(logs, CID, { pre: PRE, post: POST });
   assert.equal(r.ok, false, 'anchoring rejects: pin != authoritative post');
   assert.match(r.problems.join('|'), /!= authoritative/);
 });
 
 test('verify1867ForCid: FAILS when the authoritative snapshot did not rotate (post == pre)', () => {
-  const logs = [
-    `[migration] active cid=${CID} role=initiator epoch=${'ee'.repeat(16)} session_id=${PRE}`,
-    `[e2e-app] send cid=${CID} session_id=${PRE} olm_type=1 wire_id=w1`,
-  ].join('\n');
+  const logs = [ACTIVE(PRE, 'initiator'), `[e2e-app] send cid=${CID} session_id=${PRE} olm_type=1 wire_id=w1`].join('\n');
   const r = verify1867ForCid(logs, CID, { pre: PRE, post: PRE });
   assert.equal(r.ok, false);
-  assert.match(r.problems.join('|'), /did not rotate/);
+  assert.match(r.problems.join('|'), /did NOT rotate/);
 });
