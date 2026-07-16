@@ -483,6 +483,14 @@ application actor loads libraries
                 caps (a2a_capabilities::cap_cluster) -> (
                     $cap -> a2a_capabilities::cap_cluster, $version -> 1, $params -> "", $secrets -> (,)
                 ).
+                // core.e2e.migrate (Phase F): advertise that this node participates in the e2e
+                // session MIGRATION handshake. The auto-trigger (mig_should_trigger) fires only when
+                // BOTH peers advertise this cap — so both nodes must carry it. Keyed off the shared
+                // core constant a2a_capabilities::cap_e2e_migrate ("core.e2e.migrate") so the id can't
+                // drift. (Enables #1867 migrated-session app delivery; DAEMON-INTEGRATION.md §0.)
+                caps (a2a_capabilities::cap_e2e_migrate) -> (
+                    $cap -> a2a_capabilities::cap_e2e_migrate, $version -> 1, $params -> "", $secrets -> (,)
+                ).
                 // DUAL-ADVERTISE (critic R6-6): also advertise the legacy app-scoped
                 // "app.agents" id so a mixed-version control plane that still gates on
                 // the old alias recognizes this node's cluster support and does not
@@ -515,6 +523,12 @@ application actor loads libraries
             // ($sender_id,$cap,$verb) is allowed.
             $authorizer -> a2a_messaging::authorize_control,
             $supported  -> cap_supported,
+            // $advertise (Phase F): caps advertised on the wire piggyback ($caps in invite/restore
+            // bundles) → self_caps, so self_advertises(cap_e2e_migrate)=TRUE and PEERS learn it into
+            // contact_caps. This is what gates mig_should_trigger — NOT the $describe manifest (which
+            // feeds the control-plane get_manifest, a different surface). No handler needed (unlike
+            // $supported). Both nodes carry it ⇒ the migration auto-trigger fires (#1867).
+            $advertise  -> [ a2a_capabilities::cap_e2e, a2a_capabilities::cap_e2e_migrate ],
             $handlers   -> cap_handlers,
             $on_unknown -> fn (_: any) -> transaction::action::type[] { return []. }
         ).
