@@ -221,9 +221,18 @@ export function validateName(name: string): string | null {
 function locateUnit(): { dir: string; hash: string; contents: Uint8Array } {
   const here = dirname(fileURLToPath(import.meta.url));
   const override = process.env.OURS_UNIT_DIR;
+  // Staged-advertise boot (#1867 e2e-migration): OURS_ADVERTISE_MIGRATE=0 boots this node
+  // WITHOUT the core.e2e.migrate cap so an e2e pair forms a plain session first; the node
+  // enables migration later at runtime via the advertise_migrate tool. This is a purely
+  // additive alias over OURS_UNIT_DIR — it prefers a sibling "<dir>-nocap" packet variant
+  // (compiled with $advertise = [core.e2e] only). Unset/any-other value = the default
+  // cap-on packet, byte-identical to prior behavior (no regression). Missing variant is a
+  // loud error so a staged co-run never silently boots cap-on.
+  const noCap = process.env.OURS_ADVERTISE_MIGRATE === '0';
+  const withNoCap = (dir: string): string[] => (noCap ? [`${dir}-nocap`] : [dir]);
   const candidates = override
-    ? [resolve(override)]
-    : [join(here, 'mufl_code'), join(here, '..', 'mufl_code')];
+    ? withNoCap(resolve(override))
+    : [join(here, 'mufl_code'), join(here, '..', 'mufl_code')].flatMap(withNoCap);
   for (const dir of candidates) {
     if (!fs.existsSync(dir)) continue;
     const muflo = fs.readdirSync(dir).find((f) => f.endsWith('.muflo'));
@@ -234,7 +243,10 @@ function locateUnit(): { dir: string; hash: string; contents: Uint8Array } {
     }
   }
   throw new Error(
-    `no compiled .muflo packet found (looked in: ${candidates.join(', ')})`,
+    `no compiled .muflo packet found (looked in: ${candidates.join(', ')})` +
+      (noCap
+        ? ' — OURS_ADVERTISE_MIGRATE=0 requires a "<dir>-nocap" packet variant (compiled with $advertise = [core.e2e] only); build it or unset the env.'
+        : ''),
   );
 }
 
@@ -3004,6 +3016,40 @@ function createMcpServer(getSessionId: () => string): McpServer {
         return textResult(`Updated the bio of "${id!.name}".${suffix}`);
       } catch (e) {
         return textResult(`set_bio failed: ${String(e)}`, true);
+      }
+    },
+  );
+
+  server.tool(
+    'advertise_migrate',
+    'Enable the e2e-migration capability (core.e2e.migrate) at runtime on the bound ' +
+      'identity and proactively offer migration to every already-known eligible e2e ' +
+      'contact. This is the staged-advertise trigger: an identity booted WITHOUT the ' +
+      'migrate cap (so it forms a plain e2e session first) calls this to start the SAME ' +
+      'migrations a default-cap boot would — closing the already-e2e-pair gap where a ' +
+      'pinned pair with no inbound traffic would otherwise never migrate. Idempotent: ' +
+      're-enabling is a no-op for the cap, and the offer election stays fail-closed. ' +
+      'Returns how many migration offers were initiated.',
+    {},
+    async () => {
+      const { id, err } = boundOr();
+      if (err) return err;
+      try {
+        const { wasAdvertising, advertising, offers } = await withScopeAsync(async (lt) => {
+          const r = await mutatingTx(id!, '::a2a_messaging::advertise_migrate', {}, lt);
+          return {
+            wasAdvertising: r.Reduce('was_advertising').Visualize() === 'true',
+            advertising: r.Reduce('advertising').Visualize() === 'true',
+            offers: parseInt(r.Reduce('offers_initiated').Visualize(), 10) || 0,
+          };
+        });
+        const already = wasAdvertising ? ' (already advertising — cap unchanged)' : '';
+        return textResult(
+          `advertise_migrate: core.e2e.migrate ${advertising ? 'advertised' : 'NOT advertised'}${already}; ` +
+            `${offers} migration offer(s) initiated to eligible e2e contact(s).`,
+        );
+      } catch (e) {
+        return textResult(`advertise_migrate failed: ${String(e)}`, true);
       }
     },
   );
