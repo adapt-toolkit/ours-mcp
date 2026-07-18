@@ -14,6 +14,6 @@
     "dev": "npm --workspace @ours.network/mcp run dev"
   },
   "devDependencies": {
-    "@adapt-toolkit/mufl": "0.10.5"
+    "@adapt-toolkit/mufl": "0.10.7"
   }
 }
