@@ -107,6 +107,7 @@ import {
 } from './config';
 import { OURS_COMPAT_VERSION } from './protocol';
 import { mimeFromExt, sanitizeFilename } from './files.js';
+import { e2eWireIdsFromEvents, buildMessagesPayload } from './inbox.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -1549,6 +1550,26 @@ function appendNotifyLog(id: Identity, event: Record<string, unknown>): void {
     log(`[${id.name}] failed to append notifications.log:`, String(err));
   }
   fireNotifyWaiters(id.name); // wake held-open long-poll streams for this identity
+}
+
+// Read the whole notifications.log for an identity and return the set of wire_ids
+// that arrived over the E2E / double-ratchet route (e2e_app_recv / migration_deferred_flush).
+// Used to tag each get_messages entry with its transport (see src/inbox.ts). Best-effort:
+// a missing/unreadable/partial log yields an empty set (⇒ everything reads "legacy").
+function readE2eWireIds(id: Identity): Set<string> {
+  const logPath = notifyLogPath(id.dir);
+  let text = '';
+  try {
+    text = fs.readFileSync(logPath, 'utf8');
+  } catch {
+    return new Set();
+  }
+  const events: Record<string, unknown>[] = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try { events.push(JSON.parse(line) as Record<string, unknown>); } catch { /* skip malformed */ }
+  }
+  return e2eWireIdsFromEvents(events);
 }
 
 // Hex a binary AdaptValue field (session_id / epoch are `bin` per the #1867 §4 log contract —
@@ -3379,9 +3400,11 @@ function createMcpServer(getSessionId: () => string): McpServer {
       'never double-processes — no acknowledgement call is needed. If you read a message ' +
       'but crash or want to hand it to another session before acting, call defer_messages ' +
       'to put it back to "unread"; otherwise handled messages are garbage-collected ' +
-      'automatically. Each message shows its {wire_id} and, if it is a reply, a ' +
-      '"↳re <wire_id>" pointer; pass a wire_id as reply_to_wire_id in send_message ' +
-      'to reply to that specific message.',
+      'automatically. Returns ALWAYS-JSON: { count, messages: [{ msg_id, wire_id, ' +
+      'from:{id,name}, encryption ("legacy" for a legacy box | "e2e" for the ' +
+      'double-ratchet path), transport, text, date, status, reply_to }] } — so you can ' +
+      'tell HOW each message arrived (ask the agent "how did you receive this"). Pass a ' +
+      "message's wire_id as reply_to_wire_id in send_message to reply to it specifically.",
     {},
     async () => {
       const { id, err } = boundOr();
@@ -3392,12 +3415,13 @@ function createMcpServer(getSessionId: () => string): McpServer {
           return renderInbox(data.Reduce('messages'));
         });
         refreshUnread(id!);
-        if (fresh.length === 0) return textResult('No new messages.');
-        return textResult(
-          `${fresh.length} new message(s):\n${fresh.map((m) => fmtMsg(m, false)).join('\n')}\n\n` +
-            `These are now marked processed (auto-GC'd later). To hand any back to ` +
-            `another session: defer_messages({ msg_ids: [${fresh.map((m) => m.msg_id).join(', ')}] }).`,
-        );
+        // ALWAYS-JSON payload (owner 2026-07-17): every message carries `from`
+        // {id,name} and `encryption` ("legacy" box vs "e2e" double-ratchet), derived
+        // daemon-side by joining the message wire_id against the E2E receive notify
+        // events (src/inbox.ts). `text` stays accessible for existing consumers.
+        const e2eWireIds = readE2eWireIds(id!);
+        const payload = buildMessagesPayload(fresh, e2eWireIds);
+        return textResult(JSON.stringify(payload, null, 2));
       } catch (e) {
         return textResult(`get_messages failed: ${String(e)}`, true);
       }

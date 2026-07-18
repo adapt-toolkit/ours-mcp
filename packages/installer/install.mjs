@@ -24,10 +24,14 @@ import { askLine, askYesNo, isCancel } from './lib/prompt.mjs';
 import {
   suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
   detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
-  DEFAULT_PORT,
+  DEFAULT_PORT, resolveChannel, pkgSpec,
 } from './lib/logic.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
+// Release channel: OURS_CHANNEL=nightly installs @nightly for mcp/tg-connector/plugin
+// launchers but keeps @ours.network/fleet at @latest (fleet has no nightly). Default: latest.
+const CHANNEL = resolveChannel(process.env.OURS_CHANNEL || process.env.OURS_INSTALL_CHANNEL);
+const spec = (pkgKey) => pkgSpec(pkgKey, CHANNEL); // → "@ours.network/<key>@<tag>"
 let DRY = !!process.env.OURS_INSTALL_DRY_RUN;
 const SELFHOST_URL = 'ours.network';
 const CLAUDE_MARKET = 'adapt-toolkit/ours-claude-marketplace';
@@ -317,7 +321,7 @@ async function main() {
       // Without a daemon the rest is moot; go straight to the summary.
       return endScreen({ ttyFd, summary, chosenPort, chosenBroker });
     }
-    await actSpin('ensuring @ours.network/mcp@latest…', 'npm i -g @ours.network/mcp@latest', () => runAsync(NPM, ['i', '-g', '@ours.network/mcp@latest']));
+    await actSpin(`ensuring ${spec('mcp')}…`, `npm i -g ${spec('mcp')}`, () => runAsync(NPM, ['i', '-g', spec('mcp')]));
     const patch = { port: chosenPort };
     if (chosenBroker) patch.brokerUrl = chosenBroker;
     await act(`write config (${configPath()}) with port ${chosenPort}${chosenBroker ? ' + custom broker' : ''}`, async () => { writeConfigPatch(patch); return { ok: true }; });
@@ -332,7 +336,7 @@ async function main() {
     const running = daemonRunning();
     const upd = yes(`  ours core is installed (${before || '?'}) — check for an update now?`, false);
     if (upd) {
-      await actSpin('updating @ours.network/mcp@latest…', 'npm i -g @ours.network/mcp@latest', () => runAsync(NPM, ['i', '-g', '@ours.network/mcp@latest']));
+      await actSpin(`updating ${spec('mcp')}…`, `npm i -g ${spec('mcp')}`, () => runAsync(NPM, ['i', '-g', spec('mcp')]));
       const after = parseVersion(daemonVersionLine());
       if (before && after && before !== after) {
         await act(`ours-mcp restart (now v${after})`, async () => { if (!run('ours-mcp', ['restart']).ok) run('ours-mcp', ['start']); return { ok: true }; });
@@ -413,7 +417,7 @@ async function main() {
     const add = await act(`codex plugin marketplace add ${CODEX_MARKET}`, async () => run('codex', ['plugin', 'marketplace', 'add', CODEX_MARKET], { capture: true }));
     const inst = add.ok ? await act('codex plugin add ours@ours-codex-marketplace', async () => run('codex', ['plugin', 'add', 'ours@ours-codex-marketplace'], { capture: true })) : add;
     // Owner-mandated: choosing the Codex plugin ALSO installs the ours-codex live launcher, same step.
-    const wrap = inst.ok ? await actSpin('installing the ours-codex live launcher…', 'npm i -g @ours.network/codex@latest (provides ours-codex)', () => runAsync(NPM, ['i', '-g', '@ours.network/codex@latest'])) : inst;
+    const wrap = inst.ok ? await actSpin('installing the ours-codex live launcher…', `npm i -g ${spec('codex')} (provides ours-codex)`, () => runAsync(NPM, ['i', '-g', spec('codex')])) : inst;
     if (inst.ok && wrap.ok) {
       line(ok(`Codex plugin + ours-codex live launcher installed — pointed at port ${chosenPort}. No problems.`));
       // Plain-language: what ours-codex is and why you'd use it (background wake vs blocking).
@@ -451,7 +455,8 @@ async function main() {
   line(info('over Telegram so they talk to each other — and it all configures maximally easily.'));
   const goFleet = yes('  Install it?', true);
   if (goFleet) {
-    await actSpin('installing @ours.network/fleet@latest…', 'npm i -g @ours.network/fleet@latest', () => runAsync(NPM, ['i', '-g', '@ours.network/fleet@latest']));
+    // ours-fleet is ALWAYS @latest — it has no nightly tag (pkgSpec pins it even under OURS_CHANNEL=nightly).
+    await actSpin(`installing ${spec('fleet')}…`, `npm i -g ${spec('fleet')}`, () => runAsync(NPM, ['i', '-g', spec('fleet')]));
     const init = await act('ours-fleet init (one-time host setup: units, dirs, linger)', async () => run('ours-fleet', ['init']));
     if (!init.ok) line(warn(`ours-fleet host setup didn't finish — retry '${c.cyan('ours-fleet init')}'.`));
 
@@ -494,7 +499,7 @@ async function main() {
   line(info("Telegram. (You'll set up the actual bot later, with your agent — not here.)"));
   const goTg = yes('  Install it?', false);
   if (goTg) {
-    await actSpin('installing @ours.network/tg-connector@latest…', 'npm i -g @ours.network/tg-connector@latest', () => runAsync(NPM, ['i', '-g', '@ours.network/tg-connector@latest']));
+    await actSpin(`installing ${spec('tg-connector')}…`, `npm i -g ${spec('tg-connector')}`, () => runAsync(NPM, ['i', '-g', spec('tg-connector')]));
     const asService = yes('  Keep it running in the background so it starts automatically on boot?', true);
     if (asService) {
       const svc = await act('ours-tg-connector install-service (starts on boot)', async () => run('ours-tg-connector', ['install-service']));

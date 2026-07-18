@@ -72,6 +72,15 @@ await build({
   outfile: resolve(dist, 'files.js'),
 });
 
+// Pure inbox helpers (get_messages encryption-type derivation / JSON payload).
+// index.ts inlines these via './inbox.js'; emit a standalone module too so the
+// unit test (test/inbox-encryption.test.mjs) can import ../dist/inbox.js directly.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/inbox.ts')],
+  outfile: resolve(dist, 'inbox.js'),
+});
+
 // Ship ONLY the compiled MUFL packet (*.muflo) — never the .mu/.mm/.mufl source.
 // The MCP server loads the .muflo at runtime from dist/mufl_code/ by hash.
 const muflSrc = resolve(root, 'mufl_code');

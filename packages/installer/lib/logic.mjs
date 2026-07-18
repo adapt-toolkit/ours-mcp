@@ -26,6 +26,45 @@ export function canonHarnesses(raw) {
   return { names, unknown };
 }
 
+// ── Release CHANNEL / npm dist-tag selection (owner 2026-07-17) ─────────────────
+// The installer normally installs everything at @latest (stable). Setting
+// OURS_CHANNEL=nightly (or OURS_INSTALL_CHANNEL) makes it install the NIGHTLY tag
+// for the packages that HAVE a nightly (mcp, tg-connector, and the harness-plugin
+// launchers claude-code/codex/hermes — all lockstep-published to the `nightly` tag),
+// but keep @ours.network/fleet at @latest ALWAYS: ours-fleet lives in its own repo
+// and publishes NO nightly tag, so `@nightly` there would 404 the whole install.
+export const DEFAULT_CHANNEL = 'latest';
+
+// Packages that follow the selected channel (nightly ⇒ @nightly). Short keys map to
+// the @ours.network/<key> npm name. NOTE fleet is deliberately ABSENT — it is pinned.
+const CHANNEL_TRACKING_PKGS = new Set(['mcp', 'tg-connector', 'claude-code', 'codex', 'hermes']);
+// Packages ALWAYS pinned to @latest regardless of channel (no nightly tag exists).
+const STABLE_ONLY_PKGS = new Set(['fleet']);
+
+// Normalize a raw channel selection to 'latest' | 'nightly'. Anything unrecognized
+// (incl. undefined/'') falls back to the safe default 'latest' — never guesses a tag.
+export function resolveChannel(raw) {
+  const v = String(raw || '').trim().toLowerCase();
+  if (v === 'nightly' || v === 'prerelease' || v === 'next') return 'nightly';
+  return DEFAULT_CHANNEL; // 'latest' and everything else
+}
+
+// The npm dist-tag to install for one package key under a channel. fleet is ALWAYS
+// 'latest'; channel-tracking packages take the channel; anything else defaults to 'latest'.
+export function pkgTag(pkgKey, channel = DEFAULT_CHANNEL) {
+  const key = String(pkgKey || '').replace(/^@ours\.network\//, '');
+  if (STABLE_ONLY_PKGS.has(key)) return 'latest';
+  const ch = resolveChannel(channel);
+  if (ch === 'nightly' && CHANNEL_TRACKING_PKGS.has(key)) return 'nightly';
+  return 'latest';
+}
+
+// Full `@ours.network/<key>@<tag>` spec for `npm i -g`, honoring the channel.
+export function pkgSpec(pkgKey, channel = DEFAULT_CHANNEL) {
+  const key = String(pkgKey || '').replace(/^@ours\.network\//, '');
+  return `@ours.network/${key}@${pkgTag(key, channel)}`;
+}
+
 // The Telegram connector owns 3051 — the installer must never hand a daemon that port.
 export const RESERVED_PORTS = [3051];
 export const DEFAULT_PORT = 3050;
