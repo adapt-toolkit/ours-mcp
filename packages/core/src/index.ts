@@ -515,10 +515,23 @@ async function delegateRole(root: Identity, role: Identity): Promise<void> {
     const profileData = await mutatingTx(root, '::actor::export_root_profile', {}, lt);
     const profileBlob = Buffer.from(profileData.Reduce('profile').GetBinary());
     const rootAdBlob = exportAdBlob(root);
+    // Also mint the v1-AD-bound cert so a cross-version (0.11.2) peer, which sees my
+    // DOWN-LEVELLED bundle-less AD, finds a delegation cert whose $role_ad_hash
+    // matches the v1 AD it received (fix for a2a_protocol.mm:135 both directions).
+    // sign_delegation takes any AD blob — here the role's v1 AD.
+    const roleAdV1 = Buffer.from(
+      (await mutatingTx(role, '::actor::export_v1_address_document', {}, lt)).Reduce('ad').GetBinary(),
+    );
+    const signedV1 = await mutatingTx(root, '::actor::sign_delegation', {
+      role_ad: root.pw.packet.NewBinaryFromBuffer(roleAdV1).Attach(lt),
+      role_id: role.name,
+    }, lt);
+    const certV1Blob = Buffer.from(signedV1.Reduce('cert').GetBinary());
     await mutatingTx(role, '::actor::set_delegation', {
       cert: role.pw.packet.NewBinaryFromBuffer(certBlob).Attach(lt),
       root_ad: role.pw.packet.NewBinaryFromBuffer(rootAdBlob).Attach(lt),
       root_profile: role.pw.packet.NewBinaryFromBuffer(profileBlob).Attach(lt),
+      cert_v1: role.pw.packet.NewBinaryFromBuffer(certV1Blob).Attach(lt),
     }, lt);
   });
   log(`[${role.name}] delegated as a role under root "${root.name}"`);
