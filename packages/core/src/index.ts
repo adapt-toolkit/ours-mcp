@@ -481,6 +481,7 @@ function clearRootMarker(): void {
 interface IdentityInfo {
   bio: string;
   persona: string;
+  hasCert: boolean; // TRUE == this identity holds a root-signed delegation cert (a role)
   roleId: string; // '' == no delegation cert (a root or a legacy flat identity)
   rootCid: string;
   rootName: string;
@@ -493,6 +494,7 @@ function describeIdentity(id: Identity): IdentityInfo {
     return {
       bio: v.Reduce('bio').Visualize(),
       persona: v.Reduce('persona').Visualize(),
+      hasCert: v.Reduce('has_cert').GetBoolean(),
       roleId: v.Reduce('role_id').Visualize(),
       rootCid: v.Reduce('root_cid').Visualize(),
       rootName: v.Reduce('root_name').Visualize(),
@@ -2198,17 +2200,10 @@ async function restoreIdentity(name: string): Promise<Identity> {
   }
   // Eager restore: re-key degraded contacts + flush queues orphaned by a crash.
   await contactRestoreSweep(id);
-  // Boot/upgrade re-advertise: bootstrap migration for pre-existing legacy contacts
-  // (so an existing contact auto-migrates to DR after both sides upgrade). The push
-  // is only delivered while the PEER is online, and after a mutual upgrade both
-  // sides reconnect at different times — so fire once now and RE-fire on a short
-  // schedule to catch a peer that comes online shortly after us. The core trn is
-  // STATELESS + idempotent (legacy-only filter; no _save_state), so retries and an
-  // already-migrated contact are safe no-ops.
-  await readvertiseOnUpgradeSweep(id);
-  for (const ms of [10_000, 30_000, 90_000]) {
-    setTimeout(() => { readvertiseOnUpgradeSweep(id).catch(() => { /* logged inside */ }); }, ms);
-  }
+  // NOTE: the boot/upgrade re-advertise (readvertiseOnUpgradeSweep) is deliberately
+  // NOT fired here. It must run AFTER the role-cert re-delegation pass in bootWrapper,
+  // otherwise the push (and its retries) would ride a stale role cert and be rejected.
+  // See the unified re-advertise pass after the re-delegation block.
   // Make the SessionStart hook's offline view match the restored packet state.
   refreshUnread(id);
   return id;
@@ -2267,6 +2262,85 @@ async function bootWrapper(): Promise<void> {
     clearRootMarker();
   }
   if (rootName) log(`root identity: ${rootName}`);
+  // Boot/upgrade RE-DELEGATION (migration bootstrap for ROLE identities). A role's
+  // delegation cert commits to a hash of the exact AD it was signed against. On a
+  // version upgrade the role's live AD gains $e2e_bundle, so a stable-era cert's
+  // $role_ad_hash no longer matches produce_my_address_document() — the peer then
+  // REJECTS the boot readvertise AND the migration offer/ack (verify_peer_delegation,
+  // a2a_protocol.mm "Delegation certificate does not match the peer's address
+  // document"), stranding a pre-existing role↔role contact on legacy forever.
+  // Re-running delegateRole re-mints the cert (+ its v1 down-level twin) against the
+  // LIVE AD via the host root, so the re-advertise/migrate bundle carries a matching
+  // cert. Idempotent (set_delegation re-verifies + stores). Must run after rootName is
+  // resolved and all identities are loaded.
+  //
+  // SELECTION GATE (authority-safe) — re-delegate ONLY an identity that
+  //   (a) already HOLDS a delegation cert ($has_cert), AND
+  //   (b) whose CURRENT delegation root is cryptographically THIS host root
+  //       (describeIdentity(id).rootCid === hostRoot.cid).
+  // (a) excludes flat identities (created with no root, or adopted with
+  // adopt_existing=false) and roots — turning a flat identity into a role would
+  // silently re-parent it and change the authority a peer observes, overriding the
+  // user's opt-out. (b) excludes a role delegated by a DIFFERENT root (imported /
+  // shared / sub-root): re-signing it under OUR root would overwrite a valid
+  // delegation and hand authority to the wrong root. A mismatch is skipped + logged;
+  // we NEVER guess a root. On a normal one-root host every role passes (b).
+  //
+  // The AD-identity invariant (the cert is minted against export_address_document =
+  // get_my_address_document(), and the peer verifies against the AD the readvertise
+  // sends = produce_my_address_document()) holds today (Fable traced the core: the
+  // AD is re-produced from live state on each read, not memoised across export_state)
+  // AND is guarded EMPIRICALLY: if those two ever diverged, the re-minted cert would
+  // be rejected and the migration would FAIL VISIBLY (route stays box + peer reject),
+  // never a silent wrong-authority. A proactive cryptographic assert
+  // (cert.$role_ad_hash === hash(produce_my_address_document()) for v2 + v1-twin) —
+  // which would also serve as a cert-already-matches churn gate — needs a readonly
+  // core trn (produce_my_address_document is not separately host-exportable), i.e. a
+  // .muflo change outside this host-only fix; proposed as a follow-up.
+  {
+    const hostRoot = rootName ? identities.get(rootName) : undefined;
+    if (rootName && !hostRoot) {
+      log(`re-delegation on upgrade DEGRADED: root "${rootName}" is not among the restored identities — role certs not refreshed this boot`);
+    }
+    const refreshedRoles: Identity[] = [];
+    if (hostRoot) {
+      for (const id of identities.values()) {
+        if (id.name === hostRoot.name) continue; // the root itself is not delegated
+        let info: IdentityInfo | undefined;
+        try { info = describeIdentity(id); } catch { info = undefined; }
+        if (!info || !info.hasCert) continue; // flat identity / root — leave untouched
+        if (info.rootCid !== hostRoot.cid) {
+          // A role under a foreign root (import/shared/sub-root). Do NOT re-parent it.
+          log(`[${id.name}] re-delegation skipped: delegated by a different root (${info.rootCid.slice(0, 12)}…), not this host root — left as-is`);
+          continue;
+        }
+        try {
+          await delegateRole(hostRoot, id);
+          refreshedRoles.push(id);
+        } catch (err) {
+          // Durable, fail-loud signal (not just the daemon log). Per-boot retry re-attempts
+          // next start; the redelegation_failed notify surfaces a persistent strand.
+          appendNotifyLog(id, { event: 'redelegation_failed', error: String(err).slice(0, 300) });
+          log(`[${id.name}] boot re-delegation (upgrade cert refresh) failed:`, String(err));
+        }
+      }
+    }
+    // BARRIER: only now, with every role cert refreshed, do the boot/upgrade
+    // re-advertise. Firing it here (not per-identity in restoreIdentity) removes the
+    // async race where a retry timer would ride a stale cert. The push is delivered
+    // only while the peer is online, and a mutual upgrade reconnects each side at a
+    // different time, so fire once now and RE-fire on a short schedule to catch a peer
+    // that comes online shortly after us. readvertise_on_upgrade is STATELESS +
+    // idempotent (legacy-only filter; no _save_state), so retries and already-migrated
+    // contacts are safe no-ops. Roots re-advertise too (they need no cert refresh).
+    for (const id of identities.values()) {
+      await readvertiseOnUpgradeSweep(id);
+      for (const ms of [10_000, 30_000, 90_000]) {
+        setTimeout(() => { readvertiseOnUpgradeSweep(id).catch(() => { /* logged inside */ }); }, ms);
+      }
+    }
+    if (refreshedRoles.length > 0) log(`refreshed ${refreshedRoles.length} role delegation cert(s) against the live AD on boot`);
+  }
   // Drain anything queued while the daemon was down or that a crash stranded:
   // pending proxy control requests and unforwarded monitoring copies.
   const root = rootName ? identities.get(rootName) : undefined;
