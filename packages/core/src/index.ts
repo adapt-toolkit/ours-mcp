@@ -540,6 +540,39 @@ async function delegateRole(root: Identity, role: Identity): Promise<void> {
   log(`[${role.name}] delegated as a role under root "${root.name}"`);
 }
 
+// Single-root policy (owner #2440): make `id` THE host root and adopt every other
+// existing identity as a role under it. Establishes the one-root-per-host hierarchy
+// with no flat state. Idempotent-ish: only ever called when no root exists yet, so it
+// pins the marker + delegates the (usually zero) pre-existing identities. Adoption
+// failures are logged + reported, never fatal (the root is still established).
+async function establishRoot(id: Identity): Promise<{ adopted: string[]; failed: string[] }> {
+  rootName = id.name;
+  writeRootMarker(id.name);
+  const adopted: string[] = [];
+  const failed: string[] = [];
+  for (const other of identities.values()) {
+    if (other.name === id.name) continue;
+    try {
+      await delegateRole(id, other);
+      adopted.push(other.name);
+    } catch (err) {
+      log(`failed to adopt "${other.name}" as a role under new root "${id.name}":`, String(err));
+      failed.push(other.name);
+    }
+  }
+  log(`[${id.name}] established as the host root${adopted.length ? ` (adopted ${adopted.length} role(s))` : ''}`);
+  return { adopted, failed };
+}
+
+// TODO (single-root follow-up, separate minimal PR): proactively adopt any STRAY flat
+// identity at boot under the host root. Today the invariant self-heals on the next
+// create call (establishRoot adopts pre-existing identities when the root is first
+// created; a role is always delegated). The only residual gap is a host that already
+// has flat identities AND already has a root from before this enforcement — those flat
+// identities stay flat until re-created. A boot-time adopt would close it, but it is
+// another boot re-parenting mutation (same class as the role-cert re-delegation we just
+// reviewed), so it belongs in its own reviewed PR rather than bloating this one.
+
 // ---- core 2.2 cluster enrollment (root side) --------------------------------
 // One root↔CP bind enrolls the whole cluster. The root mints its root-signed CP
 // binding (sign_root_cp_binding), stores it (set_root_cp_binding, root path), and
@@ -2677,9 +2710,15 @@ function createMcpServer(getSessionId: () => string): McpServer {
           // once (not after the ≤300s sweep). Gated on the dispatch cutover; dormant otherwise.
           if (ENVELOPE_DISPATCH) void clusterSweep(root);
         } else {
+          // Single-root policy: no host root yet → this FIRST identity becomes the
+          // host root (the person behind all roles). No flat state is ever created;
+          // subsequent create_identity calls are delegated as roles under it. Silent
+          // (no error/prompt) but the response says what happened.
+          const { adopted } = await establishRoot(id);
           hierarchy =
-            ' No root identity exists on this host yet, so this is a flat identity — ' +
-            'create_root_identity establishes the hierarchy and adopts it as a role.';
+            ' No host root existed yet, so this identity is now the host ROOT (the person ' +
+            'behind all roles); create more with create_identity and they become roles under it.' +
+            (adopted.length ? ` Adopted ${adopted.length} pre-existing identit${adopted.length === 1 ? 'y' : 'ies'} as role(s): ${adopted.join(', ')}.` : '');
         }
         bindSession(getSessionId(), name);
         const exposure = expose_local
@@ -2698,55 +2737,59 @@ function createMcpServer(getSessionId: () => string): McpServer {
     'create_root_identity',
     'Create THE root identity for this host — the identity that represents the ' +
       'person behind all roles (see the identity hierarchy: one root, many roles). ' +
-      'Only one root may exist; this fails if one already does. Existing identities ' +
-      'are adopted as roles under the new root (each receives a delegation ' +
-      'certificate) unless adopt_existing=false. The root is directly messageable ' +
-      'like any identity.',
+      'Single-root policy: exactly one root per host. If a root already exists, the ' +
+      'named identity is instead created as a ROLE under it (no second root; no error). ' +
+      'When establishing the root, every pre-existing identity is adopted as a role ' +
+      '(each receives a delegation certificate). The root is directly messageable like ' +
+      'any identity.',
     {
       name: z.string().min(1).describe('The person\'s name, e.g. "Vitalii Shakhmatov".'),
       bio: z.string().default('').describe('Free-text bio describing the person (carried in role invites).'),
       expose_local: z.boolean().default(true).describe('Publish the root in the host-local contact book.'),
       local_auto_accept: z.boolean().default(true).describe('Auto-accept local contact-book introductions (false = they queue for approval).'),
-      adopt_existing: z.boolean().default(true).describe('Adopt all existing identities on this host as roles under the new root.'),
+      skip_if_root_exists: z.boolean().default(false).describe('Installer seam: if a root already exists, do NOTHING (fail with "a root identity already exists") instead of adopting the name as a role. The ours-mcp create-root CLI sets this so re-runs stay idempotent; leave false for the interactive tool.'),
     },
-    async ({ name, bio, expose_local, local_auto_accept, adopt_existing }) => {
+    async ({ name, bio, expose_local, local_auto_accept, skip_if_root_exists }) => {
       const bad = validateName(name);
       if (bad) return textResult(`create_root_identity failed: ${bad}`, true);
-      if (identities.has(name)) return textResult(`create_root_identity failed: an identity named "${name}" already exists.`, true);
-      if (rootName && identities.has(rootName)) {
-        return textResult(
-          `create_root_identity failed: a root identity already exists ("${rootName}") — one root per host. ` +
-            'Remove it first if you really mean to replace it.',
-          true,
-        );
+      // Installer idempotency seam — checked BEFORE the name-collision guard. The
+      // create-root CLI passes skip_if_root_exists so a re-run against a host that
+      // ALREADY has a root is a quiet no-op (the CLI maps this to exit 0). This MUST
+      // cover the same-name re-install/update — `create-root "<human name>"` run again
+      // with the name that is already the root — which would otherwise hit the
+      // name-collision error below and exit 1 (the owner's "installer re-prompts for
+      // the human identity on update" bug). It also covers a different-name re-run.
+      // Neither creates a second root nor a spurious role.
+      if (skip_if_root_exists && rootName && identities.has(rootName)) {
+        return textResult(`create_root_identity failed: a root identity already exists ("${rootName}") — one root per host. Nothing to do.`, true);
       }
+      if (identities.has(name)) return textResult(`create_root_identity failed: an identity named "${name}" already exists.`, true);
+      const monitorHint = `\n\nAsk the user whether to enable this harness's live mail monitor for "${name}". ` +
+        'Never enable monitoring without explicit consent.';
       try {
         const id = await provisionIdentity(name, { exposeLocal: expose_local, localAutoAccept: local_auto_accept });
         if (bio) await withScopeAsync(async (lt) => { await mutatingTx(id, '::a2a_messaging::set_my_bio', { bio }, lt); });
-        rootName = name;
-        writeRootMarker(name);
-        const adopted: string[] = [];
-        const failed: string[] = [];
-        if (adopt_existing) {
-          for (const other of identities.values()) {
-            if (other.name === name) continue;
-            try {
-              await delegateRole(id, other);
-              adopted.push(other.name);
-            } catch (err) {
-              log(`failed to adopt "${other.name}" as a role:`, String(err));
-              failed.push(other.name);
-            }
-          }
+        const existingRoot = rootName ? identities.get(rootName) : undefined;
+        if (existingRoot && existingRoot.name !== name) {
+          // Single-root policy: a host root already exists → NO second root. Silently
+          // create this as a ROLE under the existing root (no error, no prompt); the
+          // response says what happened so it isn't a surprise.
+          await delegateRole(existingRoot, id);
+          bindSession(getSessionId(), name);
+          return textResult(
+            `A host root already exists ("${existingRoot.name}") — one root per host, so "${name}" ` +
+              `(${id.cid}) was created as a ROLE under it instead and bound to this session.${monitorHint}`,
+          );
         }
+        // No root yet → establish this identity as THE host root, adopting any
+        // pre-existing identities as roles (single-root policy: no flat state).
+        const { adopted, failed } = await establishRoot(id);
         bindSession(getSessionId(), name);
         const adoption =
           adopted.length > 0
             ? ` Adopted ${adopted.length} existing identit${adopted.length === 1 ? 'y' : 'ies'} as role(s): ${adopted.join(', ')}.`
             : '';
         const failures = failed.length > 0 ? ` FAILED to adopt: ${failed.join(', ')} (see daemon log).` : '';
-        const monitorHint = `\n\nAsk the user whether to enable this harness's live mail monitor for "${name}". ` +
-          'Never enable monitoring without explicit consent.';
         return textResult(`Created root identity "${name}" (${id.cid}) and bound it to this session.${adoption}${failures}${monitorHint}`);
       } catch (err) {
         return textResult(`create_root_identity failed: ${String(err)}`, true);

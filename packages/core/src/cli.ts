@@ -561,7 +561,10 @@ async function cmdCreateRoot(argv: string[]): Promise<void> {
   const client = new Client({ name: 'ours-mcp-cli', version: CLI_VERSION });
   try {
     await client.connect(transport);
-    const r = await client.callTool({ name: 'create_root_identity', arguments: { name } });
+    // skip_if_root_exists keeps re-runs idempotent: if a root already exists the tool
+    // fails with "a root identity already exists" (mapped to a quiet exit-0 no-op below)
+    // rather than adopting `name` as a role (the interactive-tool behaviour).
+    const r = await client.callTool({ name: 'create_root_identity', arguments: { name, skip_if_root_exists: true } });
     const text = (Array.isArray(r.content) ? (r.content as Array<{ text?: unknown }>) : [])
       .map((c) => (typeof c.text === 'string' ? c.text : ''))
       .join(' ')
