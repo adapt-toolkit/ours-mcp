@@ -1504,6 +1504,28 @@ async function contactRestoreSweep(id: Identity): Promise<void> {
   }
 }
 
+// Boot/upgrade RE-ADVERTISE (DAEMON CONTRACT, core 0.10 B1): push my fresh v2 AD
+// (+ caps piggyback) to every PRE-EXISTING LEGACY contact over the legacy channel.
+// A v2 peer ingests it (handle_readvertise_ad → learns my caps/pv, refreshes its
+// stored AD) and offers migration back; a still-v1 peer ignores it. This is the
+// ONLY bootstrap for a stable-era contact whose stored peer caps/pv predate DR:
+// without it neither advertise_migrate nor sweep_e2e_migrations can find it
+// eligible (they only offer to already-known-0.9 peers), so an existing contact
+// would never auto-migrate after both sides upgrade. The core trn is STATELESS +
+// idempotent (no _save_state; only sends), so calling it on every boot and GC
+// tick is safe and also covers a peer that comes online later.
+async function readvertiseOnUpgradeSweep(id: Identity): Promise<void> {
+  try {
+    const readvertised = await withScopeAsync(async (lt) => {
+      const r = await mutatingTx(id, '::a2a_messaging::readvertise_on_upgrade', {}, lt);
+      return Number(r.Reduce('readvertised').Visualize());
+    });
+    if (readvertised > 0) log(`[${id.name}] re-advertised v2 AD to ${readvertised} pre-existing legacy contact(s) (migration bootstrap)`);
+  } catch (err) {
+    log(`[${id.name}] readvertise-on-upgrade sweep failed:`, String(err));
+  }
+}
+
 // ----- notifications.log + unread snapshot -----------------------------------
 // notifications.log stays the durable source of truth (survives restart; the
 // SessionStart hook reads the backlog). The long-poll endpoint reads the SAME
@@ -2176,6 +2198,17 @@ async function restoreIdentity(name: string): Promise<Identity> {
   }
   // Eager restore: re-key degraded contacts + flush queues orphaned by a crash.
   await contactRestoreSweep(id);
+  // Boot/upgrade re-advertise: bootstrap migration for pre-existing legacy contacts
+  // (so an existing contact auto-migrates to DR after both sides upgrade). The push
+  // is only delivered while the PEER is online, and after a mutual upgrade both
+  // sides reconnect at different times — so fire once now and RE-fire on a short
+  // schedule to catch a peer that comes online shortly after us. The core trn is
+  // STATELESS + idempotent (legacy-only filter; no _save_state), so retries and an
+  // already-migrated contact are safe no-ops.
+  await readvertiseOnUpgradeSweep(id);
+  for (const ms of [10_000, 30_000, 90_000]) {
+    setTimeout(() => { readvertiseOnUpgradeSweep(id).catch(() => { /* logged inside */ }); }, ms);
+  }
   // Make the SessionStart hook's offline view match the restored packet state.
   refreshUnread(id);
   return id;
@@ -3610,6 +3643,7 @@ function startGcTimer(): void {
             log(`gc(${id.name}) failed:`, String(e));
           }
           await contactRestoreSweep(id);
+          await readvertiseOnUpgradeSweep(id);
         }
       } finally {
         gcRunning = false;
