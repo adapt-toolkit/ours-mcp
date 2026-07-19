@@ -5,7 +5,8 @@
 //   • no name → usage + exit 1
 //   • first call → creates the root, exit 0
 //   • a root already exists (different name) → SKIP quietly, exit 0 (idempotent for installers)
-//   • same NAME already exists as an identity → real error, exit 1
+//   • a root already exists (SAME name — the re-install/update path) → SKIP quietly,
+//     exit 0 (idempotent; NOT a name-collision error — that was the owner's re-prompt bug)
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -50,8 +51,13 @@ try {
   ok(second.code === 0, 'a pre-existing root is a quiet no-op (exit 0) — installers stay idempotent');
   ok(/already exists/.test(second.out), 'the no-op says a root already exists');
 
-  const dupName = cli(['create-root', 'Test Owner']);
-  ok(dupName.code === 1, 'an identity-name collision is a real error (exit 1)');
+  // Re-running create-root with the SAME name as the existing root is the real
+  // re-install / update path (the installer always passes the human's name). It MUST
+  // be idempotent — exit 0, quiet no-op — NOT a name-collision error, which was the
+  // owner's "nightly installer re-prompts for the human identity on update" bug.
+  const sameName = cli(['create-root', 'Test Owner']);
+  ok(sameName.code === 0, 'same-name re-run (the human root) is idempotent (exit 0) — no re-prompt / error on update');
+  ok(/already exists/.test(sameName.out), 'the same-name re-run reports the root already exists (quiet no-op)');
 } finally {
   daemon.kill('SIGTERM');
   rmSync(dir, { recursive: true, force: true });
