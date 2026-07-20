@@ -2425,7 +2425,18 @@ function createPacket(
 // provision claims its name for the async gap (released only on provision
 // failure so a failed create can be retried). deleteIdentityCompletely releases
 // the name once the directory is actually gone.
-const reservedNames = new Set<string>();
+// Ship-review round-3: EAGERLY seeded at MODULE LOAD (listPersistedNames is
+// synchronous) — strictly before either transport can accept a call, so there
+// is no pre-seed startup window (the round-2 seed inside bootWrapper ran after
+// wrapper.start()+ensureRegistrar, leaving that async interval unguarded). The
+// bootWrapper re-seed below remains as an idempotent refresh.
+const reservedNames = new Set<string>(listPersistedNames());
+// Loud module-load proof that the eager seed actually saw STATE_DIR (env is set
+// before this module loads): the count MUST be > 0 on any host with persisted
+// identities, and it prints before either transport can accept a call.
+if (reservedNames.size > 0) {
+  log(`reserved ${reservedNames.size} persisted identity name(s) at module load: ${[...reservedNames].join(', ')}`);
+}
 
 // Create a brand-new identity: fresh seed, set the display name, pin the host
 // registrar, apply the local-book policy, persist — and publish to the book
@@ -2634,6 +2645,16 @@ async function bootWrapper(): Promise<void> {
   wrapper = await adapt_wrapper.start(argv);
   wrapper.on_packet_created_cb = (cid: string) => log(`wrapper: packet ready ${cid.slice(0, 12)}…`);
   wrapper.start();
+
+  // Test lever: hold the boot open right here — after wrapper.start(), BEFORE the
+  // registrar/restore phase. This is exactly the interval the round-2 seed left
+  // unguarded; round-3 evidence fires the create tools into it and must see the
+  // module-load reservation reject them.
+  const bootHoldMs = Number(process.env.OURS_TEST_BOOT_HOLD_MS || '') || 0;
+  if (bootHoldMs > 0) {
+    log(`TEST HOLD: boot window open ${bootHoldMs}ms (OURS_TEST_BOOT_HOLD_MS)`);
+    await new Promise((r) => setTimeout(r, bootHoldMs));
+  }
 
   // The contact-book registrar boots first so restored identities can be
   // pinned (a no-op for already-pinned ones — pin_registrar is idempotent for
