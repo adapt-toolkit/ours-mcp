@@ -1561,6 +1561,32 @@ async function readvertiseOnUpgradeSweep(id: Identity): Promise<void> {
   }
 }
 
+// Boot/GC SESSION-RECOVERY sweep (core 0.11 self-heal, DAEMON CONTRACT): a daemon
+// restart re-mints the Olm account (sessions + account are never persisted, INV-4),
+// so (a) every peer's stored e2e_bundle for me is stale until a fresh AD lands —
+// their authenticated decode rejects my fresh pre-keys against it — and (b) any
+// in-flight migration lost its staged session. readvertise_e2e_recovery pushes my
+// fresh AD to every E2E-CAPABLE contact (complement of the legacy-only upgrade
+// sweep); sweep_e2e_migrations re-drives/supersedes stalled migrations (it existed
+// but was never invoked at boot). Both are idempotent/attempt-capped — safe on
+// every boot and GC tick.
+async function e2eRecoverySweep(id: Identity): Promise<void> {
+  try {
+    const readvertised = await withScopeAsync(async (lt) => {
+      const r = await mutatingTx(id, '::a2a_messaging::readvertise_e2e_recovery', {}, lt);
+      return Number(r.Reduce('readvertised').Visualize());
+    });
+    if (readvertised > 0) log(`[${id.name}] re-advertised fresh AD to ${readvertised} e2e contact(s) (session recovery)`);
+  } catch (err) {
+    log(`[${id.name}] e2e recovery re-advertise failed:`, String(err));
+  }
+  try {
+    await withScopeAsync(async (lt) => { await mutatingTx(id, '::a2a_messaging::sweep_e2e_migrations', {}, lt); });
+  } catch (err) {
+    log(`[${id.name}] e2e migration sweep failed:`, String(err));
+  }
+}
+
 // ----- notifications.log + unread snapshot -----------------------------------
 // notifications.log stays the durable source of truth (survives restart; the
 // SessionStart hook reads the backlog). The long-poll endpoint reads the SAME
@@ -2368,8 +2394,10 @@ async function bootWrapper(): Promise<void> {
     // contacts are safe no-ops. Roots re-advertise too (they need no cert refresh).
     for (const id of identities.values()) {
       await readvertiseOnUpgradeSweep(id);
+      await e2eRecoverySweep(id);
       for (const ms of [10_000, 30_000, 90_000]) {
         setTimeout(() => { readvertiseOnUpgradeSweep(id).catch(() => { /* logged inside */ }); }, ms);
+        setTimeout(() => { e2eRecoverySweep(id).catch(() => { /* logged inside */ }); }, ms);
       }
     }
     if (refreshedRoles.length > 0) log(`refreshed ${refreshedRoles.length} role delegation cert(s) against the live AD on boot`);
@@ -3761,6 +3789,7 @@ function startGcTimer(): void {
           }
           await contactRestoreSweep(id);
           await readvertiseOnUpgradeSweep(id);
+          await e2eRecoverySweep(id);
         }
       } finally {
         gcRunning = false;
