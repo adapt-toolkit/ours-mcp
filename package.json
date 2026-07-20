@@ -14,6 +14,6 @@
     "dev": "npm --workspace @ours.network/mcp run dev"
   },
   "devDependencies": {
-    "@adapt-toolkit/mufl": "0.10.9"
+    "@adapt-toolkit/mufl": "https://github.com/adapt-toolkit/ours-mcp/releases/download/adapt-prerelease-0.10.10-nightly.1/adapt-toolkit-mufl-0.10.10-nightly.1.tgz"
   }
 }

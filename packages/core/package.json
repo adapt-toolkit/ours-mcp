@@ -51,7 +51,7 @@
     "test": "node test/loopback-bind.test.mjs && node test/lease-binding.test.mjs && node test/session-restore.test.mjs && node test/daemon-restart-resume.test.mjs && node test/version-advisory.test.mjs && node test/files-helpers.test.mjs && node test/inbox-encryption.test.mjs && node test/validate-name.test.mjs && node test/port-visibility.test.mjs && node test/notify-http-api.test.mjs && node test/unread-http-api.test.mjs && node test/create-root-cli.test.mjs && node test/session-reaper.test.mjs && node test/mig1867-verify.test.mjs && node test/single-root-policy.test.mjs"
   },
   "dependencies": {
-    "@adapt-toolkit/sdk": "0.10.9",
+    "@adapt-toolkit/sdk": "https://github.com/adapt-toolkit/ours-mcp/releases/download/adapt-prerelease-0.10.10-nightly.1/adapt-toolkit-sdk-0.10.10-nightly.1.tgz",
     "@adapt-toolkit/sdk-native": "0.10.9"
   },
   "devDependencies": {
