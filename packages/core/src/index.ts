@@ -971,6 +971,8 @@ function deleteIdentityCompletely(id: Identity): string | null {
   }
   try {
     fs.rmSync(id.dir, { recursive: true, force: true });
+    // The on-disk identity is gone — the name may be provisioned again.
+    reservedNames.delete(id.name);
   } catch (err) {
     return `deleting ${id.dir} failed: ${String(err)}`;
   }
@@ -2412,6 +2414,19 @@ function createPacket(
   });
 }
 
+// Ship-review round-2 major: host-wide identity-NAME reservation. A restoring
+// identity is deliberately absent from `identities` (untracked quarantine), so
+// the map check alone lets create_identity / create_root_identity /
+// host_provision_child race the restore and provision a SECOND packet over the
+// SAME directory (identity.key + state_data.bin overwrite = corruption of the
+// persisted original). The set is seeded with EVERY persisted name before the
+// restore loop; restore reservations are NEVER released (an on-disk identity —
+// even one whose restore failed — must not be provisioned over), and every
+// provision claims its name for the async gap (released only on provision
+// failure so a failed create can be retried). deleteIdentityCompletely releases
+// the name once the directory is actually gone.
+const reservedNames = new Set<string>();
+
 // Create a brand-new identity: fresh seed, set the display name, pin the host
 // registrar, apply the local-book policy, persist — and publish to the book
 // unless the caller opted out.
@@ -2419,25 +2434,43 @@ async function provisionIdentity(
   name: string,
   opts: { exposeLocal: boolean; localAutoAccept: boolean } = { exposeLocal: true, localAutoAccept: true },
 ): Promise<Identity> {
-  const dir = identityDir(name);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const seed = randomBytes(24).toString('hex'); // ephemeral entropy, not persisted
-  const id = await createPacket(name, seed, dir);
-  fs.writeFileSync(keyPath(dir), exportSigningSecret(id), { mode: 0o600 });
-  await withScopeAsync(async (lt) => {
-    await mutatingTx(id, '::a2a_messaging::set_my_name', { name }, lt);
-  });
-  await pinRegistrar(id);
-  if (!opts.localAutoAccept) {
+  // Ship-review round-2 major: the single provisioning choke point — every create
+  // path (create_identity, create_root_identity, host_provision_child) lands here.
+  // Reject reserved names (restoring / failed-restore / concurrently-provisioning)
+  // BEFORE anything touches the directory.
+  if (reservedNames.has(name) || identities.has(name)) {
+    throw new Error(
+      `identity name "${name}" is reserved — a persisted identity with this name is restoring, ` +
+      'present, or being provisioned; refusing to provision over it',
+    );
+  }
+  reservedNames.add(name); // claim for the async provisioning gap
+  try {
+    const dir = identityDir(name);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const seed = randomBytes(24).toString('hex'); // ephemeral entropy, not persisted
+    const id = await createPacket(name, seed, dir);
+    fs.writeFileSync(keyPath(dir), exportSigningSecret(id), { mode: 0o600 });
     await withScopeAsync(async (lt) => {
-      await mutatingTx(id, '::actor::set_local_policy', { auto_accept: false }, lt);
+      await mutatingTx(id, '::a2a_messaging::set_my_name', { name }, lt);
     });
+    await pinRegistrar(id);
+    if (!opts.localAutoAccept) {
+      await withScopeAsync(async (lt) => {
+        await mutatingTx(id, '::actor::set_local_policy', { auto_accept: false }, lt);
+      });
+    }
+    if (opts.exposeLocal) {
+      await publishToBook(id);
+    }
+    saveStateFailClosed(id); // provisioning without a durable snapshot is a failure
+    return id;
+  } catch (err) {
+    // A FAILED provision releases the claim so the create can be retried; a
+    // SUCCESSFUL one keeps it (belt-and-suspenders next to the identities map).
+    reservedNames.delete(name);
+    throw err;
   }
-  if (opts.exposeLocal) {
-    await publishToBook(id);
-  }
-  saveStateFailClosed(id); // provisioning without a durable snapshot is a failure
-  return id;
 }
 
 // Restore a persisted identity: recreate the packet and reseed it from the
@@ -2456,6 +2489,14 @@ async function restoreIdentity(name: string): Promise<Identity> {
   // OBJECT directly, so nothing here needs map membership.
   const id = await createPacket(name, '', dir, false, secret, true);
   log(`[${name}] created QUARANTINED (no routing/broker registration, not client-bindable) — importing state before exposure`);
+  // Test lever: hold the restore open so a test can deterministically fire
+  // create_identity/create_root_identity into the restore window (the natural
+  // window is milliseconds).
+  const holdMs = Number(process.env.OURS_TEST_RESTORE_HOLD_MS || '') || 0;
+  if (holdMs > 0) {
+    log(`[${name}] TEST HOLD: keeping restore open ${holdMs}ms (OURS_TEST_RESTORE_HOLD_MS)`);
+    await new Promise((r) => setTimeout(r, holdMs));
+  }
   // Review #2: a TIMEOUT is NOT a completion — enqueueMutation gives up after 25s
   // but the queued transaction may still execute later. Exposing after a timeout
   // recreates exactly the race quarantine exists to prevent. Ship-review major-2
@@ -2610,6 +2651,10 @@ async function bootWrapper(): Promise<void> {
   // Recreate every persisted identity so it registers on the broker and can
   // receive mail regardless of whether any session is currently bound to it.
   const names = listPersistedNames();
+  // Ship-review round-2 major: reserve EVERY persisted name BEFORE the restore
+  // loop — the stdio MCP server is already serving, and a create for a name whose
+  // restore has not finished (or failed) must be rejected, not race the restore.
+  for (const n of names) reservedNames.add(n);
   if (names.length === 0) {
     log('no persisted identities — start with create_identity');
   } else {
