@@ -1454,6 +1454,12 @@ function hasSavedState(dir: string): boolean {
   }
 }
 
+// ⚠ INVARIANT — state_data.bin is LOCAL-ONLY (this is its SOLE writer; the only reader is
+// restoreIdentity). The export_state blob carries the pickle_key-SEALED Olm account + live
+// session pickles (core 0.11 Signal-model restart survival, via export_core_state $e2e_sessions).
+// That is SAFE only because this blob never leaves the host. If a portable/backup/cross-host
+// export of export_state is EVER added, $e2e_sessions MUST be stripped there (session secrecy /
+// forward secrecy) — or move it to an out-of-export local sidecar. Do NOT transmit this file.
 function saveState(id: Identity): void {
   try {
     const bytes = withScope((lt) =>
