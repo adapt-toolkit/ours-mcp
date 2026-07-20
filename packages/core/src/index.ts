@@ -1497,11 +1497,16 @@ function saveState(id: Identity): void {
   let fd: number | undefined;
   try {
     fd = fs.openSync(tmp, 'w', 0o600);
+    // Review #11: open(0600) does NOT re-mode a pre-existing stale tmp — fchmod on
+    // every write so leftovers from an older (or crashed) build are tightened too.
+    fs.fchmodSync(fd, 0o600);
     fs.writeFileSync(fd, bytes);
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(tmp, final);
+    fs.chmodSync(final, 0o600); // covers a final that predates the perms fix
+    try { fs.chmodSync(keyPath(id.dir), 0o600); } catch { /* key may not exist yet */ }
     const dirFd = fs.openSync(id.dir, 'r');
     try {
       fs.fsyncSync(dirFd);
@@ -2166,21 +2171,72 @@ function wireHandlers(id: Identity): void {
       } else if (event === 'e2e_app_send') {
         // §4 app-SEND proof line (#1867): core delivered an app message over the migrated session and
         // emits this notify; the daemon formats it. session_id (bin→hex) MUST equal active_session_id.
+        // Review #7: surface the typed retention result — $retained FALSE (this send has no
+        // redrive guarantee) and $evicted (older sends whose guarantee just ended).
         const cid = payload.Reduce('cid').Visualize();
         const sid = binHexField(payload, 'session_id');
         const olm = payload.Reduce('olm_type').Visualize();
         const wireId = payload.Reduce('wire_id').Visualize();
-        appendNotifyLog(id, { event: 'e2e_app_send', cid: String(cid), session_id: sid, olm_type: String(olm), wire_id: String(wireId) });
-        log(`[e2e-app] send cid=${cid} session_id=${sid} olm_type=${olm} wire_id=${wireId}`);
+        const retained = payload.Reduce('retained').IsNil() ? undefined : payload.Reduce('retained').Visualize() === 'TRUE';
+        const evicted: string[] = [];
+        const ev = payload.Reduce('evicted');
+        if (!ev.IsNil()) {
+          for (let i = 0; ; i++) {
+            const e = ev.Reduce(i);
+            if (e.IsNil()) break;
+            evicted.push(String(e.Visualize()));
+          }
+        }
+        appendNotifyLog(id, { event: 'e2e_app_send', cid: String(cid), session_id: sid, olm_type: String(olm), wire_id: String(wireId), ...(retained === false ? { retained: false } : {}), ...(evicted.length ? { evicted } : {}) });
+        log(`[${id.name}] [e2e-app] send cid=${cid} session_id=${sid} olm_type=${olm} wire_id=${wireId}${retained === false ? ' retained=false' : ''}${evicted.length ? ` evicted=${evicted.join(',')}` : ''}`);
+        if (evicted.length) {
+          process.nextTick(() =>
+            pushNotification(id.name, `[${id.name}] redrive window overflow: ${evicted.length} older unacked send(s) lost their auto-resend guarantee (${evicted.join(', ')})`),
+          );
+        }
+      } else if (event === 'e2e_delivery_expired') {
+        // Review #7: the sweep's TTL purge is a PERMANENT delivery failure for those
+        // sends — an explicit event, never a silent purge.
+        const cid = payload.Reduce('cid').Visualize();
+        const wireIds: string[] = [];
+        const wl = payload.Reduce('wire_ids');
+        if (!wl.IsNil()) {
+          for (let i = 0; ; i++) {
+            const e = wl.Reduce(i);
+            if (e.IsNil()) break;
+            wireIds.push(String(e.Visualize()));
+          }
+        }
+        appendNotifyLog(id, { event: 'e2e_delivery_expired', cid: String(cid), wire_ids: wireIds });
+        log(`[${id.name}] [e2e-app] delivery EXPIRED (2-day TTL, receipt never arrived) cid=${cid} wire_ids=${wireIds.join(',')}`);
+        process.nextTick(() =>
+          pushNotification(id.name, `[${id.name}] ${wireIds.length} message(s)/file(s) to ${String(cid).slice(0, 12)}… expired undelivered (no receipt within 2 days)`),
+        );
       } else if (event === 'e2e_app_recv') {
         // §4 app-RECV proof line (#1867): core decrypted an inbound app message over the migrated
         // session. session_id (bin→hex) MUST equal active_session_id on this peer.
+        // Review #14: keep the TYPED fields — $code (reject reason) and $duplicate
+        // (redrive dedup hit) were silently dropped before, hiding self-heal activity.
         const cid = payload.Reduce('cid').Visualize();
         const sid = binHexField(payload, 'session_id');
         const ok = payload.Reduce('ok').GetBoolean();
         const wireId = payload.Reduce('wire_id').Visualize();
-        appendNotifyLog(id, { event: 'e2e_app_recv', cid: String(cid), session_id: sid, ok, wire_id: String(wireId) });
-        log(`[e2e-app] recv cid=${cid} session_id=${sid} ok=${ok} wire_id=${wireId}`);
+        const code = payload.Reduce('code').IsNil() ? undefined : String(payload.Reduce('code').Visualize());
+        const duplicate = !payload.Reduce('duplicate').IsNil();
+        appendNotifyLog(id, { event: 'e2e_app_recv', cid: String(cid), session_id: sid, ok, wire_id: String(wireId), ...(code ? { code } : {}), ...(duplicate ? { duplicate: true } : {}) });
+        log(`[${id.name}] [e2e-app] recv cid=${cid} session_id=${sid} ok=${ok} wire_id=${wireId}${code ? ` code=${code}` : ''}${duplicate ? ' duplicate=true' : ''}`);
+      } else if (event === 'e2e_rekey') {
+        // Review #14: the self-heal engine's central event was invisible to the host.
+        // Persist it typed + identity-scoped: role (requester/initiator/responder/healed),
+        // attempts, session, peer capability.
+        const cid = payload.Reduce('cid').Visualize();
+        const role = payload.Reduce('role').Visualize();
+        const sid = binHexField(payload, 'session_id');
+        const attempts = payload.Reduce('attempts').IsNil() ? undefined : String(payload.Reduce('attempts').Visualize());
+        const supports = payload.Reduce('peer_supports').IsNil() ? undefined : String(payload.Reduce('peer_supports').Visualize());
+        const rejected = payload.Reduce('rejected').IsNil() ? undefined : String(payload.Reduce('rejected').Visualize());
+        appendNotifyLog(id, { event: 'e2e_rekey', cid: String(cid), role: String(role), ...(sid ? { session_id: sid } : {}), ...(attempts ? { attempts } : {}), ...(supports ? { peer_supports: supports } : {}), ...(rejected ? { rejected } : {}) });
+        log(`[${id.name}] [e2e-rekey] cid=${cid} role=${role}${sid ? ` session_id=${sid}` : ''}${attempts ? ` attempts=${attempts}` : ''}${supports ? ` peer_supports=${supports}` : ''}${rejected ? ` rejected=${rejected}` : ''}`);
       } else if (event === 'migration_deferred_flush') {
         // One notify per queued message drained on active (DAEMON-INTEGRATION.md §3), FIFO order.
         // Option B: CORE performs the boxed e2e re-drive (each drained msg surfaces as an e2e_app_send
@@ -2371,30 +2427,103 @@ async function restoreIdentity(name: string): Promise<Identity> {
   // inbound in arrival order, as for an offline node) until import_state is done.
   const id = await createPacket(name, '', dir, true, secret, true);
   log(`[${name}] created QUARANTINED (no routing/broker registration) — importing state before exposure`);
-  try {
-    if (hasSavedState(dir)) {
+  // Review #2: a TIMEOUT is NOT a completion — enqueueMutation gives up after 25s
+  // but the queued transaction may still execute later. Exposing after a timeout
+  // recreates exactly the race quarantine exists to prevent, so any unknown-outcome
+  // step tears the identity down unexposed instead.
+  const isTimeout = (err: unknown) => /timed out waiting for the transaction result/.test(String(err));
+  const failClosed = (step: string, err: unknown): never => {
+    log(`[${name}] ${step} outcome UNKNOWN (timeout) — identity left UNEXPOSED (fail-closed): ` +
+      'the transaction may still execute and exposure would race it');
+    try { appendNotifyLog(id, { event: 'restore_fail_closed', step, error: String(err).slice(0, 300) }); } catch { /* best effort */ }
+    identities.delete(name);
+    try { wrapper.remove_packet(id.cid); } catch (e2) { log(`[${name}] quarantined-packet teardown failed:`, String(e2)); }
+    throw new Error(`identity "${name}": ${step} timed out during restore — left unexposed (fail-closed)`);
+  };
+  if (hasSavedState(dir)) {
+    let imported = false;
+    try {
+      // Test lever: force the timeout branch (a naturally >25s import is impractical
+      // to stage; the branch below must still be provably wired).
+      if (process.env.OURS_TEST_FORCE_IMPORT_TIMEOUT === '1') {
+        throw new Error('timed out waiting for the transaction result (forced by OURS_TEST_FORCE_IMPORT_TIMEOUT)');
+      }
+      const buf = fs.readFileSync(dataPath(dir));
+      await withScopeAsync(async (lt) => {
+        const adaptData = id.pw.packet.ParseValue(new Uint8Array(buf)).Attach(lt);
+        // OURS_IMPORT_TIMEOUT_MS: test lever for the fail-closed timeout path (an
+        // import that outlives the wait must NOT lead to exposure).
+        const importTimeoutMs = Number(process.env.OURS_IMPORT_TIMEOUT_MS || '') || undefined;
+        await mutatingTx(id, '::actor::import_state', adaptData, lt, importTimeoutMs);
+      });
+      imported = true;
+      log(`[${name}] state import completed (positively observed)`);
+    } catch (err) {
+      if (isTimeout(err)) failClosed('import_state', err);
+      // Definitive transaction failure — rolled back, nothing imported; a fresh
+      // (reseeded) identity is a safe thing to expose.
+      log(`[${name}] FAILED TO IMPORT SAVED STATE — continuing with the reseeded identity; ` +
+        `surviving contacts (if the blob was partially migrated) self-heal via contact restore:`, String(err));
+      appendNotifyLog(id, { event: 'state_import_failed', error: String(err).slice(0, 300) });
       try {
-        const buf = fs.readFileSync(dataPath(dir));
-        await withScopeAsync(async (lt) => {
-          const adaptData = id.pw.packet.ParseValue(new Uint8Array(buf)).Attach(lt);
-          await mutatingTx(id, '::actor::import_state', adaptData, lt);
+        const failedPath = `${dataPath(dir)}.failed-${Date.now()}`;
+        fs.renameSync(dataPath(dir), failedPath);
+        fs.chmodSync(failedPath, 0o600); // same secrecy class as the live blob (#11)
+        log(`[${name}] unreadable state blob preserved as state_data.bin.failed-*`);
+      } catch { /* best effort */ }
+    }
+    if (imported) {
+      // Finding C redo: the import PARKED $e2e_sessions unvalidated; validate + assign
+      // in a dedicated transaction. A corrupt pickle hard-fails ONLY this txn (atomic
+      // rollback — nothing assigned) and we observe it here, identity-scoped.
+      try {
+        const st = await withScopeAsync(async (lt) => {
+          const r = await mutatingTx(id, '::a2a_messaging::commit_e2e_restore', {}, lt);
+          const status = r.Reduce('status').Visualize();
+          const sessions = r.Reduce('sessions').IsNil() ? '0' : r.Reduce('sessions').Visualize();
+          return { status: String(status), sessions: String(sessions) };
         });
+        log(`[${name}] e2e restore commit: status=${st.status} sessions=${st.sessions}`);
       } catch (err) {
-        log(`[${name}] FAILED TO IMPORT SAVED STATE — continuing with the reseeded identity; ` +
-          `surviving contacts (if the blob was partially migrated) self-heal via contact restore:`, String(err));
-        appendNotifyLog(id, { event: 'state_import_failed', error: String(err).slice(0, 300) });
+        if (isTimeout(err)) failClosed('commit_e2e_restore', err);
+        log(`[${name}] E2E RESTORE REJECTED — staged session blob failed pickle_key validation; ` +
+          `discarding it, fresh account + self-heal fallback take over: ${String(err).slice(0, 260)}`);
+        appendNotifyLog(id, { event: 'e2e_restore_rejected', error: String(err).slice(0, 300) });
         try {
-          fs.renameSync(dataPath(dir), `${dataPath(dir)}.failed-${Date.now()}`);
-          log(`[${name}] unreadable state blob preserved as state_data.bin.failed-*`);
-        } catch { /* best effort */ }
+          await withScopeAsync(async (lt) => { await mutatingTx(id, '::a2a_messaging::reject_e2e_restore', {}, lt); });
+        } catch (err2) {
+          if (isTimeout(err2)) failClosed('reject_e2e_restore', err2);
+          log(`[${name}] reject_e2e_restore failed (staging is transient; continuing):`, String(err2));
+        }
+      }
+      // Review #3: the wrapper ctor minted a PRE-import account into the transport
+      // IPD; a committed import replaced the account underneath it. Rebuild the IPD
+      // from current state — cheap and idempotent, so run it on every imported boot.
+      try {
+        id.pw.refresh_identity_proof_document();
+        log(`[${name}] transport IPD refreshed from post-import state`);
+      } catch (err) {
+        log(`[${name}] transport IPD refresh FAILED (decode-seam e2e may advertise a stale bundle):`, String(err));
+        appendNotifyLog(id, { event: 'ipd_refresh_failed', error: String(err).slice(0, 300) });
+      }
+      // Coherence proof (#3 evidence, identity-scoped): the IPD must advertise the
+      // ik_curve of the CURRENT account (restored, or ctor-fresh after a reject).
+      try {
+        const ik = withScope((lt) => String(readonlyTx(id, '::a2a_messaging::e2e_self_fp', lt).Reduce('ik').Visualize()));
+        const ipdVis = id.pw.identity_proof_document.Visualize();
+        const ikHex = ik.replace(/^0x/i, '');
+        const coherent = ikHex.length >= 32 && ipdVis.toLowerCase().includes(ikHex.toLowerCase());
+        log(`[${name}] IPD/e2e coherence: account_ik=${ik.slice(0, 18)}… ipd_advertises_it=${coherent}`);
+        appendNotifyLog(id, { event: 'ipd_coherence', ik, coherent });
+      } catch (err) {
+        log(`[${name}] IPD/e2e coherence check failed:`, String(err));
       }
     }
-  } finally {
-    // Expose on EVERY path out of the import (success, no saved state, failed
-    // import): an unexposed packet would never register with the broker at all.
-    wrapper.expose_packet(id.cid);
-    log(`[${name}] EXPOSED (routing + broker registration) — import phase complete`);
   }
+  // Exposure happens ONLY here: every unknown-outcome path above threw (fail-closed),
+  // so reaching this line means the import phase finished in a positively known state.
+  wrapper.expose_packet(id.cid);
+  log(`[${name}] EXPOSED (routing + broker registration) — import phase complete`);
   // Eager restore: re-key degraded contacts + flush queues orphaned by a crash.
   await contactRestoreSweep(id);
   // NOTE: the boot/upgrade re-advertise (readvertiseOnUpgradeSweep) is deliberately
@@ -3479,7 +3608,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
   type SendVerdict =
     | { kind: 'refused'; wireId: string; cid: string }               // downgrade_refused → NEVER box
     | { kind: 'migrating'; wireId: string; cid: string; queued: number } // core queued (msg) / retry (file)
-    | { kind: 'e2e'; wireId: string; cid: string }                   // ride the migrated session
+    | { kind: 'e2e'; wireId: string; cid: string; notRetained?: boolean } // ride the migrated session
     | { kind: 'deferred'; wireId: string; queued: number }           // degraded-contact restore queue
     | { kind: 'sent'; wireId: string };                              // legacy / fresh-v2 box (core sent)
   const parseSendVerdict = (sent: AdaptValue): SendVerdict => {
@@ -3488,7 +3617,12 @@ function createMcpServer(getSessionId: () => string): McpServer {
     const cid = has('sent_to') ? sent.Reduce('sent_to').Visualize() : '';
     if (has('downgrade_refused')) return { kind: 'refused', wireId, cid };
     if (has('migrating')) return { kind: 'migrating', wireId, cid, queued: has('queued') ? Number(sent.Reduce('queued').Visualize()) : 0 };
-    if (has('route')) return { kind: 'e2e', wireId, cid }; // $route -> $e2e ⇒ "e2e"
+    if (has('route')) {
+      // finding J: $retained -> FALSE means the send exceeded its redrive budget and
+      // will NOT auto-resend if the session turns out to be lost — surface it.
+      const notRetained = has('retained') && sent.Reduce('retained').Visualize() !== 'TRUE';
+      return { kind: 'e2e', wireId, cid, notRetained }; // $route -> $e2e ⇒ "e2e"
+    }
     if (has('deferred')) return { kind: 'deferred', wireId, queued: has('queued') ? Number(sent.Reduce('queued').Visualize()) : 0 };
     return { kind: 'sent', wireId };
   };
@@ -3651,7 +3785,16 @@ function createMcpServer(getSessionId: () => string): McpServer {
               `the migration goes active (files aren't auto-queued like messages).`,
               true);
           case 'e2e':
-            log(`[e2e-route] cid=${v.cid} wire_id=${v.wireId} verdict=e2e file (core delivered over migrated session)`);
+            log(`[e2e-route] cid=${v.cid} wire_id=${v.wireId} verdict=e2e file (core delivered over migrated session)${v.notRetained ? ' NOT RETAINED (oversized)' : ''}`);
+            if (v.notRetained) {
+              appendNotifyLog(id!, { event: 'send_not_retained', wire_id: v.wireId, kind: 'file' });
+              return textResult(
+                `${desc} sent to "${contact}" over the end-to-end session (wire_id ${v.wireId}) — ` +
+                'WARNING: the file exceeds the 2 MiB redrive budget, so it is NOT retained for automatic ' +
+                'resend. If the recipient loses its session (e.g. it was mid-restart), this file will NOT ' +
+                're-deliver automatically — confirm receipt or resend it once the contact is confirmed back.',
+              );
+            }
             return textResult(`${desc} sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`);
           default:
             return textResult(`${desc} sent to "${contact}" (wire_id ${v.wireId}).`);
