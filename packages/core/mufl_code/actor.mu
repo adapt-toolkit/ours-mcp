@@ -528,7 +528,7 @@ application actor loads libraries
             // contact_caps. This is what gates mig_should_trigger — NOT the $describe manifest (which
             // feeds the control-plane get_manifest, a different surface). No handler needed (unlike
             // $supported). Both nodes carry it ⇒ the migration auto-trigger fires (#1867).
-            $advertise  -> [ a2a_capabilities::cap_e2e, a2a_capabilities::cap_e2e_migrate ],
+            $advertise  -> [ a2a_capabilities::cap_e2e, a2a_capabilities::cap_e2e_migrate, a2a_capabilities::cap_e2e_rekey ],
             $handlers   -> cap_handlers,
             $on_unknown -> fn (_: any) -> transaction::action::type[] { return []. }
         ).
