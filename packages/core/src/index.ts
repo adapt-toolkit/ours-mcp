@@ -353,6 +353,21 @@ const unreadPath = (dir: string) => join(dir, 'unread.json');
 // content-free; bytes land here only on the explicit get_files egress.
 const filesDirFor = (id: Identity) => join(id.dir, 'files');
 
+// Tighten on-disk permissions (finding D): identity dirs 0700, and their secret-
+// bearing files (state_data.bin carries sealed session pickles + inbox plaintext,
+// identity.key the SIGN secret) 0600. Applied to every persisted identity on each
+// boot so blobs written by older builds (0664/0755 via umask) are fixed up too.
+function tightenIdentityPerms(): void {
+  for (const name of listPersistedNames()) {
+    const dir = join(STATE_DIR, name);
+    try { fs.chmodSync(dir, 0o700); } catch (err) { log(`[${name}] chmod 0700 failed:`, String(err)); }
+    for (const f of [dataPath(dir), keyPath(dir)]) {
+      if (!fs.existsSync(f)) continue;
+      try { fs.chmodSync(f, 0o600); } catch (err) { log(`[${name}] chmod 0600 ${f} failed:`, String(err)); }
+    }
+  }
+}
+
 function listPersistedNames(): string[] {
   if (!fs.existsSync(STATE_DIR)) return [];
   return fs
@@ -1694,7 +1709,7 @@ function waitForNotify(name: string, ms: number): Promise<void> {
 // agent must react to — new mail, a pending local introduction — lands here.
 function appendNotifyLog(id: Identity, event: Record<string, unknown>): void {
   try {
-    fs.mkdirSync(id.dir, { recursive: true });
+    fs.mkdirSync(id.dir, { recursive: true, mode: 0o700 });
     fs.appendFileSync(notifyLogPath(id.dir), JSON.stringify(event) + '\n');
   } catch (err) {
     log(`[${id.name}] failed to append notifications.log:`, String(err));
@@ -1840,7 +1855,7 @@ function refreshUnread(id: Identity): void {
       files: unreadFiles.length,
       unread_files: unreadFiles.slice(-10),
     };
-    fs.mkdirSync(id.dir, { recursive: true });
+    fs.mkdirSync(id.dir, { recursive: true, mode: 0o700 });
     const tmp = `${unreadPath(id.dir)}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(snapshot));
     fs.renameSync(tmp, unreadPath(id.dir));
@@ -2120,6 +2135,16 @@ function wireHandlers(id: Identity): void {
         process.nextTick(() =>
           pushNotification(id.name, `[${id.name}] "${name}" queued a message awaiting introduction approval (${queued} queued).`),
         );
+      } else if (event === 'e2e_restore_rejected') {
+        // Finding C: the persisted $e2e_sessions blob failed pickle_key validation at
+        // boot — e2e state was reset to empty (atomic reject) and the self-heal
+        // fallback re-establishes. Loud, greppable, one-shot (core clears the flag).
+        appendNotifyLog(id, { event: 'e2e_restore_rejected' });
+        log(`[${id.name}] E2E RESTORE REJECTED — corrupt session blob failed pickle_key validation; ` +
+          'reset to empty e2e state, self-heal fallback will re-establish');
+        process.nextTick(() =>
+          pushNotification(id.name, `[${id.name}] persisted e2e sessions were corrupt — rejected cleanly, sessions re-establishing`),
+        );
       } else if (event === 'contact_restored') {
         // A degraded contact's keys were re-established (signed restore
         // handshake). Drain anything queued toward it; content-free log line.
@@ -2316,7 +2341,7 @@ async function provisionIdentity(
   opts: { exposeLocal: boolean; localAutoAccept: boolean } = { exposeLocal: true, localAutoAccept: true },
 ): Promise<Identity> {
   const dir = identityDir(name);
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const seed = randomBytes(24).toString('hex'); // ephemeral entropy, not persisted
   const id = await createPacket(name, seed, dir);
   fs.writeFileSync(keyPath(dir), exportSigningSecret(id), { mode: 0o600 });
@@ -2403,6 +2428,9 @@ async function bootWrapper(): Promise<void> {
   } catch (err) {
     log('failed to start the contact-book registrar (local contact book disabled):', String(err));
   }
+
+  // Legacy blobs may sit at 0664/0755 (finding D) — tighten before anything runs.
+  tightenIdentityPerms();
 
   // Recreate every persisted identity so it registers on the broker and can
   // receive mail regardless of whether any session is currently bound to it.
