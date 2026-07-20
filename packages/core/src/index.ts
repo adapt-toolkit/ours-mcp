@@ -267,6 +267,11 @@ interface Identity {
   dir: string; // STATE_DIR/<name>
   pending: Pending[]; // per-identity FIFO of in-flight mutating resolvers
   lock: Promise<void>; // serialize mutating txns (single-writer mutex)
+  // Fail-closed persist (finding B): set when saveState failed, i.e. in-memory
+  // packet state has advanced past what is on disk. While set, new mutating
+  // transactions are rejected (after one save retry) so we never transmit
+  // ciphertext/receipts for ratchet state a restart would roll back.
+  persistFailed?: boolean;
 }
 
 let wrapper: AdaptWrapper;
@@ -1460,17 +1465,64 @@ function hasSavedState(dir: string): boolean {
 // That is SAFE only because this blob never leaves the host. If a portable/backup/cross-host
 // export of export_state is EVER added, $e2e_sessions MUST be stripped there (session secrecy /
 // forward secrecy) — or move it to an out-of-export local sidecar. Do NOT transmit this file.
+// Durable, fail-closed (finding B). The write is a BARRIER before the network:
+// it runs synchronously inside the wrapper's action loop (the save_state RET),
+// before any SEND action of the same transaction is transmitted. It either
+// completes durably (0600 temp + fsync(file) + atomic rename + fsync(dir)) or
+// THROWS — the wrapper then drops that transaction's buffered SENDs and the
+// host quarantines the identity. On any failure the prior state_data.bin is
+// untouched (the temp never replaces it except via the atomic rename).
 function saveState(id: Identity): void {
+  const bytes = withScope((lt) =>
+    Buffer.from(readonlyTx(id, '::actor::export_state', lt).Serialize()),
+  );
+  fs.mkdirSync(id.dir, { recursive: true, mode: 0o700 });
+  const final = dataPath(id.dir);
+  const tmp = `${final}.tmp`;
+  let fd: number | undefined;
   try {
-    const bytes = withScope((lt) =>
-      Buffer.from(readonlyTx(id, '::actor::export_state', lt).Serialize()),
-    );
-    fs.mkdirSync(id.dir, { recursive: true });
-    const tmp = `${dataPath(id.dir)}.tmp`;
-    fs.writeFileSync(tmp, bytes);
-    fs.renameSync(tmp, dataPath(id.dir));
+    fd = fs.openSync(tmp, 'w', 0o600);
+    fs.writeFileSync(fd, bytes);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, final);
+    const dirFd = fs.openSync(id.dir, 'r');
+    try {
+      fs.fsyncSync(dirFd);
+    } finally {
+      fs.closeSync(dirFd);
+    }
   } catch (err) {
-    log(`[${id.name}] failed to save state:`, String(err));
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* already closed */ }
+    }
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    throw err;
+  }
+}
+
+// saveState + fail-closed bookkeeping: on failure, mark the identity quarantined
+// (mutations rejected until a later save succeeds) and surface the event. Throws
+// iff the save failed, so callers inside the wrapper action loop (the save_state
+// RET) propagate the failure and the wrapper withholds that transaction's SENDs.
+function saveStateFailClosed(id: Identity): void {
+  try {
+    saveState(id);
+    if (id.persistFailed) {
+      id.persistFailed = false;
+      log(`[${id.name}] persist recovered — quarantine lifted`);
+      appendNotifyLog(id, { event: 'persist_recovered' });
+    }
+  } catch (err) {
+    id.persistFailed = true;
+    log(`[${id.name}] PERSIST FAILED — identity quarantined (fail-closed), outbound of this txn withheld:`, String(err));
+    // The identity dir itself may be what is broken — the notify log lives there.
+    try { appendNotifyLog(id, { event: 'persist_failed', error: String(err).slice(0, 300) }); } catch { /* daemon.log has it */ }
+    process.nextTick(() =>
+      pushNotification(id.name, `[${id.name}] PERSIST FAILED — messaging quarantined until the state file is writable again`),
+    );
+    throw err;
   }
 }
 
@@ -1938,10 +1990,36 @@ function mutatingTx(
   // over — that is why it leaked), so we Destroy it once the transaction settles.
   // The result is attached to `lt` when a caller scope is supplied; without one
   // the caller owns the returned value and must free it.
+  // Fail-closed gate (finding B): while the last persist failed, in-memory state
+  // is ahead of disk. Try once to catch the disk up; if that still fails, reject
+  // the mutation — advancing further (and transmitting on that state) risks
+  // permanent loss after a restart rollback.
+  if (id.persistFailed) {
+    try {
+      saveStateFailClosed(id);
+    } catch (err) {
+      return Promise.reject(new Error(
+        `identity "${id.name}" is quarantined: state persist is failing (${String(err)}) — ` +
+        'mutations are rejected until state_data.bin is writable again',
+      ));
+    }
+  }
   const envelope = object_to_adapt_value({ name, targ } as never) as AdaptValue;
   return withLock(id, () => enqueueMutation(id, envelope, timeoutMs)).then(
     (payload) => {
       envelope.Destroy();
+      // The _return_data RET resolves before the trailing _save_state RET runs,
+      // but both happen synchronously inside the wrapper's action loop — by the
+      // time this microtask executes, a failed save has already set the flag.
+      // Surface it: the transaction's SENDs were withheld, so reporting success
+      // would be a false green.
+      if (id.persistFailed) {
+        try { payload.Destroy(); } catch { /* scoped elsewhere */ }
+        throw new Error(
+          `identity "${id.name}": state persist FAILED — this transaction's outbound was withheld (fail-closed); ` +
+          'fix the state directory and retry',
+        );
+      }
       return lt ? payload.Attach(lt) : payload;
     },
     (err) => {
@@ -1969,7 +2047,10 @@ function wireHandlers(id: Identity): void {
     const kind = data.Reduce('kind').Visualize();
 
     if (kind === 'save_state') {
-      saveState(id);
+      // Throws on failure (fail-closed): the throw propagates into the wrapper's
+      // action loop, which then withholds this transaction's buffered SENDs —
+      // nothing is transmitted against state that is not durably on disk.
+      saveStateFailClosed(id);
       return;
     }
 
@@ -2251,7 +2332,7 @@ async function provisionIdentity(
   if (opts.exposeLocal) {
     await publishToBook(id);
   }
-  saveState(id);
+  saveStateFailClosed(id); // provisioning without a durable snapshot is a failure
   return id;
 }
 
@@ -3856,7 +3937,9 @@ async function main() {
 
     const flush = () => {
       stopGcTimer();
-      for (const id of identities.values()) saveState(id);
+      for (const id of identities.values()) {
+        try { saveState(id); } catch (err) { log(`[${id.name}] shutdown save failed:`, String(err)); }
+      }
       process.exit(0);
     };
     process.on('SIGINT', flush);
@@ -4104,7 +4187,9 @@ async function main() {
       }
       delete transports[sid];
     }
-    for (const id of identities.values()) saveState(id);
+    for (const id of identities.values()) {
+      try { saveState(id); } catch (err) { log(`[${id.name}] shutdown save failed:`, String(err)); }
+    }
     httpServer.close();
     process.exit(0);
   };
