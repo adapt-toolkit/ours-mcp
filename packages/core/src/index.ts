@@ -1585,6 +1585,15 @@ async function e2eRecoverySweep(id: Identity): Promise<void> {
   } catch (err) {
     log(`[${id.name}] e2e migration sweep failed:`, String(err));
   }
+  try {
+    const redriven = await withScopeAsync(async (lt) => {
+      const r = await mutatingTx(id, '::a2a_messaging::redrive_unacked_sweep', {}, lt);
+      return Number(r.Reduce('redriven_contacts').Visualize());
+    });
+    if (redriven > 0) log(`[${id.name}] redrove stuck unacked e2e sends toward ${redriven} contact(s)`);
+  } catch (err) {
+    log(`[${id.name}] unacked redrive sweep failed:`, String(err));
+  }
 }
 
 // ----- notifications.log + unread snapshot -----------------------------------
