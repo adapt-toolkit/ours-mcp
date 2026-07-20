@@ -1639,15 +1639,17 @@ async function readvertiseOnUpgradeSweep(id: Identity): Promise<void> {
   }
 }
 
-// Boot/GC SESSION-RECOVERY sweep (core 0.11 self-heal, DAEMON CONTRACT): a daemon
-// restart re-mints the Olm account (sessions + account are never persisted, INV-4),
-// so (a) every peer's stored e2e_bundle for me is stale until a fresh AD lands —
-// their authenticated decode rejects my fresh pre-keys against it — and (b) any
-// in-flight migration lost its staged session. readvertise_e2e_recovery pushes my
-// fresh AD to every E2E-CAPABLE contact (complement of the legacy-only upgrade
-// sweep); sweep_e2e_migrations re-drives/supersedes stalled migrations (it existed
-// but was never invoked at boot). Both are idempotent/attempt-capped — safe on
-// every boot and GC tick.
+// Boot/GC SESSION-RECOVERY sweep (core 0.11 self-heal, DAEMON CONTRACT). Since the
+// persist-primary change, the Olm account + LIVE sessions normally SURVIVE a restart
+// (validated import of $e2e_sessions — see commit_e2e_restore); this sweep is the
+// FALLBACK layer for true loss: a rejected/absent blob re-mints the account, making
+// every peer's stored e2e_bundle for me stale until a fresh AD lands, and an
+// in-flight migration always loses its staged session (m_staged is deliberately not
+// persisted). readvertise_e2e_recovery pushes my fresh AD to every E2E-CAPABLE
+// contact (complement of the legacy-only upgrade sweep); sweep_e2e_migrations
+// re-drives/supersedes stalled migrations. Both are idempotent/attempt-capped —
+// safe on every boot and GC tick, and a no-op-ish refresh when persist restored
+// everything.
 async function e2eRecoverySweep(id: Identity): Promise<void> {
   try {
     const readvertised = await withScopeAsync(async (lt) => {
@@ -1664,11 +1666,16 @@ async function e2eRecoverySweep(id: Identity): Promise<void> {
     log(`[${id.name}] e2e migration sweep failed:`, String(err));
   }
   try {
-    const redriven = await withScopeAsync(async (lt) => {
+    // Review #15: report what ACTUALLY happened — redriven / TTL-purged / deferred
+    // (cursor-batched) are different outcomes and must not be conflated.
+    const s = await withScopeAsync(async (lt) => {
       const r = await mutatingTx(id, '::a2a_messaging::redrive_unacked_sweep', {}, lt);
-      return Number(r.Reduce('redriven_contacts').Visualize());
+      const num = (f: string) => (r.Reduce(f).IsNil() ? 0 : Number(r.Reduce(f).Visualize()));
+      return { redriven: num('redriven_contacts'), purged: num('purged_contacts'), deferred: num('deferred_contacts') };
     });
-    if (redriven > 0) log(`[${id.name}] redrove stuck unacked e2e sends toward ${redriven} contact(s)`);
+    if (s.redriven > 0 || s.purged > 0 || s.deferred > 0) {
+      log(`[${id.name}] unacked sweep: redriven=${s.redriven} ttl_purged=${s.purged} deferred=${s.deferred} contact(s)`);
+    }
   } catch (err) {
     log(`[${id.name}] unacked redrive sweep failed:`, String(err));
   }
@@ -2177,7 +2184,9 @@ function wireHandlers(id: Identity): void {
         const sid = binHexField(payload, 'session_id');
         const olm = payload.Reduce('olm_type').Visualize();
         const wireId = payload.Reduce('wire_id').Visualize();
-        const retained = payload.Reduce('retained').IsNil() ? undefined : payload.Reduce('retained').Visualize() === 'TRUE';
+        // GetBoolean, NOT Visualize()==='TRUE' — MUFL bools visualize as '%%TRUE',
+        // which made every send read as not-retained (caught by fixG raw logs).
+        const retained = payload.Reduce('retained').IsNil() ? undefined : payload.Reduce('retained').GetBoolean();
         const evicted: string[] = [];
         const ev = payload.Reduce('evicted');
         if (!ev.IsNil()) {
@@ -3620,7 +3629,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
     if (has('route')) {
       // finding J: $retained -> FALSE means the send exceeded its redrive budget and
       // will NOT auto-resend if the session turns out to be lost — surface it.
-      const notRetained = has('retained') && sent.Reduce('retained').Visualize() !== 'TRUE';
+      const notRetained = has('retained') && !sent.Reduce('retained').GetBoolean();
       return { kind: 'e2e', wireId, cid, notRetained }; // $route -> $e2e ⇒ "e2e"
     }
     if (has('deferred')) return { kind: 'deferred', wireId, queued: has('queued') ? Number(sent.Reduce('queued').Visualize()) : 0 };
