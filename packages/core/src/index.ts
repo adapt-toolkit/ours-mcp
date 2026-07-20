@@ -2177,8 +2177,15 @@ function wireHandlers(id: Identity): void {
 
 function createPacket(
   name: string, seed: string, dir: string, track = true, signingSecret?: string,
+  deferExposure = false,
 ): Promise<Identity> {
   const config = new PacketWrapperConfigurator();
+  // Restore-before-exposure (finding A): a restoring packet must not be routable —
+  // no broker registration, no local delivery — until import_state has replayed the
+  // persisted snapshot. Otherwise a queued inbound transaction can advance the
+  // fresh packet's state (ratchet/deposits/acks) that the import then erases, and
+  // the sender, having seen the receipt, drops the message permanently.
+  config.deferred_exposure = deferExposure;
   const args = [
     '--unit_hash', UNIT.hash,
     '--seed_phrase', seed,
@@ -2254,23 +2261,33 @@ async function provisionIdentity(
 async function restoreIdentity(name: string): Promise<Identity> {
   const dir = identityDir(name);
   const secret = fs.readFileSync(keyPath(dir), 'utf8').trim();
-  const id = await createPacket(name, '', dir, true, secret);
-  if (hasSavedState(dir)) {
-    try {
-      const buf = fs.readFileSync(dataPath(dir));
-      await withScopeAsync(async (lt) => {
-        const adaptData = id.pw.packet.ParseValue(new Uint8Array(buf)).Attach(lt);
-        await mutatingTx(id, '::actor::import_state', adaptData, lt);
-      });
-    } catch (err) {
-      log(`[${name}] FAILED TO IMPORT SAVED STATE — continuing with the reseeded identity; ` +
-        `surviving contacts (if the blob was partially migrated) self-heal via contact restore:`, String(err));
-      appendNotifyLog(id, { event: 'state_import_failed', error: String(err).slice(0, 300) });
+  // Quarantined creation (finding A): the packet stays unrouted (broker queues its
+  // inbound in arrival order, as for an offline node) until import_state is done.
+  const id = await createPacket(name, '', dir, true, secret, true);
+  log(`[${name}] created QUARANTINED (no routing/broker registration) — importing state before exposure`);
+  try {
+    if (hasSavedState(dir)) {
       try {
-        fs.renameSync(dataPath(dir), `${dataPath(dir)}.failed-${Date.now()}`);
-        log(`[${name}] unreadable state blob preserved as state_data.bin.failed-*`);
-      } catch { /* best effort */ }
+        const buf = fs.readFileSync(dataPath(dir));
+        await withScopeAsync(async (lt) => {
+          const adaptData = id.pw.packet.ParseValue(new Uint8Array(buf)).Attach(lt);
+          await mutatingTx(id, '::actor::import_state', adaptData, lt);
+        });
+      } catch (err) {
+        log(`[${name}] FAILED TO IMPORT SAVED STATE — continuing with the reseeded identity; ` +
+          `surviving contacts (if the blob was partially migrated) self-heal via contact restore:`, String(err));
+        appendNotifyLog(id, { event: 'state_import_failed', error: String(err).slice(0, 300) });
+        try {
+          fs.renameSync(dataPath(dir), `${dataPath(dir)}.failed-${Date.now()}`);
+          log(`[${name}] unreadable state blob preserved as state_data.bin.failed-*`);
+        } catch { /* best effort */ }
+      }
     }
+  } finally {
+    // Expose on EVERY path out of the import (success, no saved state, failed
+    // import): an unexposed packet would never register with the broker at all.
+    wrapper.expose_packet(id.cid);
+    log(`[${name}] EXPOSED (routing + broker registration) — import phase complete`);
   }
   // Eager restore: re-key degraded contacts + flush queues orphaned by a crash.
   await contactRestoreSweep(id);
