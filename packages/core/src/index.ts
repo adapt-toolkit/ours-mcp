@@ -2203,6 +2203,17 @@ function wireHandlers(id: Identity): void {
             pushNotification(id.name, `[${id.name}] redrive window overflow: ${evicted.length} older unacked send(s) lost their auto-resend guarantee (${evicted.join(', ')})`),
           );
         }
+      } else if (event === 'dedup_degraded') {
+        // Ship-review major-3: the delivered_wire storage ceiling dropped the oldest
+        // in-TTL entry — a real dedup-guarantee loss under pathological inbound
+        // volume. Loud, never silent.
+        const cid = payload.Reduce('cid').Visualize();
+        const droppedWire = payload.Reduce('dropped_wire_id').Visualize();
+        appendNotifyLog(id, { event: 'dedup_degraded', cid: String(cid), dropped_wire_id: String(droppedWire) });
+        log(`[${id.name}] [e2e-app] DEDUP DEGRADED cid=${cid} dropped_wire_id=${droppedWire} (storage ceiling — a late redrive of that id could re-deposit)`);
+        process.nextTick(() =>
+          pushNotification(id.name, `[${id.name}] dedup window overflowed for ${String(cid).slice(0, 12)}… — one oldest entry dropped (guarantee loss surfaced)`),
+        );
       } else if (event === 'e2e_delivery_expired') {
         // Review #7: the sweep's TTL purge is a PERMANENT delivery failure for those
         // sends — an explicit event, never a silent purge.
@@ -2232,8 +2243,11 @@ function wireHandlers(id: Identity): void {
         const wireId = payload.Reduce('wire_id').Visualize();
         const code = payload.Reduce('code').IsNil() ? undefined : String(payload.Reduce('code').Visualize());
         const duplicate = !payload.Reduce('duplicate').IsNil();
-        appendNotifyLog(id, { event: 'e2e_app_recv', cid: String(cid), session_id: sid, ok, wire_id: String(wireId), ...(code ? { code } : {}), ...(duplicate ? { duplicate: true } : {}) });
-        log(`[${id.name}] [e2e-app] recv cid=${cid} session_id=${sid} ok=${ok} wire_id=${wireId}${code ? ` code=${code}` : ''}${duplicate ? ' duplicate=true' : ''}`);
+        // Ship-review minor-6: keep the $file marker — a deduped FILE redrive is a
+        // distinct observable from a deduped message.
+        const isFile = !payload.Reduce('file').IsNil();
+        appendNotifyLog(id, { event: 'e2e_app_recv', cid: String(cid), session_id: sid, ok, wire_id: String(wireId), ...(code ? { code } : {}), ...(duplicate ? { duplicate: true } : {}), ...(isFile ? { file: true } : {}) });
+        log(`[${id.name}] [e2e-app] recv cid=${cid} session_id=${sid} ok=${ok} wire_id=${wireId}${code ? ` code=${code}` : ''}${duplicate ? ' duplicate=true' : ''}${isFile ? ' file=true' : ''}`);
       } else if (event === 'e2e_rekey') {
         // Review #14: the self-heal engine's central event was invisible to the host.
         // Persist it typed + identity-scoped: role (requester/initiator/responder/healed),
@@ -2434,21 +2448,29 @@ async function restoreIdentity(name: string): Promise<Identity> {
   const secret = fs.readFileSync(keyPath(dir), 'utf8').trim();
   // Quarantined creation (finding A): the packet stays unrouted (broker queues its
   // inbound in arrival order, as for an offline node) until import_state is done.
-  const id = await createPacket(name, '', dir, true, secret, true);
-  log(`[${name}] created QUARANTINED (no routing/broker registration) — importing state before exposure`);
+  // Ship-review major-1: track=false — the identity enters the PUBLIC identities map
+  // only after import/commit/IPD/exposure ALL succeeded. The quarantine was only
+  // network-level before: the stdio MCP server is connected before bootWrapper, so a
+  // client could choose_identity a restoring identity and interleave mutations
+  // between restore phases. The host's own restore transactions operate on the id
+  // OBJECT directly, so nothing here needs map membership.
+  const id = await createPacket(name, '', dir, false, secret, true);
+  log(`[${name}] created QUARANTINED (no routing/broker registration, not client-bindable) — importing state before exposure`);
   // Review #2: a TIMEOUT is NOT a completion — enqueueMutation gives up after 25s
   // but the queued transaction may still execute later. Exposing after a timeout
-  // recreates exactly the race quarantine exists to prevent, so any unknown-outcome
-  // step tears the identity down unexposed instead.
+  // recreates exactly the race quarantine exists to prevent. Ship-review major-2
+  // widens this to EVERY unrecoverable pre-exposure failure (IPD refresh/coherence):
+  // any such path tears the identity down unexposed instead of failing open.
   const isTimeout = (err: unknown) => /timed out waiting for the transaction result/.test(String(err));
-  const failClosed = (step: string, err: unknown): never => {
-    log(`[${name}] ${step} outcome UNKNOWN (timeout) — identity left UNEXPOSED (fail-closed): ` +
-      'the transaction may still execute and exposure would race it');
+  const tearDownUnexposed = (step: string, why: string, err: unknown): never => {
+    log(`[${name}] ${step} ${why} — identity left UNEXPOSED and UNTRACKED (fail-closed)`);
     try { appendNotifyLog(id, { event: 'restore_fail_closed', step, error: String(err).slice(0, 300) }); } catch { /* best effort */ }
-    identities.delete(name);
+    identities.delete(name); // no-op (track=false) — kept as a guard
     try { wrapper.remove_packet(id.cid); } catch (e2) { log(`[${name}] quarantined-packet teardown failed:`, String(e2)); }
-    throw new Error(`identity "${name}": ${step} timed out during restore — left unexposed (fail-closed)`);
+    throw new Error(`identity "${name}": ${step} failed during restore (${why}) — left unexposed (fail-closed)`);
   };
+  const failClosed = (step: string, err: unknown): never =>
+    tearDownUnexposed(step, 'outcome UNKNOWN (timeout): the transaction may still execute and exposure would race it', err);
   if (hasSavedState(dir)) {
     let imported = false;
     try {
@@ -2505,33 +2527,48 @@ async function restoreIdentity(name: string): Promise<Identity> {
           log(`[${name}] reject_e2e_restore failed (staging is transient; continuing):`, String(err2));
         }
       }
-      // Review #3: the wrapper ctor minted a PRE-import account into the transport
-      // IPD; a committed import replaced the account underneath it. Rebuild the IPD
-      // from current state — cheap and idempotent, so run it on every imported boot.
+      // Review #3 + ship-review major-2: FAIL-CLOSED, not advisory. A stale transport
+      // IPD advertises key material peers cannot establish against — exposing that
+      // way re-opens the decode-seam hole the refresh exists to close. Refresh
+      // failure, coherence-probe failure, or an incoherent result all tear down.
       try {
         id.pw.refresh_identity_proof_document();
         log(`[${name}] transport IPD refreshed from post-import state`);
       } catch (err) {
-        log(`[${name}] transport IPD refresh FAILED (decode-seam e2e may advertise a stale bundle):`, String(err));
-        appendNotifyLog(id, { event: 'ipd_refresh_failed', error: String(err).slice(0, 300) });
+        tearDownUnexposed('ipd_refresh', 'FAILED (IPD would advertise a stale bundle)', err);
       }
-      // Coherence proof (#3 evidence, identity-scoped): the IPD must advertise the
-      // ik_curve of the CURRENT account (restored, or ctor-fresh after a reject).
+      // Coherence proof — mandatory: the IPD must advertise the ik_curve of the
+      // CURRENT account (restored, or ctor-fresh after a reject).
+      let coherent = false;
+      let ikShort = '';
       try {
+        // Test lever: force the incoherent branch (staging a genuine refresh failure
+        // requires breaking the packet mid-boot; the teardown wiring must still be
+        // provably exercised).
+        if (process.env.OURS_TEST_FORCE_IPD_INCOHERENT === '1') {
+          throw new Error('forced incoherent (OURS_TEST_FORCE_IPD_INCOHERENT)');
+        }
         const ik = withScope((lt) => String(readonlyTx(id, '::a2a_messaging::e2e_self_fp', lt).Reduce('ik').Visualize()));
         const ipdVis = id.pw.identity_proof_document.Visualize();
         const ikHex = ik.replace(/^0x/i, '');
-        const coherent = ikHex.length >= 32 && ipdVis.toLowerCase().includes(ikHex.toLowerCase());
-        log(`[${name}] IPD/e2e coherence: account_ik=${ik.slice(0, 18)}… ipd_advertises_it=${coherent}`);
+        coherent = ikHex.length >= 32 && ipdVis.toLowerCase().includes(ikHex.toLowerCase());
+        ikShort = ik.slice(0, 18);
         appendNotifyLog(id, { event: 'ipd_coherence', ik, coherent });
       } catch (err) {
-        log(`[${name}] IPD/e2e coherence check failed:`, String(err));
+        tearDownUnexposed('ipd_coherence', 'probe FAILED (coherence unprovable)', err);
+      }
+      log(`[${name}] IPD/e2e coherence: account_ik=${ikShort}… ipd_advertises_it=${coherent}`);
+      if (!coherent) {
+        tearDownUnexposed('ipd_coherence', 'IPD does NOT advertise the live account ik', new Error('incoherent transport IPD'));
       }
     }
   }
-  // Exposure happens ONLY here: every unknown-outcome path above threw (fail-closed),
-  // so reaching this line means the import phase finished in a positively known state.
+  // Exposure + tracking happen ONLY here: every unknown-outcome or incoherent path
+  // above threw (fail-closed), so reaching this line means the import phase finished
+  // in a positively known, coherent state. Only now does the identity become
+  // client-bindable (ship-review major-1).
   wrapper.expose_packet(id.cid);
+  identities.set(name, id);
   log(`[${name}] EXPOSED (routing + broker registration) — import phase complete`);
   // Eager restore: re-key degraded contacts + flush queues orphaned by a crash.
   await contactRestoreSweep(id);
@@ -3694,7 +3731,18 @@ function createMcpServer(getSessionId: () => string): McpServer {
           case 'e2e':
             // Migrated session: CORE delivered over e2e (Option B, boxed inline). Daemon just reports
             // it. §4 session_id proof line is core's `[e2e-app] send`; this is the daemon verdict log.
-            log(`[e2e-route] cid=${v.cid} wire_id=${v.wireId} verdict=e2e (core delivered over migrated session)`);
+            log(`[e2e-route] cid=${v.cid} wire_id=${v.wireId} verdict=e2e (core delivered over migrated session)${v.notRetained ? ' NOT RETAINED (oversized)' : ''}`);
+            if (v.notRetained) {
+              // Ship-review minor-5: mirror the send_file surfacing — an oversized
+              // TEXT body is not retained for redrive either, never a plain success.
+              appendNotifyLog(id!, { event: 'send_not_retained', wire_id: v.wireId, kind: 'message' });
+              return textResult(
+                `Message sent to "${contact}" over the end-to-end session (wire_id ${v.wireId}) — ` +
+                'WARNING: the message body exceeds the redrive budget, so it is NOT retained for automatic ' +
+                'resend. If the recipient loses its session, this message will NOT re-deliver automatically — ' +
+                'confirm receipt or resend once the contact is confirmed back.',
+              );
+            }
             return textResult(`Message sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`);
           case 'deferred':
             return textResult(
