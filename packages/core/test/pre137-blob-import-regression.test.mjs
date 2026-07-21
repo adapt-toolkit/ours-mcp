@@ -1,33 +1,18 @@
 // packages/core/test/pre137-blob-import-regression.test.mjs
 //
-// KNOWN-RED tracking test — DO NOT "fix" by patching this repo.
+// Pre-#137 (v0) blob import gate — GREEN since core b608099 (PR #14).
 //
-// Asserts the CORRECT, expected behavior for restoreIdentity() against a genuinely
-// pre-#137 identity blob (no format_version stamp — see the "format stamp" contract
-// comment at the top of import_core_state in a2a_messaging.mm): the old blob should
-// import cleanly (the $e2e_sessions field's `safe (...)` cast in meta.mm is supposed
-// to safe-degrade to NIL for a blob that predates the field, not raise).
-//
-// It currently FAILS: core 5887dec (what @adapt-toolkit sdk/sdk-native/mufl 0.10.12
-// ships, and what this repo's packages/core/mufl_code/core submodule is now pinned to
-// — see commit bb09e1a) has a ship-blocking regression, flagged by Architect-2 /
-// Coordinator, where that cast raises instead. restoreIdentity() (src/index.ts) then
-// catches it as a total, all-or-nothing loss of the identity's saved state (contacts +
-// inbox alike — see restoreIdentity's own comment about "surviving contacts self-heal").
-//
-// The fixture blob (test/fixtures/pre-137-identity-state.bin + .key) is NOT synthetic:
-// it was produced by actually building this repo at origin/main (pre-tonight's
-// DR-rollout catch-up) — i.e. real actor.mu paired with the real OLD core pin
-// (faa2b52) — and running `ours-mcp create-root` against an isolated daemon instance
-// to capture a genuine on-disk state_data.bin. It is what a real pre-#137 user's
-// identity looks like on disk.
-//
-// This is a KNOWN-RED tracking item, not a broken test to "fix" — that's the point: a
-// green suite that never touches the broken path is not evidence of anything, and this
-// closes that gap (nothing else in this repo exercises restoreIdentity() against an
-// old-format blob at all). It is intentionally NOT wired into the default `npm test`
-// chain in package.json, so it doesn't block the nightly/publish gate on a known,
-// tracked, upstream-owned issue — run it explicitly:
+// Asserts restoreIdentity() against a genuinely pre-#137 identity blob (no
+// format_version stamp): the old blob imports cleanly. Historically this was a
+// KNOWN-RED tracking test: core 5887dec (what sdk/mufl 0.10.12 ships) had a
+// ship-blocking regression — the $e2e_sessions `safe (...)` record-cast raised on
+// the absent field (meta.mm's record path has no NIL branch) and restoreIdentity()
+// caught it as a total loss of the identity's saved state. Fixed upstream by the
+// NIL-guard in ours-mufl-core PR #14 (merge b608099), which this repo's
+// packages/core/mufl_code/core submodule now pins; this file keeps guarding the
+// path (nothing else in this repo exercises restoreIdentity() against an
+// old-format blob at all). Wired into the default `npm test` chain since the fix
+// landed. Standalone run:
 //   node packages/core/test/pre137-blob-import-regression.test.mjs
 // It is expected to flip green on its own, no local changes needed, once the upstream
 // core fix lands and this repo's submodule is re-pinned past it — at that point fold
@@ -79,7 +64,7 @@ try {
   const sawImportFailure = existsSync(notifyLog) && readFileSync(notifyLog, 'utf8')
     .split('\n').filter(Boolean).map((l) => JSON.parse(l))
     .some((ev) => ev.event === 'state_import_failed');
-  ok(!sawImportFailure, 'no state_import_failed notification for the pre-#137 blob (currently fails: SAFE cast on $e2e_sessions raises instead of degrading to NIL — meta.mm ~1549)');
+  ok(!sawImportFailure, 'no state_import_failed notification for the pre-#137 blob (the PR #14 NIL-guard keeps the import clean)');
 
   const preservedAsFailed = readdirSync(idDir).some((f) => f.startsWith('state_data.bin.failed-'));
   ok(!preservedAsFailed, 'state_data.bin was not sidelined to .failed-* (that rename only happens on import failure)');
