@@ -15,9 +15,13 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # main       → stable @latest (bump → publish; unchanged legacy flow).
+    # prerelease → nightly: publish the npm `nightly` tag ONLY, with ephemeral
+    #              -nightly.N versions. The two paths are branch-exclusive and a
+    #              nightly can NEVER move @latest (see scripts/publish-guard.sh).
+    branches: [main, prerelease]
   pull_request:
-    branches: [main]
+    branches: [main, prerelease]
   workflow_dispatch:
 
 # Cancel superseded runs on the same ref so a burst of pushes doesn't queue a
@@ -152,6 +156,14 @@ jobs:
       - name: Compile MUFL packet
         run: scripts/compile-mufl.sh
       - run: npm run build
+      # FAIL-CLOSED before ANY stable publish: asserts we are on main and every managed
+      # package carries a clean X.Y.Z (no pre-release suffix). A nightly build can never
+      # reach this job (branch-gated), and if one somehow did, the guard refuses to publish.
+      - name: Fail-closed stable guard (branch=main, clean version, @latest)
+        run: |
+          for p in packages/core packages/claude-code packages/hermes packages/codex packages/installer; do
+            bash .github/workflows/scripts/publish-guard.sh stable "$p/package.json" latest
+          done
       # Publish order = dependency order: core first, then the plugins that
       # pin it. `--if-present` is not a publish flag, so each is its own step; a plugin
       # whose version already exists on npm 403s, so re-runs after a partial publish would
@@ -187,4 +199,96 @@ jobs:
             echo "- @ours.network/codex@${{ needs.version-bump.outputs.codex-version }}"
             echo "- @ours.network/install@${{ needs.version-bump.outputs.install-version }}"
             echo "- plugin manifests (.claude-plugin/plugin.json) at v${{ needs.version-bump.outputs.unified-version }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # NIGHTLY channel — runs ONLY on push to prerelease. Computes an ephemeral
+  # -nightly.N suite version at CI time (never committed), then publishes each
+  # managed package to the npm `nightly` tag behind the fail-closed guard. This
+  # job is branch-exclusive with version-bump/npm-publish (main), so a nightly
+  # can never run the stable path and can never move @latest.
+  nightly-publish:
+    needs: gates
+    if: github.event_name == 'push' && github.ref == 'refs/heads/prerelease'
+    runs-on: ubuntu-latest
+    name: Publish nightly to npm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      # Set the ephemeral -nightly.N version across the suite (package.jsons +
+      # plugin manifests + internal pins). NOT committed — lives only in this
+      # runner's working tree for the publish steps below.
+      - name: Compute + set nightly version
+        id: nightly
+        run: OURS_RELEASE_MODE=nightly bash .github/workflows/scripts/bump-versions.sh
+      - name: Compile MUFL packet
+        run: scripts/compile-mufl.sh
+      - run: npm run build
+      - name: Verify build output (compiled .muflo + bundles ship)
+        run: |
+          test -f packages/core/dist/index.js
+          test -f packages/core/dist/cli.js
+          ls packages/core/dist/mufl_code/*.muflo
+          test -f packages/claude-code/dist/hooks/runner.js
+      # Each publish goes through publish-nightly.sh, which runs the fail-closed
+      # guard (version must be -nightly.N) and then `npm publish --tag nightly`
+      # atomically. Publish order = dependency order (core first, then pinners).
+      - name: Publish @ours.network/mcp (nightly)
+        run: bash .github/workflows/scripts/publish-nightly.sh @ours.network/mcp
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish @ours.network/claude-code (nightly)
+        run: bash .github/workflows/scripts/publish-nightly.sh @ours.network/claude-code
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish @ours.network/hermes (nightly)
+        run: bash .github/workflows/scripts/publish-nightly.sh @ours.network/hermes
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish @ours.network/codex (nightly)
+        run: bash .github/workflows/scripts/publish-nightly.sh @ours.network/codex
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish @ours.network/install (nightly)
+        run: bash .github/workflows/scripts/publish-nightly.sh @ours.network/install
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Post-publish safety proof: nightly tag advanced, @latest UNCHANGED.
+      # npm's registry/CDN can lag a few seconds behind a publish, so poll the
+      # nightly tag with backoff before asserting. The @latest check needs no
+      # retry — it must ALREADY be a clean version the instant we look.
+      - name: Verify dist-tags (nightly moved, @latest untouched)
+        run: |
+          v="${{ steps.nightly.outputs.unified-version }}"
+          for n in @ours.network/mcp @ours.network/claude-code @ours.network/hermes @ours.network/codex @ours.network/install; do
+            nightly_tag=""
+            for attempt in 1 2 3 4 5 6 7 8; do
+              nightly_tag="$(npm view "$n" dist-tags.nightly --registry=https://registry.npmjs.org 2>/dev/null || echo '')"
+              [ "$nightly_tag" = "$v" ] && break
+              echo "  ($n nightly tag not yet '$v' — got '${nightly_tag:-<empty>}', retry $attempt/8)"
+              sleep 10
+            done
+            latest_tag="$(npm view "$n" dist-tags.latest --registry=https://registry.npmjs.org 2>/dev/null || echo '')"
+            echo "$n -> nightly=$nightly_tag latest=$latest_tag"
+            test "$nightly_tag" = "$v" || { echo "::error::$n nightly tag is '$nightly_tag', expected '$v' after retries"; exit 1; }
+            case "$latest_tag" in *-*) echo "::error::$n @latest '$latest_tag' carries a pre-release suffix"; exit 1 ;; esac
+            test -n "$latest_tag" || { echo "::error::$n @latest is empty (unexpected)"; exit 1; }
+          done
+      - name: Summary
+        run: |
+          {
+            echo "Published nightly (lockstep ${{ steps.nightly.outputs.unified-version }}) to the \`nightly\` tag:"
+            echo "- @ours.network/mcp@${{ steps.nightly.outputs.core-version }}"
+            echo "- @ours.network/claude-code@${{ steps.nightly.outputs.plugin-version }}"
+            echo "- @ours.network/hermes@${{ steps.nightly.outputs.hermes-version }}"
+            echo "- @ours.network/codex@${{ steps.nightly.outputs.codex-version }}"
+            echo "- @ours.network/install@${{ steps.nightly.outputs.install-version }}"
+            echo "- @latest is unchanged."
           } >> "$GITHUB_STEP_SUMMARY"

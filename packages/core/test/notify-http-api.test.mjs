@@ -113,6 +113,67 @@ console.log('notify-http-api\n');
   }
 }
 
+// ─── e2e/migration events do NOT fabricate a "new message" wake ──────────────
+// Regression for the "watch deaf/garbled on double-ratchet messages" bug: the
+// daemon's notifications.log carries e2e/migration OBSERVABILITY events
+// (e2e_app_recv, e2e_app_send, migration_active, …) alongside the genuine
+// message_received arrival. `watch` is the "one line per NEW INBOUND MESSAGE"
+// wake source, so it must wake on message_received/file_received ONLY. The old
+// `else` fallthrough turned every observability event into a bogus
+// "[name] new message from ?" wake (and the peer's own e2e_app_send even woke the
+// SENDER). This asserts: observability events → NO stdout line; the real message →
+// exactly one correct wake; a delivered file → a file wake.
+{
+  const dir = mkdtempSync(join(tmpdir(), 'a2a-notif-e2e-'));
+  const bogus = mkdtempSync(join(tmpdir(), 'a2a-notif-e2e-bogus-'));
+  const PORT = await freePort();
+  const d = startDaemon(PORT, dir, {});
+  let watcher;
+  try {
+    const up = await waitVersion(PORT);
+    ok(up, 'e2e: daemon boots');
+    if (!up) throw new Error('daemon did not boot');
+    const token = readFileSync(join(dir, 'daemon-token'), 'utf8').trim();
+    const bobDir = join(dir, 'Bob');
+    mkdirSync(bobDir, { recursive: true });
+    const logPath = join(bobDir, 'notifications.log');
+    appendFileSync(logPath, '');
+
+    watcher = spawn('node', [CLI, 'watch', 'Bob'], {
+      env: { ...process.env, OURS_PORT: String(PORT), OURS_STATE_DIR: bogus, OURS_API_TOKEN: token, OURS_BROKER_URL: 'ws://127.0.0.1:59997/nobroker' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    watcher.stdout.on('data', (c) => { stdout += c.toString(); });
+    await sleep(1500); // prime at the tip
+
+    // Observability events — must produce ZERO wake lines.
+    appendFileSync(logPath, notifyLine({ event: 'e2e_app_send', cid: 'CID', session_id: 'ab', olm_type: '1', wire_id: 'W1' }));
+    appendFileSync(logPath, notifyLine({ event: 'e2e_app_recv', cid: 'CID', session_id: 'ab', ok: true, wire_id: 'W2' }));
+    appendFileSync(logPath, notifyLine({ event: 'e2e_app_recv', cid: 'CID', session_id: 'ab', ok: false, wire_id: '' }));
+    appendFileSync(logPath, notifyLine({ event: 'migration_active', cid: 'CID', role: 'initiator', epoch: '01', session_id: 'ab' }));
+    appendFileSync(logPath, notifyLine({ event: 'downgrade_refused', cid: 'CID', wire_id: 'W3' }));
+    await sleep(800);
+    ok(stdout === '', 'e2e: observability events produce NO wake line (was bogus "new message from ?")');
+    ok(!/new message from \?/.test(stdout), 'e2e: no fabricated "new message from ?" for a migrated peer');
+
+    // A genuine e2e message delivered → exactly ONE real wake, correctly attributed.
+    appendFileSync(logPath, notifyLine({ event: 'message_received', from: 'Alice', msg_id: 7, date: '2026-07-18T00:00:00Z' }));
+    for (let i = 0; i < 40 && !/#7/.test(stdout); i++) await sleep(150);
+    ok(/\[Bob\] new message from Alice \(#7\)/.test(stdout), 'e2e: delivered message_received still wakes (correct format)');
+
+    // A delivered file → a file wake.
+    appendFileSync(logPath, notifyLine({ event: 'file_received', from: 'Alice', file_id: 8, filename: 'spec.pdf', mime: 'application/pdf', bytes: 1234, date: '2026-07-18T00:01:00Z' }));
+    for (let i = 0; i < 40 && !/spec\.pdf/.test(stdout); i++) await sleep(150);
+    ok(/\[Bob\] new file spec\.pdf from Alice/.test(stdout), 'e2e: delivered file_received wakes with a file line');
+  } finally {
+    if (watcher) { try { watcher.kill('SIGKILL'); } catch { /* gone */ } }
+    kill(d);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(bogus, { recursive: true, force: true });
+  }
+}
+
 // ─── fallback fails LOUDLY: API unreachable + unreadable state dir ───────────
 // The old behavior silently spun forever (deaf agent). Now: a clear one-line
 // error + non-zero exit, so a watcher that cannot watch looks broken, not armed.

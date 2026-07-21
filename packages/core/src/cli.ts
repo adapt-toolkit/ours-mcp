@@ -561,7 +561,10 @@ async function cmdCreateRoot(argv: string[]): Promise<void> {
   const client = new Client({ name: 'ours-mcp-cli', version: CLI_VERSION });
   try {
     await client.connect(transport);
-    const r = await client.callTool({ name: 'create_root_identity', arguments: { name } });
+    // skip_if_root_exists keeps re-runs idempotent: if a root already exists the tool
+    // fails with "a root identity already exists" (mapped to a quiet exit-0 no-op below)
+    // rather than adopting `name` as a role (the interactive-tool behaviour).
+    const r = await client.callTool({ name: 'create_root_identity', arguments: { name, skip_if_root_exists: true } });
     const text = (Array.isArray(r.content) ? (r.content as Array<{ text?: unknown }>) : [])
       .map((c) => (typeof c.text === 'string' ? c.text : ''))
       .join(' ')
@@ -599,23 +602,47 @@ async function cmdCreateRoot(argv: string[]): Promise<void> {
 // status line goes to stderr, since Monitor turns each stdout line into a
 // notification.
 // A content-free arrival event as it appears on notifications.log / the API.
-interface NotifyEvent { event?: string; from?: string; msg_id?: number | string; date?: string; queued?: number | string }
+interface NotifyEvent { event?: string; from?: string; msg_id?: number | string; file_id?: number | string; filename?: string; bytes?: number | string; date?: string; queued?: number | string }
 
 // The ONE place watch formats an event → stdout. Both the API path and the file
 // fallback funnel through here so Claude Code's Monitor sees byte-identical lines
 // no matter which transport delivered them.
+//
+// WAKE-EVENT WHITELIST (fixes the "watch deaf/garbled on e2e" bug): the daemon's
+// notifications.log carries MANY event kinds — genuine inbound arrivals
+// (message_received / file_received), intro bookkeeping (local_contact_request /
+// pending_message), AND a large family of e2e/migration OBSERVABILITY events
+// (e2e_app_recv, e2e_app_send, migration_active, migration_stalled,
+// migration_deferred_flush, downgrade_refused, inbound_error, …). `watch` is the
+// "one line per NEW INBOUND MESSAGE" wake source (README/DAEMON-INTEGRATION), so it
+// must wake ONLY on the arrival events. The previous `else` fallthrough formatted
+// EVERY non-intro event as "new message from <from>" — and since the observability
+// events carry no `from`, a migrated (double-ratchet) message surfaced as a bogus
+// "new message from ?" wake (the peer's own e2e_app_send even woke the SENDER), while
+// the genuine message_received got drowned in noise. Now each surfaced event is
+// classified explicitly; everything else is swallowed (watch stays quiet).
 function emitNotify(name: string, msg: NotifyEvent): void {
-  if (msg.event === 'local_contact_request') {
-    out(`[${name}] pending local introduction from ${msg.from ?? '?'} — respond_to_introduction to approve/reject`);
-  } else if (msg.event === 'pending_message') {
-    out(`[${name}] ${msg.from ?? '?'} queued a message awaiting introduction approval (${msg.queued ?? '?'} queued)`);
-  } else {
+  if (msg.event === 'message_received') {
     out(
       `[${name}] new message from ${msg.from ?? '?'}` +
         (msg.msg_id !== undefined ? ` (#${msg.msg_id})` : '') +
         (msg.date ? `  (${msg.date})` : ''),
     );
+  } else if (msg.event === 'file_received') {
+    out(
+      `[${name}] new file ${msg.filename ?? '?'} from ${msg.from ?? '?'}` +
+        (msg.bytes !== undefined ? ` (${msg.bytes} B)` : '') +
+        (msg.file_id !== undefined ? ` (#${msg.file_id})` : '') +
+        (msg.date ? `  (${msg.date})` : ''),
+    );
+  } else if (msg.event === 'local_contact_request') {
+    out(`[${name}] pending local introduction from ${msg.from ?? '?'} — respond_to_introduction to approve/reject`);
+  } else if (msg.event === 'pending_message') {
+    out(`[${name}] ${msg.from ?? '?'} queued a message awaiting introduction approval (${msg.queued ?? '?'} queued)`);
   }
+  // All other events (e2e_app_recv/send, migration_*, downgrade_refused,
+  // sibling_contact_added, contact_restored, inbound_error, state_import_failed, …)
+  // are NOT message arrivals — watch stays silent so it never fabricates a wake.
 }
 
 // A watcher that cannot watch must look BROKEN, not armed: print one clear line

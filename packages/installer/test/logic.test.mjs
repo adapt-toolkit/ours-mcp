@@ -5,7 +5,46 @@ import {
   canonHarnesses, suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
   detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
   DEFAULT_PORT, DEFAULT_BROKER, RESERVED_PORTS,
+  resolveChannel, pkgTag, pkgSpec, DEFAULT_CHANNEL,
 } from '../lib/logic.mjs';
+
+test('resolveChannel: nightly synonyms → nightly; everything else → latest', () => {
+  assert.equal(DEFAULT_CHANNEL, 'latest');
+  assert.equal(resolveChannel('nightly'), 'nightly');
+  assert.equal(resolveChannel('NIGHTLY'), 'nightly');
+  assert.equal(resolveChannel('prerelease'), 'nightly');
+  assert.equal(resolveChannel('next'), 'nightly');
+  assert.equal(resolveChannel('latest'), 'latest');
+  assert.equal(resolveChannel(''), 'latest');
+  assert.equal(resolveChannel(undefined), 'latest');
+  assert.equal(resolveChannel('garbage'), 'latest', 'unknown never guesses a tag');
+});
+
+test('pkgTag: nightly channel tags mcp/tg/plugins @nightly but fleet ALWAYS @latest', () => {
+  // Nightly channel → nightly for the channel-tracking packages.
+  assert.equal(pkgTag('mcp', 'nightly'), 'nightly');
+  assert.equal(pkgTag('tg-connector', 'nightly'), 'nightly');
+  assert.equal(pkgTag('claude-code', 'nightly'), 'nightly');
+  assert.equal(pkgTag('codex', 'nightly'), 'nightly');
+  assert.equal(pkgTag('hermes', 'nightly'), 'nightly');
+  // fleet is pinned — it has no nightly tag.
+  assert.equal(pkgTag('fleet', 'nightly'), 'latest', 'fleet stays stable even in nightly');
+  // Latest channel → everything latest.
+  assert.equal(pkgTag('mcp', 'latest'), 'latest');
+  assert.equal(pkgTag('fleet', 'latest'), 'latest');
+  // Accepts the fully-qualified name too.
+  assert.equal(pkgTag('@ours.network/mcp', 'nightly'), 'nightly');
+  assert.equal(pkgTag('@ours.network/fleet', 'nightly'), 'latest');
+});
+
+test('pkgSpec: builds the full npm spec honoring the channel + fleet pin', () => {
+  assert.equal(pkgSpec('mcp', 'nightly'), '@ours.network/mcp@nightly');
+  assert.equal(pkgSpec('tg-connector', 'nightly'), '@ours.network/tg-connector@nightly');
+  assert.equal(pkgSpec('codex', 'nightly'), '@ours.network/codex@nightly');
+  assert.equal(pkgSpec('fleet', 'nightly'), '@ours.network/fleet@latest', 'fleet NEVER @nightly');
+  assert.equal(pkgSpec('mcp', 'latest'), '@ours.network/mcp@latest');
+  assert.equal(pkgSpec('fleet'), '@ours.network/fleet@latest', 'default channel = latest');
+});
 
 test('canonHarnesses: names/numbers/all, de-duped and order-preserving; OpenClaw is gone', () => {
   assert.deepEqual(canonHarnesses('codex hermes').names, ['codex', 'hermes']);

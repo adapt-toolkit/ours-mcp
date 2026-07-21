@@ -483,6 +483,14 @@ application actor loads libraries
                 caps (a2a_capabilities::cap_cluster) -> (
                     $cap -> a2a_capabilities::cap_cluster, $version -> 1, $params -> "", $secrets -> (,)
                 ).
+                // core.e2e.migrate (Phase F): advertise that this node participates in the e2e
+                // session MIGRATION handshake. The auto-trigger (mig_should_trigger) fires only when
+                // BOTH peers advertise this cap — so both nodes must carry it. Keyed off the shared
+                // core constant a2a_capabilities::cap_e2e_migrate ("core.e2e.migrate") so the id can't
+                // drift. (Enables #1867 migrated-session app delivery; DAEMON-INTEGRATION.md §0.)
+                caps (a2a_capabilities::cap_e2e_migrate) -> (
+                    $cap -> a2a_capabilities::cap_e2e_migrate, $version -> 1, $params -> "", $secrets -> (,)
+                ).
                 // DUAL-ADVERTISE (critic R6-6): also advertise the legacy app-scoped
                 // "app.agents" id so a mixed-version control plane that still gates on
                 // the old alias recognizes this node's cluster support and does not
@@ -515,6 +523,12 @@ application actor loads libraries
             // ($sender_id,$cap,$verb) is allowed.
             $authorizer -> a2a_messaging::authorize_control,
             $supported  -> cap_supported,
+            // $advertise (Phase F): caps advertised on the wire piggyback ($caps in invite/restore
+            // bundles) → self_caps, so self_advertises(cap_e2e_migrate)=TRUE and PEERS learn it into
+            // contact_caps. This is what gates mig_should_trigger — NOT the $describe manifest (which
+            // feeds the control-plane get_manifest, a different surface). No handler needed (unlike
+            // $supported). Both nodes carry it ⇒ the migration auto-trigger fires (#1867).
+            $advertise  -> [ a2a_capabilities::cap_e2e, a2a_capabilities::cap_e2e_migrate ],
             $handlers   -> cap_handlers,
             $on_unknown -> fn (_: any) -> transaction::action::type[] { return []. }
         ).
@@ -1064,7 +1078,14 @@ application actor loads libraries
     // a cert that does not name me, does not match my keys, or was not signed
     // by the carried root is rejected. Re-running with fresh material is the
     // refresh path (e.g. the root's bio changed -> new profile, same root).
-    trn set_delegation _:($cert -> cert_blob: bin, $root_ad -> root_ad_blob: bin, $root_profile -> rp_blob: bin)
+    // $cert_v1 (NULLABLE): the SAME delegation chain minted by the root over my
+    // DOWN-LEVELLED (bundle-less) v1 address document. Sent INSTEAD of the v2 cert
+    // whenever I down-level my AD to v1 for a pre-E2E (0.11.2) peer, so that peer's
+    // verify_peer_delegation (which hashes the v1 AD it actually receives) finds a
+    // matching $role_ad_hash. Verified here against _value_id of my v1 AD. Absent ->
+    // delegation_cert_v1 stays NIL and a down-level omits the chain rather than send
+    // a mismatching v2 cert (a role whose host predates this fix, until re-delegated).
+    trn set_delegation _:($cert -> cert_blob: bin, $root_ad -> root_ad_blob: bin, $root_profile -> rp_blob: bin, $cert_v1 -> cert_v1_blob: bin+)
     {
         current_transaction_info::validate_origin_or_abort (transaction::envelope::origin::user,).
 
@@ -1087,10 +1108,31 @@ application actor loads libraries
         a2a_messaging::root_ad -> new_root_ad.
         a2a_messaging::root_profile -> rp.
 
+        if cert_v1_blob != NIL
+        {
+            cert_v1 = (_read_or_abort cert_v1_blob?) safe a2a_protocol::delegation_cert_t.
+            v1_ad = address_document::get_my_address_document_versioned(TRUE).
+            abort "The v1 delegation certificate was issued to a different identity." when (cert_v1 $c $role_cid) != _get_container_id().
+            abort "The v1 delegation certificate does not match my v1 address document." when (cert_v1 $c $role_ad_hash) != (_value_id v1_ad).
+            abort "The v1 delegation certificate's root does not match the v2 certificate's root." when (cert_v1 $c $root_cid) != (cert $c $root_cid).
+            abort "The v1 delegation certificate was not signed by the root." when key_storage::check_signature_new_container (_value_id (cert_v1 $c)) (cert_v1 $s) (new_root_ad $identity $key_list) != TRUE.
+            a2a_messaging::delegation_cert_v1 -> cert_v1.
+        }
+
         return transaction::success [
             _return_data ($delegated -> TRUE, $root_cid -> (_str (cert $c $root_cid)), $role_id -> cert $c $role_id),
             _save_state NIL
         ].
+    }
+
+    // Expose my v1 (down-levelled, bundle-less) address document so the root can
+    // sign a v1-AD-bound delegation cert (the daemon mints this by calling
+    // sign_delegation with this blob, then hands it back via set_delegation $cert_v1).
+    trn export_v1_address_document _
+    {
+        current_transaction_info::validate_origin_or_abort (transaction::envelope::origin::user,).
+        v1_ad = address_document::get_my_address_document_versioned(TRUE).
+        return transaction::success [ _return_data ($ad -> (_write v1_ad)) ].
     }
 
     trn readonly describe_identity _

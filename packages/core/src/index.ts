@@ -107,6 +107,7 @@ import {
 } from './config';
 import { OURS_COMPAT_VERSION } from './protocol';
 import { mimeFromExt, sanitizeFilename } from './files.js';
+import { e2eWireIdsFromEvents, buildMessagesPayload } from './inbox.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -221,9 +222,18 @@ export function validateName(name: string): string | null {
 function locateUnit(): { dir: string; hash: string; contents: Uint8Array } {
   const here = dirname(fileURLToPath(import.meta.url));
   const override = process.env.OURS_UNIT_DIR;
+  // Staged-advertise boot (#1867 e2e-migration): OURS_ADVERTISE_MIGRATE=0 boots this node
+  // WITHOUT the core.e2e.migrate cap so an e2e pair forms a plain session first; the node
+  // enables migration later at runtime via the advertise_migrate tool. This is a purely
+  // additive alias over OURS_UNIT_DIR — it prefers a sibling "<dir>-nocap" packet variant
+  // (compiled with $advertise = [core.e2e] only). Unset/any-other value = the default
+  // cap-on packet, byte-identical to prior behavior (no regression). Missing variant is a
+  // loud error so a staged co-run never silently boots cap-on.
+  const noCap = process.env.OURS_ADVERTISE_MIGRATE === '0';
+  const withNoCap = (dir: string): string[] => (noCap ? [`${dir}-nocap`] : [dir]);
   const candidates = override
-    ? [resolve(override)]
-    : [join(here, 'mufl_code'), join(here, '..', 'mufl_code')];
+    ? withNoCap(resolve(override))
+    : [join(here, 'mufl_code'), join(here, '..', 'mufl_code')].flatMap(withNoCap);
   for (const dir of candidates) {
     if (!fs.existsSync(dir)) continue;
     const muflo = fs.readdirSync(dir).find((f) => f.endsWith('.muflo'));
@@ -234,7 +244,10 @@ function locateUnit(): { dir: string; hash: string; contents: Uint8Array } {
     }
   }
   throw new Error(
-    `no compiled .muflo packet found (looked in: ${candidates.join(', ')})`,
+    `no compiled .muflo packet found (looked in: ${candidates.join(', ')})` +
+      (noCap
+        ? ' — OURS_ADVERTISE_MIGRATE=0 requires a "<dir>-nocap" packet variant (compiled with $advertise = [core.e2e] only); build it or unset the env.'
+        : ''),
   );
 }
 
@@ -468,6 +481,7 @@ function clearRootMarker(): void {
 interface IdentityInfo {
   bio: string;
   persona: string;
+  hasCert: boolean; // TRUE == this identity holds a root-signed delegation cert (a role)
   roleId: string; // '' == no delegation cert (a root or a legacy flat identity)
   rootCid: string;
   rootName: string;
@@ -480,6 +494,7 @@ function describeIdentity(id: Identity): IdentityInfo {
     return {
       bio: v.Reduce('bio').Visualize(),
       persona: v.Reduce('persona').Visualize(),
+      hasCert: v.Reduce('has_cert').GetBoolean(),
       roleId: v.Reduce('role_id').Visualize(),
       rootCid: v.Reduce('root_cid').Visualize(),
       rootName: v.Reduce('root_name').Visualize(),
@@ -503,14 +518,60 @@ async function delegateRole(root: Identity, role: Identity): Promise<void> {
     const profileData = await mutatingTx(root, '::actor::export_root_profile', {}, lt);
     const profileBlob = Buffer.from(profileData.Reduce('profile').GetBinary());
     const rootAdBlob = exportAdBlob(root);
+    // Also mint the v1-AD-bound cert so a cross-version (0.11.2) peer, which sees my
+    // DOWN-LEVELLED bundle-less AD, finds a delegation cert whose $role_ad_hash
+    // matches the v1 AD it received (fix for a2a_protocol.mm:135 both directions).
+    // sign_delegation takes any AD blob — here the role's v1 AD.
+    const roleAdV1 = Buffer.from(
+      (await mutatingTx(role, '::actor::export_v1_address_document', {}, lt)).Reduce('ad').GetBinary(),
+    );
+    const signedV1 = await mutatingTx(root, '::actor::sign_delegation', {
+      role_ad: root.pw.packet.NewBinaryFromBuffer(roleAdV1).Attach(lt),
+      role_id: role.name,
+    }, lt);
+    const certV1Blob = Buffer.from(signedV1.Reduce('cert').GetBinary());
     await mutatingTx(role, '::actor::set_delegation', {
       cert: role.pw.packet.NewBinaryFromBuffer(certBlob).Attach(lt),
       root_ad: role.pw.packet.NewBinaryFromBuffer(rootAdBlob).Attach(lt),
       root_profile: role.pw.packet.NewBinaryFromBuffer(profileBlob).Attach(lt),
+      cert_v1: role.pw.packet.NewBinaryFromBuffer(certV1Blob).Attach(lt),
     }, lt);
   });
   log(`[${role.name}] delegated as a role under root "${root.name}"`);
 }
+
+// Single-root policy (owner #2440): make `id` THE host root and adopt every other
+// existing identity as a role under it. Establishes the one-root-per-host hierarchy
+// with no flat state. Idempotent-ish: only ever called when no root exists yet, so it
+// pins the marker + delegates the (usually zero) pre-existing identities. Adoption
+// failures are logged + reported, never fatal (the root is still established).
+async function establishRoot(id: Identity): Promise<{ adopted: string[]; failed: string[] }> {
+  rootName = id.name;
+  writeRootMarker(id.name);
+  const adopted: string[] = [];
+  const failed: string[] = [];
+  for (const other of identities.values()) {
+    if (other.name === id.name) continue;
+    try {
+      await delegateRole(id, other);
+      adopted.push(other.name);
+    } catch (err) {
+      log(`failed to adopt "${other.name}" as a role under new root "${id.name}":`, String(err));
+      failed.push(other.name);
+    }
+  }
+  log(`[${id.name}] established as the host root${adopted.length ? ` (adopted ${adopted.length} role(s))` : ''}`);
+  return { adopted, failed };
+}
+
+// TODO (single-root follow-up, separate minimal PR): proactively adopt any STRAY flat
+// identity at boot under the host root. Today the invariant self-heals on the next
+// create call (establishRoot adopts pre-existing identities when the root is first
+// created; a role is always delegated). The only residual gap is a host that already
+// has flat identities AND already has a root from before this enforcement — those flat
+// identities stay flat until re-created. A boot-time adopt would close it, but it is
+// another boot re-parenting mutation (same class as the role-cert re-delegation we just
+// reviewed), so it belongs in its own reviewed PR rather than bloating this one.
 
 // ---- core 2.2 cluster enrollment (root side) --------------------------------
 // One root↔CP bind enrolls the whole cluster. The root mints its root-signed CP
@@ -1478,6 +1539,28 @@ async function contactRestoreSweep(id: Identity): Promise<void> {
   }
 }
 
+// Boot/upgrade RE-ADVERTISE (DAEMON CONTRACT, core 0.10 B1): push my fresh v2 AD
+// (+ caps piggyback) to every PRE-EXISTING LEGACY contact over the legacy channel.
+// A v2 peer ingests it (handle_readvertise_ad → learns my caps/pv, refreshes its
+// stored AD) and offers migration back; a still-v1 peer ignores it. This is the
+// ONLY bootstrap for a stable-era contact whose stored peer caps/pv predate DR:
+// without it neither advertise_migrate nor sweep_e2e_migrations can find it
+// eligible (they only offer to already-known-0.9 peers), so an existing contact
+// would never auto-migrate after both sides upgrade. The core trn is STATELESS +
+// idempotent (no _save_state; only sends), so calling it on every boot and GC
+// tick is safe and also covers a peer that comes online later.
+async function readvertiseOnUpgradeSweep(id: Identity): Promise<void> {
+  try {
+    const readvertised = await withScopeAsync(async (lt) => {
+      const r = await mutatingTx(id, '::a2a_messaging::readvertise_on_upgrade', {}, lt);
+      return Number(r.Reduce('readvertised').Visualize());
+    });
+    if (readvertised > 0) log(`[${id.name}] re-advertised v2 AD to ${readvertised} pre-existing legacy contact(s) (migration bootstrap)`);
+  } catch (err) {
+    log(`[${id.name}] readvertise-on-upgrade sweep failed:`, String(err));
+  }
+}
+
 // ----- notifications.log + unread snapshot -----------------------------------
 // notifications.log stays the durable source of truth (survives restart; the
 // SessionStart hook reads the backlog). The long-poll endpoint reads the SAME
@@ -1524,6 +1607,33 @@ function appendNotifyLog(id: Identity, event: Record<string, unknown>): void {
     log(`[${id.name}] failed to append notifications.log:`, String(err));
   }
   fireNotifyWaiters(id.name); // wake held-open long-poll streams for this identity
+}
+
+// Read the whole notifications.log for an identity and return the set of wire_ids
+// that arrived over the E2E / double-ratchet route (e2e_app_recv / migration_deferred_flush).
+// Used to tag each get_messages entry with its transport (see src/inbox.ts). Best-effort:
+// a missing/unreadable/partial log yields an empty set (⇒ everything reads "legacy").
+function readE2eWireIds(id: Identity): Set<string> {
+  const logPath = notifyLogPath(id.dir);
+  let text = '';
+  try {
+    text = fs.readFileSync(logPath, 'utf8');
+  } catch {
+    return new Set();
+  }
+  const events: Record<string, unknown>[] = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try { events.push(JSON.parse(line) as Record<string, unknown>); } catch { /* skip malformed */ }
+  }
+  return e2eWireIdsFromEvents(events);
+}
+
+// Hex a binary AdaptValue field (session_id / epoch are `bin` per the #1867 §4 log contract —
+// DAEMON-INTEGRATION.md §4). Returns '' when the field is absent (pre-app-e2e core builds).
+function binHexField(av: AdaptValue, field: string): string {
+  const x = av.Reduce(field);
+  return x.IsNil() ? '' : Buffer.from(x.GetBinary()).toString('hex');
 }
 
 // Long-poll cap and re-check cadence for the notification stream. The cap keeps
@@ -1896,6 +2006,62 @@ function wireHandlers(id: Identity): void {
         appendNotifyLog(id, { event: 'contact_restored', from: name });
         log(`[${id.name}] contact "${name}" restored (re-keyed)`);
         process.nextTick(() => void flushDeferredFor(id, String(cid)));
+      } else if (event === 'migration_active') {
+        // The e2e migration pin is set for this contact. Core emits this notify (extended with the
+        // $epoch + $session_id of the migrated session); the DAEMON formats the §4 proof line
+        // (DAEMON-INTEGRATION.md §4, #1867). epoch/session_id are `bin` → hex.
+        const cid = payload.Reduce('cid').Visualize();
+        const role = payload.Reduce('role').Visualize();
+        const epoch = binHexField(payload, 'epoch');
+        const sid = binHexField(payload, 'session_id');
+        appendNotifyLog(id, { event: 'migration_active', cid: String(cid), role: String(role), ...(epoch ? { epoch } : {}), ...(sid ? { session_id: sid } : {}) });
+        log(`[migration] active cid=${cid} role=${role}${epoch ? ` epoch=${epoch}` : ''}${sid ? ` session_id=${sid}` : ''}`);
+      } else if (event === 'e2e_app_send') {
+        // §4 app-SEND proof line (#1867): core delivered an app message over the migrated session and
+        // emits this notify; the daemon formats it. session_id (bin→hex) MUST equal active_session_id.
+        const cid = payload.Reduce('cid').Visualize();
+        const sid = binHexField(payload, 'session_id');
+        const olm = payload.Reduce('olm_type').Visualize();
+        const wireId = payload.Reduce('wire_id').Visualize();
+        appendNotifyLog(id, { event: 'e2e_app_send', cid: String(cid), session_id: sid, olm_type: String(olm), wire_id: String(wireId) });
+        log(`[e2e-app] send cid=${cid} session_id=${sid} olm_type=${olm} wire_id=${wireId}`);
+      } else if (event === 'e2e_app_recv') {
+        // §4 app-RECV proof line (#1867): core decrypted an inbound app message over the migrated
+        // session. session_id (bin→hex) MUST equal active_session_id on this peer.
+        const cid = payload.Reduce('cid').Visualize();
+        const sid = binHexField(payload, 'session_id');
+        const ok = payload.Reduce('ok').GetBoolean();
+        const wireId = payload.Reduce('wire_id').Visualize();
+        appendNotifyLog(id, { event: 'e2e_app_recv', cid: String(cid), session_id: sid, ok, wire_id: String(wireId) });
+        log(`[e2e-app] recv cid=${cid} session_id=${sid} ok=${ok} wire_id=${wireId}`);
+      } else if (event === 'migration_deferred_flush') {
+        // One notify per queued message drained on active (DAEMON-INTEGRATION.md §3), FIFO order.
+        // Option B: CORE performs the boxed e2e re-drive (each drained msg surfaces as an e2e_app_send
+        // §4 line); this handler is observability only — NEVER box, NEVER drop silently.
+        const cid = payload.Reduce('cid').Visualize();
+        const wireId = payload.Reduce('wire_id').Visualize();
+        appendNotifyLog(id, { event: 'migration_deferred_flush', cid: String(cid), wire_id: String(wireId) });
+        log(`[migration] flush-notify cid=${cid} wire_id=${wireId} (deferred→e2e; core delivers)`);
+      } else if (event === 'migration_stalled') {
+        // Migration didn't reach active in its window (DAEMON-INTEGRATION.md §0.1). UX/log only —
+        // core re-drives via the sweep. Emit: $event=migration_stalled,$cid,$phase,$attempts.
+        const cid = payload.Reduce('cid').Visualize();
+        const phase = payload.Reduce('phase').Visualize();
+        const attempts = payload.Reduce('attempts').Visualize();
+        appendNotifyLog(id, { event: 'migration_stalled', cid: String(cid), phase: String(phase), attempts: String(attempts) });
+        log(`[migration] stalled-notify cid=${cid} phase=${phase} attempts=${attempts} (core re-drives via sweep)`);
+      } else if (event === 'downgrade_refused') {
+        // SECURITY: core dropped an inbound LEGACY plaintext app message from an epoch-pinned (migrated)
+        // contact — post-migration all app data is e2e, so a legacy plaintext is a downgrade attack
+        // (DAEMON-INTEGRATION.md §0.1 receive-side). Core already dropped it; the daemon surfaces it.
+        const cid = payload.Reduce('cid').Visualize();
+        const wireAv = payload.Reduce('wire_id');
+        const wireId = wireAv.IsNil() ? '' : String(wireAv.Visualize());
+        appendNotifyLog(id, { event: 'downgrade_refused', cid: String(cid), ...(wireId ? { wire_id: wireId } : {}) });
+        log(`[e2e-route] downgrade-dropped cid=${cid}${wireId ? ` wire_id=${wireId}` : ''} (legacy plaintext from a migrated peer — dropped by core)`);
+        process.nextTick(() =>
+          pushNotification(id.name, `[${id.name}] a message from a migrated contact was rejected as an unsafe downgrade (dropped).`),
+        );
       } else if (event === 'control_request') {
         // Daemon-internal: the proxy's request queue is drained and executed
         // here, never surfaced to agent sessions.
@@ -2067,6 +2233,10 @@ async function restoreIdentity(name: string): Promise<Identity> {
   }
   // Eager restore: re-key degraded contacts + flush queues orphaned by a crash.
   await contactRestoreSweep(id);
+  // NOTE: the boot/upgrade re-advertise (readvertiseOnUpgradeSweep) is deliberately
+  // NOT fired here. It must run AFTER the role-cert re-delegation pass in bootWrapper,
+  // otherwise the push (and its retries) would ride a stale role cert and be rejected.
+  // See the unified re-advertise pass after the re-delegation block.
   // Make the SessionStart hook's offline view match the restored packet state.
   refreshUnread(id);
   return id;
@@ -2125,6 +2295,85 @@ async function bootWrapper(): Promise<void> {
     clearRootMarker();
   }
   if (rootName) log(`root identity: ${rootName}`);
+  // Boot/upgrade RE-DELEGATION (migration bootstrap for ROLE identities). A role's
+  // delegation cert commits to a hash of the exact AD it was signed against. On a
+  // version upgrade the role's live AD gains $e2e_bundle, so a stable-era cert's
+  // $role_ad_hash no longer matches produce_my_address_document() — the peer then
+  // REJECTS the boot readvertise AND the migration offer/ack (verify_peer_delegation,
+  // a2a_protocol.mm "Delegation certificate does not match the peer's address
+  // document"), stranding a pre-existing role↔role contact on legacy forever.
+  // Re-running delegateRole re-mints the cert (+ its v1 down-level twin) against the
+  // LIVE AD via the host root, so the re-advertise/migrate bundle carries a matching
+  // cert. Idempotent (set_delegation re-verifies + stores). Must run after rootName is
+  // resolved and all identities are loaded.
+  //
+  // SELECTION GATE (authority-safe) — re-delegate ONLY an identity that
+  //   (a) already HOLDS a delegation cert ($has_cert), AND
+  //   (b) whose CURRENT delegation root is cryptographically THIS host root
+  //       (describeIdentity(id).rootCid === hostRoot.cid).
+  // (a) excludes flat identities (created with no root, or adopted with
+  // adopt_existing=false) and roots — turning a flat identity into a role would
+  // silently re-parent it and change the authority a peer observes, overriding the
+  // user's opt-out. (b) excludes a role delegated by a DIFFERENT root (imported /
+  // shared / sub-root): re-signing it under OUR root would overwrite a valid
+  // delegation and hand authority to the wrong root. A mismatch is skipped + logged;
+  // we NEVER guess a root. On a normal one-root host every role passes (b).
+  //
+  // The AD-identity invariant (the cert is minted against export_address_document =
+  // get_my_address_document(), and the peer verifies against the AD the readvertise
+  // sends = produce_my_address_document()) holds today (Fable traced the core: the
+  // AD is re-produced from live state on each read, not memoised across export_state)
+  // AND is guarded EMPIRICALLY: if those two ever diverged, the re-minted cert would
+  // be rejected and the migration would FAIL VISIBLY (route stays box + peer reject),
+  // never a silent wrong-authority. A proactive cryptographic assert
+  // (cert.$role_ad_hash === hash(produce_my_address_document()) for v2 + v1-twin) —
+  // which would also serve as a cert-already-matches churn gate — needs a readonly
+  // core trn (produce_my_address_document is not separately host-exportable), i.e. a
+  // .muflo change outside this host-only fix; proposed as a follow-up.
+  {
+    const hostRoot = rootName ? identities.get(rootName) : undefined;
+    if (rootName && !hostRoot) {
+      log(`re-delegation on upgrade DEGRADED: root "${rootName}" is not among the restored identities — role certs not refreshed this boot`);
+    }
+    const refreshedRoles: Identity[] = [];
+    if (hostRoot) {
+      for (const id of identities.values()) {
+        if (id.name === hostRoot.name) continue; // the root itself is not delegated
+        let info: IdentityInfo | undefined;
+        try { info = describeIdentity(id); } catch { info = undefined; }
+        if (!info || !info.hasCert) continue; // flat identity / root — leave untouched
+        if (info.rootCid !== hostRoot.cid) {
+          // A role under a foreign root (import/shared/sub-root). Do NOT re-parent it.
+          log(`[${id.name}] re-delegation skipped: delegated by a different root (${info.rootCid.slice(0, 12)}…), not this host root — left as-is`);
+          continue;
+        }
+        try {
+          await delegateRole(hostRoot, id);
+          refreshedRoles.push(id);
+        } catch (err) {
+          // Durable, fail-loud signal (not just the daemon log). Per-boot retry re-attempts
+          // next start; the redelegation_failed notify surfaces a persistent strand.
+          appendNotifyLog(id, { event: 'redelegation_failed', error: String(err).slice(0, 300) });
+          log(`[${id.name}] boot re-delegation (upgrade cert refresh) failed:`, String(err));
+        }
+      }
+    }
+    // BARRIER: only now, with every role cert refreshed, do the boot/upgrade
+    // re-advertise. Firing it here (not per-identity in restoreIdentity) removes the
+    // async race where a retry timer would ride a stale cert. The push is delivered
+    // only while the peer is online, and a mutual upgrade reconnects each side at a
+    // different time, so fire once now and RE-fire on a short schedule to catch a peer
+    // that comes online shortly after us. readvertise_on_upgrade is STATELESS +
+    // idempotent (legacy-only filter; no _save_state), so retries and already-migrated
+    // contacts are safe no-ops. Roots re-advertise too (they need no cert refresh).
+    for (const id of identities.values()) {
+      await readvertiseOnUpgradeSweep(id);
+      for (const ms of [10_000, 30_000, 90_000]) {
+        setTimeout(() => { readvertiseOnUpgradeSweep(id).catch(() => { /* logged inside */ }); }, ms);
+      }
+    }
+    if (refreshedRoles.length > 0) log(`refreshed ${refreshedRoles.length} role delegation cert(s) against the live AD on boot`);
+  }
   // Drain anything queued while the daemon was down or that a crash stranded:
   // pending proxy control requests and unforwarded monitoring copies.
   const root = rootName ? identities.get(rootName) : undefined;
@@ -2461,9 +2710,15 @@ function createMcpServer(getSessionId: () => string): McpServer {
           // once (not after the ≤300s sweep). Gated on the dispatch cutover; dormant otherwise.
           if (ENVELOPE_DISPATCH) void clusterSweep(root);
         } else {
+          // Single-root policy: no host root yet → this FIRST identity becomes the
+          // host root (the person behind all roles). No flat state is ever created;
+          // subsequent create_identity calls are delegated as roles under it. Silent
+          // (no error/prompt) but the response says what happened.
+          const { adopted } = await establishRoot(id);
           hierarchy =
-            ' No root identity exists on this host yet, so this is a flat identity — ' +
-            'create_root_identity establishes the hierarchy and adopts it as a role.';
+            ' No host root existed yet, so this identity is now the host ROOT (the person ' +
+            'behind all roles); create more with create_identity and they become roles under it.' +
+            (adopted.length ? ` Adopted ${adopted.length} pre-existing identit${adopted.length === 1 ? 'y' : 'ies'} as role(s): ${adopted.join(', ')}.` : '');
         }
         bindSession(getSessionId(), name);
         const exposure = expose_local
@@ -2482,55 +2737,59 @@ function createMcpServer(getSessionId: () => string): McpServer {
     'create_root_identity',
     'Create THE root identity for this host — the identity that represents the ' +
       'person behind all roles (see the identity hierarchy: one root, many roles). ' +
-      'Only one root may exist; this fails if one already does. Existing identities ' +
-      'are adopted as roles under the new root (each receives a delegation ' +
-      'certificate) unless adopt_existing=false. The root is directly messageable ' +
-      'like any identity.',
+      'Single-root policy: exactly one root per host. If a root already exists, the ' +
+      'named identity is instead created as a ROLE under it (no second root; no error). ' +
+      'When establishing the root, every pre-existing identity is adopted as a role ' +
+      '(each receives a delegation certificate). The root is directly messageable like ' +
+      'any identity.',
     {
       name: z.string().min(1).describe('The person\'s name, e.g. "Vitalii Shakhmatov".'),
       bio: z.string().default('').describe('Free-text bio describing the person (carried in role invites).'),
       expose_local: z.boolean().default(true).describe('Publish the root in the host-local contact book.'),
       local_auto_accept: z.boolean().default(true).describe('Auto-accept local contact-book introductions (false = they queue for approval).'),
-      adopt_existing: z.boolean().default(true).describe('Adopt all existing identities on this host as roles under the new root.'),
+      skip_if_root_exists: z.boolean().default(false).describe('Installer seam: if a root already exists, do NOTHING (fail with "a root identity already exists") instead of adopting the name as a role. The ours-mcp create-root CLI sets this so re-runs stay idempotent; leave false for the interactive tool.'),
     },
-    async ({ name, bio, expose_local, local_auto_accept, adopt_existing }) => {
+    async ({ name, bio, expose_local, local_auto_accept, skip_if_root_exists }) => {
       const bad = validateName(name);
       if (bad) return textResult(`create_root_identity failed: ${bad}`, true);
-      if (identities.has(name)) return textResult(`create_root_identity failed: an identity named "${name}" already exists.`, true);
-      if (rootName && identities.has(rootName)) {
-        return textResult(
-          `create_root_identity failed: a root identity already exists ("${rootName}") — one root per host. ` +
-            'Remove it first if you really mean to replace it.',
-          true,
-        );
+      // Installer idempotency seam — checked BEFORE the name-collision guard. The
+      // create-root CLI passes skip_if_root_exists so a re-run against a host that
+      // ALREADY has a root is a quiet no-op (the CLI maps this to exit 0). This MUST
+      // cover the same-name re-install/update — `create-root "<human name>"` run again
+      // with the name that is already the root — which would otherwise hit the
+      // name-collision error below and exit 1 (the owner's "installer re-prompts for
+      // the human identity on update" bug). It also covers a different-name re-run.
+      // Neither creates a second root nor a spurious role.
+      if (skip_if_root_exists && rootName && identities.has(rootName)) {
+        return textResult(`create_root_identity failed: a root identity already exists ("${rootName}") — one root per host. Nothing to do.`, true);
       }
+      if (identities.has(name)) return textResult(`create_root_identity failed: an identity named "${name}" already exists.`, true);
+      const monitorHint = `\n\nAsk the user whether to enable this harness's live mail monitor for "${name}". ` +
+        'Never enable monitoring without explicit consent.';
       try {
         const id = await provisionIdentity(name, { exposeLocal: expose_local, localAutoAccept: local_auto_accept });
         if (bio) await withScopeAsync(async (lt) => { await mutatingTx(id, '::a2a_messaging::set_my_bio', { bio }, lt); });
-        rootName = name;
-        writeRootMarker(name);
-        const adopted: string[] = [];
-        const failed: string[] = [];
-        if (adopt_existing) {
-          for (const other of identities.values()) {
-            if (other.name === name) continue;
-            try {
-              await delegateRole(id, other);
-              adopted.push(other.name);
-            } catch (err) {
-              log(`failed to adopt "${other.name}" as a role:`, String(err));
-              failed.push(other.name);
-            }
-          }
+        const existingRoot = rootName ? identities.get(rootName) : undefined;
+        if (existingRoot && existingRoot.name !== name) {
+          // Single-root policy: a host root already exists → NO second root. Silently
+          // create this as a ROLE under the existing root (no error, no prompt); the
+          // response says what happened so it isn't a surprise.
+          await delegateRole(existingRoot, id);
+          bindSession(getSessionId(), name);
+          return textResult(
+            `A host root already exists ("${existingRoot.name}") — one root per host, so "${name}" ` +
+              `(${id.cid}) was created as a ROLE under it instead and bound to this session.${monitorHint}`,
+          );
         }
+        // No root yet → establish this identity as THE host root, adopting any
+        // pre-existing identities as roles (single-root policy: no flat state).
+        const { adopted, failed } = await establishRoot(id);
         bindSession(getSessionId(), name);
         const adoption =
           adopted.length > 0
             ? ` Adopted ${adopted.length} existing identit${adopted.length === 1 ? 'y' : 'ies'} as role(s): ${adopted.join(', ')}.`
             : '';
         const failures = failed.length > 0 ? ` FAILED to adopt: ${failed.join(', ')} (see daemon log).` : '';
-        const monitorHint = `\n\nAsk the user whether to enable this harness's live mail monitor for "${name}". ` +
-          'Never enable monitoring without explicit consent.';
         return textResult(`Created root identity "${name}" (${id.cid}) and bound it to this session.${adoption}${failures}${monitorHint}`);
       } catch (err) {
         return textResult(`create_root_identity failed: ${String(err)}`, true);
@@ -2946,6 +3205,40 @@ function createMcpServer(getSessionId: () => string): McpServer {
   );
 
   server.tool(
+    'advertise_migrate',
+    'Enable the e2e-migration capability (core.e2e.migrate) at runtime on the bound ' +
+      'identity and proactively offer migration to every already-known eligible e2e ' +
+      'contact. This is the staged-advertise trigger: an identity booted WITHOUT the ' +
+      'migrate cap (so it forms a plain e2e session first) calls this to start the SAME ' +
+      'migrations a default-cap boot would — closing the already-e2e-pair gap where a ' +
+      'pinned pair with no inbound traffic would otherwise never migrate. Idempotent: ' +
+      're-enabling is a no-op for the cap, and the offer election stays fail-closed. ' +
+      'Returns how many migration offers were initiated.',
+    {},
+    async () => {
+      const { id, err } = boundOr();
+      if (err) return err;
+      try {
+        const { wasAdvertising, advertising, offers } = await withScopeAsync(async (lt) => {
+          const r = await mutatingTx(id!, '::a2a_messaging::advertise_migrate', {}, lt);
+          return {
+            wasAdvertising: r.Reduce('was_advertising').Visualize() === 'true',
+            advertising: r.Reduce('advertising').Visualize() === 'true',
+            offers: parseInt(r.Reduce('offers_initiated').Visualize(), 10) || 0,
+          };
+        });
+        const already = wasAdvertising ? ' (already advertising — cap unchanged)' : '';
+        return textResult(
+          `advertise_migrate: core.e2e.migrate ${advertising ? 'advertised' : 'NOT advertised'}${already}; ` +
+            `${offers} migration offer(s) initiated to eligible e2e contact(s).`,
+        );
+      } catch (e) {
+        return textResult(`advertise_migrate failed: ${String(e)}`, true);
+      }
+    },
+  );
+
+  server.tool(
     'set_persona',
     "Set the bound identity's local operating contract (persona, free text). The " +
       'persona is how the agent behaves when it adopts this identity; it is NEVER shared ' +
@@ -3004,6 +3297,33 @@ function createMcpServer(getSessionId: () => string): McpServer {
     },
   );
 
+  // ---- e2e-migration route verdict (Q1=B — Option B: CORE delivers) ----------------------------
+  // Under the migration design, CORE (a2a_messaging) is the routing AUTHORITY: send_message/send_file
+  // consult `e2e_route(cid)` and, for a migrated (epoch-pinned) contact, return a typed verdict in
+  // `_return_data`. Per MigrationImpl3's Option-B decision, CORE also owns the actual e2e app DELIVERY
+  // (a bare e2e_signed_message can't ride the SDK wire schema, so delivery is boxed and core does it
+  // inline) AND the §4 session_id proof logs (`[e2e-app] send/recv`, `[migration] active … session_id=`).
+  // The DAEMON's job here is narrow: OBEY the verdict — never box a refused/migrated contact, surface
+  // "migrating"/"downgrade_refused" to the user, and emit DAEMON-scoped event-level logs (distinct from
+  // core's §4 proof lines). See /tmp/ours-migration-spec/DAEMON-INTEGRATION.md §2 (revision pending).
+  // The `$route`/`$code` MUFL symbols visualize to their bare name ("e2e", "e2e_downgrade_refused", …).
+  type SendVerdict =
+    | { kind: 'refused'; wireId: string; cid: string }               // downgrade_refused → NEVER box
+    | { kind: 'migrating'; wireId: string; cid: string; queued: number } // core queued (msg) / retry (file)
+    | { kind: 'e2e'; wireId: string; cid: string }                   // ride the migrated session
+    | { kind: 'deferred'; wireId: string; queued: number }           // degraded-contact restore queue
+    | { kind: 'sent'; wireId: string };                              // legacy / fresh-v2 box (core sent)
+  const parseSendVerdict = (sent: AdaptValue): SendVerdict => {
+    const has = (f: string) => !sent.Reduce(f).IsNil();
+    const wireId = sent.Reduce('wire_id').Visualize();
+    const cid = has('sent_to') ? sent.Reduce('sent_to').Visualize() : '';
+    if (has('downgrade_refused')) return { kind: 'refused', wireId, cid };
+    if (has('migrating')) return { kind: 'migrating', wireId, cid, queued: has('queued') ? Number(sent.Reduce('queued').Visualize()) : 0 };
+    if (has('route')) return { kind: 'e2e', wireId, cid }; // $route -> $e2e ⇒ "e2e"
+    if (has('deferred')) return { kind: 'deferred', wireId, queued: has('queued') ? Number(sent.Reduce('queued').Visualize()) : 0 };
+    return { kind: 'sent', wireId };
+  };
+
   server.tool(
     'send_message',
     'Send an end-to-end-encrypted message to a known contact (by name or container id). ' +
@@ -3038,24 +3358,40 @@ function createMcpServer(getSessionId: () => string): McpServer {
           : { wire_id: reply_to_wire_id }
         : undefined;
       try {
-        const { wireId, deferred, queued } = await withScopeAsync(async (lt) => {
-          const sent = await mutatingTx(id!, '::a2a_messaging::send_message', {
-            contact,
-            text,
-            ...(reply_to ? { reply_to } : {}),
-          }, lt);
-          const defAv = sent.Reduce('deferred');
-          return {
-            wireId: sent.Reduce('wire_id').Visualize(),
-            deferred: !defAv.IsNil(),
-            queued: defAv.IsNil() ? 0 : Number(sent.Reduce('queued').Visualize()),
-          };
-        });
-        return textResult(deferred
-          ? `Message queued for "${contact}" (wire_id ${wireId}) — the contact's encryption keys are being ` +
-            `re-established after an upgrade (contact restore in progress); delivery is automatic once ` +
-            `restored (${queued} message${queued === 1 ? '' : 's'} queued).`
-          : `Message sent to "${contact}" (wire_id ${wireId}).`);
+        const v = await withScopeAsync(async (lt) => parseSendVerdict(await mutatingTx(id!, '::a2a_messaging::send_message', {
+          contact,
+          text,
+          ...(reply_to ? { reply_to } : {}),
+        }, lt)));
+        switch (v.kind) {
+          case 'refused':
+            // downgrade_refused: once-E2E peer with no current v2 bundle. FAIL CLOSED — never box.
+            log(`[e2e-route] refused cid=${v.cid} wire_id=${v.wireId} (downgrade_refused)`);
+            return textResult(
+              `Couldn't send to "${contact}" (wire_id ${v.wireId}): their end-to-end encryption must be ` +
+              `re-established after an upgrade before messages can go through. It was NOT sent and NOT ` +
+              `downgraded to the old channel — the system re-offers the upgrade automatically; try again shortly.`,
+              true);
+          case 'migrating':
+            // Initiator commit window: CORE queued it in mig_deferred; it flushes on migration-active.
+            log(`[migration] queued cid=${v.cid} wire_id=${v.wireId} (migrating, ${v.queued} queued)`);
+            return textResult(
+              `Message queued for "${contact}" (wire_id ${v.wireId}) — an encryption upgrade is completing; ` +
+              `it will send automatically the moment the migration goes active ` +
+              `(${v.queued} message${v.queued === 1 ? '' : 's'} queued).`);
+          case 'e2e':
+            // Migrated session: CORE delivered over e2e (Option B, boxed inline). Daemon just reports
+            // it. §4 session_id proof line is core's `[e2e-app] send`; this is the daemon verdict log.
+            log(`[e2e-route] cid=${v.cid} wire_id=${v.wireId} verdict=e2e (core delivered over migrated session)`);
+            return textResult(`Message sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`);
+          case 'deferred':
+            return textResult(
+              `Message queued for "${contact}" (wire_id ${v.wireId}) — the contact's encryption keys are being ` +
+              `re-established after an upgrade (contact restore in progress); delivery is automatic once ` +
+              `restored (${v.queued} message${v.queued === 1 ? '' : 's'} queued).`);
+          default:
+            return textResult(`Message sent to "${contact}" (wire_id ${v.wireId}).`);
+        }
       } catch (e) {
         if (!/Unknown contact/.test(String(e))) {
           return textResult(`send_message failed: ${String(e)}`, true);
@@ -3119,18 +3455,38 @@ function createMcpServer(getSessionId: () => string): McpServer {
           : { wire_id: reply_to_wire_id }
         : undefined;
       try {
-        const wireId = await withScopeAsync(async (lt) => {
+        const v = await withScopeAsync(async (lt) => {
           const binValue = id!.pw.packet.NewBinaryFromBuffer(buf).Attach(lt);
-          const sent = await mutatingTx(id!, '::a2a_messaging::send_file', {
+          return parseSendVerdict(await mutatingTx(id!, '::a2a_messaging::send_file', {
             contact,
             filename: fname,
             mime: mt,
             data: binValue,
             ...(reply_to ? { reply_to } : {}),
-          }, lt);
-          return sent.Reduce('wire_id').Visualize();
+          }, lt));
         });
-        return textResult(`File "${fname}" (${buf.length} B${mt ? `, ${mt}` : ''}) sent to "${contact}" (wire_id ${wireId}).`);
+        const desc = `File "${fname}" (${buf.length} B${mt ? `, ${mt}` : ''})`;
+        switch (v.kind) {
+          case 'refused':
+            log(`[e2e-route] refused cid=${v.cid} wire_id=${v.wireId} (downgrade_refused, file)`);
+            return textResult(
+              `Couldn't send ${desc} to "${contact}" (wire_id ${v.wireId}): their end-to-end encryption must be ` +
+              `re-established after an upgrade first. It was NOT sent and NOT downgraded; the system re-offers ` +
+              `the upgrade automatically — try again shortly.`,
+              true);
+          case 'migrating':
+            // Files are NOT queued (bulk) — surface a retry, not a queue promise.
+            log(`[migration] file-defer cid=${v.cid} wire_id=${v.wireId} (migrating, not queued)`);
+            return textResult(
+              `${desc} not sent to "${contact}" yet — an encryption upgrade is completing; retry the file once ` +
+              `the migration goes active (files aren't auto-queued like messages).`,
+              true);
+          case 'e2e':
+            log(`[e2e-route] cid=${v.cid} wire_id=${v.wireId} verdict=e2e file (core delivered over migrated session)`);
+            return textResult(`${desc} sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`);
+          default:
+            return textResult(`${desc} sent to "${contact}" (wire_id ${v.wireId}).`);
+        }
       } catch (e) {
         return textResult(`send_file failed: ${String(e)}`, true);
       }
@@ -3194,9 +3550,11 @@ function createMcpServer(getSessionId: () => string): McpServer {
       'never double-processes — no acknowledgement call is needed. If you read a message ' +
       'but crash or want to hand it to another session before acting, call defer_messages ' +
       'to put it back to "unread"; otherwise handled messages are garbage-collected ' +
-      'automatically. Each message shows its {wire_id} and, if it is a reply, a ' +
-      '"↳re <wire_id>" pointer; pass a wire_id as reply_to_wire_id in send_message ' +
-      'to reply to that specific message.',
+      'automatically. Returns ALWAYS-JSON: { count, messages: [{ msg_id, wire_id, ' +
+      'from:{id,name}, encryption ("legacy" for a legacy box | "e2e" for the ' +
+      'double-ratchet path), transport, text, date, status, reply_to }] } — so you can ' +
+      'tell HOW each message arrived (ask the agent "how did you receive this"). Pass a ' +
+      "message's wire_id as reply_to_wire_id in send_message to reply to it specifically.",
     {},
     async () => {
       const { id, err } = boundOr();
@@ -3207,12 +3565,13 @@ function createMcpServer(getSessionId: () => string): McpServer {
           return renderInbox(data.Reduce('messages'));
         });
         refreshUnread(id!);
-        if (fresh.length === 0) return textResult('No new messages.');
-        return textResult(
-          `${fresh.length} new message(s):\n${fresh.map((m) => fmtMsg(m, false)).join('\n')}\n\n` +
-            `These are now marked processed (auto-GC'd later). To hand any back to ` +
-            `another session: defer_messages({ msg_ids: [${fresh.map((m) => m.msg_id).join(', ')}] }).`,
-        );
+        // ALWAYS-JSON payload (owner 2026-07-17): every message carries `from`
+        // {id,name} and `encryption` ("legacy" box vs "e2e" double-ratchet), derived
+        // daemon-side by joining the message wire_id against the E2E receive notify
+        // events (src/inbox.ts). `text` stays accessible for existing consumers.
+        const e2eWireIds = readE2eWireIds(id!);
+        const payload = buildMessagesPayload(fresh, e2eWireIds);
+        return textResult(JSON.stringify(payload, null, 2));
       } catch (e) {
         return textResult(`get_messages failed: ${String(e)}`, true);
       }
@@ -3401,6 +3760,7 @@ function startGcTimer(): void {
             log(`gc(${id.name}) failed:`, String(e));
           }
           await contactRestoreSweep(id);
+          await readvertiseOnUpgradeSweep(id);
         }
       } finally {
         gcRunning = false;

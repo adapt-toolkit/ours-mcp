@@ -16,13 +16,25 @@ For that model to work, Adapt Framework Solutions Ltd must hold sufficient right
 
 We know CLAs are sometimes criticised as one-sided ("you can relicense our work; we can't relicense yours"). That asymmetry is real, and this is the honest reason for it: it is what keeps the source-available version maintained. If that trade isn't acceptable to you, we completely understand — issues, reviews, and discussion are valuable contributions that need no paperwork.
 
+## Branching & release flow
+
+We ship on a two-branch model. **Target `prerelease` with your pull requests, not `main`.**
+
+- **`prerelease`** — the integration branch. All features and fixes land here first. Every push to `prerelease` publishes a **nightly** build to the npm `nightly` tag as an ephemeral `X.Y.0-nightly.N` version. Nightlies are pre-releases (they sort *below* the eventual stable `X.Y.0`), so installing `@ours.network/mcp` normally never picks one up — you opt in with `npm install @ours.network/mcp@nightly`.
+- **`main`** — the stable branch, published to npm's default `@latest` tag. It is promote-only: it advances solely through a promote PR from `prerelease` at the end of a cycle, which strips the `-nightly.N` suffix and publishes the clean `X.Y.0` to `@latest`. Never push directly to `main`.
+
+GitHub will default new PRs to `main`; please switch the base branch to `prerelease`. If you forget, a maintainer will retarget it.
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) for your commit subjects (`feat:`, `fix:`, `feat!:`/`BREAKING CHANGE:` for majors, `chore:`/`docs:`/`test:` for non-shipping changes). The stable release automation derives the version bump from these.
+
 ## Pull request guidelines
 
 1. Open or comment on an issue first for anything non-trivial, so we can agree the approach before you write code.
 2. Keep PRs focused — one change per PR.
-3. Include tests for behavioural changes and update documentation affected by your change.
-4. Sign the CLA when prompted by the CLA bot (first PR only).
-5. Use clear commit messages; reference the issue number.
+3. **Base your PR on `prerelease`** (see Branching & release flow above), not `main`.
+4. Include tests for behavioural changes and update documentation affected by your change.
+5. Sign the CLA when prompted by the CLA bot (first PR only).
+6. Use clear, [Conventional Commits](https://www.conventionalcommits.org/) commit messages; reference the issue number.
 
 ## Code of conduct
 
