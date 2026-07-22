@@ -2,8 +2,8 @@
 // Local dev broker launcher.
 //
 // The ADAPT broker is the message relay ours.network nodes connect through. It ships
-// inside @adapt-toolkit/sdk but is not exposed as a published bin, so this is a
-// thin launcher over the SDK's public broker exports — for LOCAL development and
+// as @adapt-toolkit/broker but is not exposed as a published bin, so this is a
+// thin launcher over the broker package's public exports — for LOCAL development and
 // the test suites only. In production ours-mcp talks to a separately-deployed
 // public broker (see OURS_BROKER_URL); the broker is NOT part of this package.
 //
@@ -12,7 +12,7 @@
 //   --test_mode skips attestation checks for local development.
 
 import { Protocol } from '@adapt-toolkit/sdk/wrapper';
-import { Broker, BrokerConfigurator } from '@adapt-toolkit/sdk/broker';
+import { Broker, BrokerConfigurator } from '@adapt-toolkit/broker';
 import { AdaptNetworkComponentConfigurator, logging } from '@adapt-toolkit/sdk/utilities';
 import { AdaptEnvironment } from '@adapt-toolkit/sdk/backend';
 

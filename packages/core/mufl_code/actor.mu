@@ -528,7 +528,16 @@ application actor loads libraries
             // contact_caps. This is what gates mig_should_trigger — NOT the $describe manifest (which
             // feeds the control-plane get_manifest, a different surface). No handler needed (unlike
             // $supported). Both nodes carry it ⇒ the migration auto-trigger fires (#1867).
-            $advertise  -> [ a2a_capabilities::cap_e2e, a2a_capabilities::cap_e2e_migrate, a2a_capabilities::cap_e2e_rekey ],
+            $advertise  -> [
+                a2a_capabilities::cap_e2e,
+                a2a_capabilities::cap_e2e_migrate,
+                a2a_capabilities::cap_e2e_rekey,
+                // MCP emits delivered receipts from the core receive choke point
+                // and read receipts from get_messages below. It deliberately does
+                // not advertise cap_receipts_receive: MCP has no receipt-status UI
+                // or host store, so peers must not send receipts that it discards.
+                a2a_capabilities::cap_receipts_emit
+            ],
             $handlers   -> cap_handlers,
             $on_unknown -> fn (_: any) -> transaction::action::type[] { return []. }
         ).
@@ -571,6 +580,10 @@ application actor loads libraries
 
         fresh is message_t[] = [].
         new_inbox is message_t[] = [].
+        // One read-receipt batch per sender. Only messages transitioned by THIS
+        // invocation participate, preserving the inbox's exact-once read edge;
+        // legacy messages with no wire id remain readable without receipt noise.
+        read_wires is (global_id ->> str[]) = (,).
         sc inbox -- ( -> m)
         {
             if (m $status) == "unread"
@@ -587,6 +600,14 @@ application actor loads libraries
                 ).
                 fresh (_count fresh|) -> m.
                 new_inbox (_count new_inbox|) -> processed_m.
+                if (m $wire_id) != ""
+                {
+                    sender_wires is str[] = [].
+                    prior = read_wires (m $sender_id).
+                    if prior != NIL { sender_wires -> prior?. }
+                    sender_wires (_count sender_wires|) -> m $wire_id.
+                    read_wires (m $sender_id) -> sender_wires.
+                }
             }
             else
             {
@@ -595,10 +616,17 @@ application actor loads libraries
         }
         inbox -> new_inbox.
 
-        return transaction::success [
-            _return_data ($messages -> fresh),
-            _save_state NIL
-        ].
+        actions is transaction::action::type[] = [].
+        sc read_wires -- (sender_id -> wire_ids)
+        {
+            sc a2a_messaging::read_receipt_actions sender_id wire_ids -- ( -> a)
+            {
+                actions (_count actions|) -> a.
+            }
+        }
+        actions (_count actions|) -> _return_data ($messages -> fresh).
+        actions (_count actions|) -> _save_state NIL.
+        return transaction::success actions.
     }
 
     // ---- file store (parallels the message store) -----------------------------
