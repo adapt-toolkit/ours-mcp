@@ -101,6 +101,8 @@ application actor loads libraries
     current_transaction_info,
     a2a_protocol,
     a2a_messaging,
+    a2a_notifications,
+    a2a_notification_integration,
     a2a_capabilities,
     a2a_cluster,
     a2a_control,
@@ -410,6 +412,12 @@ application actor loads libraries
             $on_file_sent -> fn (_: any) -> transaction::action::type[] { return []. }
         ).
 
+        // Core-owned notification client state + post-send middleware. MCP is
+        // not a notification service, so the integration supplies ordinary
+        // no-op service/UI hooks while retaining handouts and wake sends in
+        // packet state.
+        a2a_notification_integration::init ($_read_or_abort -> _read_or_abort).
+
         // Wire the control plane: control requests from the bound browser proxy queue in
         // control_inbox — NEVER the message inbox, so agent sessions don't see
         // them — and the notify event wakes the daemon's dispatcher. The
@@ -536,7 +544,10 @@ application actor loads libraries
                 // and read receipts from get_messages below. It deliberately does
                 // not advertise cap_receipts_receive: MCP has no receipt-status UI
                 // or host store, so peers must not send receipts that it discards.
-                a2a_capabilities::cap_receipts_emit
+                a2a_capabilities::cap_receipts_emit,
+                // Peers may hand this MCP a scoped notify address; subsequent
+                // ordinary send_message calls emit a fire-and-forget wake.
+                a2a_capabilities::cap_notifications
             ],
             $handlers   -> cap_handlers,
             $on_unknown -> fn (_: any) -> transaction::action::type[] { return []. }
@@ -1518,6 +1529,8 @@ application actor loads libraries
         return (
             $app_format_version -> 1,
             $core              -> a2a_messaging::export_core_state NIL,
+            $notifications     -> a2a_notifications::export_notify_state NIL,
+            $notification_integration -> a2a_notification_integration::export_state NIL,
             // ---- app-owned state (agent inbox + local contact book) ----
             $inbox             -> inbox,
             $next_msg_seq      -> next_msg_seq,
@@ -1583,6 +1596,17 @@ application actor loads libraries
                 $root_profile    -> data $root_profile,
                 $contact_roots   -> data $contact_roots
             ).
+        }
+
+        // Notification fields are additive: older state blobs omit them and
+        // retain the initialized empty client/integration maps.
+        if (data $notifications) != NIL
+        {
+            a2a_notifications::import_notify_state (data $notifications).
+        }
+        if (data $notification_integration) != NIL
+        {
+            a2a_notification_integration::import_state (data $notification_integration).
         }
 
         // The inbox + next_msg_seq are the only parts the message-lifecycle changes
@@ -1745,6 +1769,13 @@ application actor loads libraries
     trn receive_message args: any
     {
         return a2a_messaging::handle_receive_message args.
+    }
+
+    // Deployed peers still address the actor namespace. New peers use the
+    // library-routed transaction; both feed the same validated core state.
+    trn receive_notify_address args: any
+    {
+        return a2a_notification_integration::handle_receive_notify_address args.
     }
 
     // A same-host peer connects via the local contact book. The credential must
