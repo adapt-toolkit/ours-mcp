@@ -22,6 +22,7 @@ const INSTALL_SH = join(PKG, 'install.sh');
 //   opts.codex       : 'ok' (default) | 'unsafe' (its --version returns junk, non-zero)
 //   opts.noHarness   : omit claude+codex bins entirely (nothing detected)
 //   opts.rootExists  : name → `ours-mcp create-root` reports it already exists (quiet no-op)
+//   opts.hermesPresent : create <HOME>/.hermes so Hermes is detected (config-dir based, handled in runInstall)
 function fakeBins(dir, opts = {}) {
   const daemonInstalled = opts.daemon !== 'absent';
   const port = opts.daemonPort || 3050;
@@ -56,6 +57,8 @@ function fakeBins(dir, opts = {}) {
   }
   write('ours-fleet', `[ "$1" = "--version" ] && { echo "0.7.0"; exit 0; }\nexit 0\n`);
   write('ours-tg-connector', `exit 0\n`);
+  // Hermes plugin front-door: logs its argv (so we can assert --skip-daemon) and succeeds.
+  write('ours-hermes-install', `exit 0\n`);
 }
 
 // Run install.mjs non-interactively with fakes on PATH. Returns { out, calls, tmp }.
@@ -66,6 +69,8 @@ function runInstall(opts = {}, extraEnv = {}) {
   const log = join(tmp, 'calls.log');
   writeFileSync(log, '');
   fakeBins(bin, opts);
+  // Hermes is detected by its config dir (HOME/.hermes, since HOME=tmp) existing — create it on demand.
+  if (opts.hermesPresent) mkdirSync(join(tmp, '.hermes'), { recursive: true });
   // For the "no harness" case we must guarantee the host's real claude/codex can't leak in via the
   // inherited PATH — so use a restricted PATH (fake bin + coreutils) with node/bash symlinked in.
   let path = `${bin}:${process.env.PATH}`;
@@ -156,6 +161,22 @@ test('human identity already exists → friendly "keeping it" with the name, not
   rmSync(tmp, { recursive: true, force: true });
 });
 
+test('hermes present (~/.hermes) → offered and installed via npm + ours-hermes-install --skip-daemon, no regression', () => {
+  const { out, calls, tmp } = runInstall({ daemon: 'installed', hermesPresent: true });
+  // Detected as a harness alongside Claude Code + Codex (config-dir based, not a driven CLI).
+  assert.match(out, /'hermes'/, 'hermes reported in the machine check');
+  // Its plugin is the npm package + the front-door, run with --skip-daemon because the unified
+  // installer already owns the daemon (Step 1) — ours-hermes-install must not re-ensure/restart it.
+  assert.match(calls, /npm i -g @ours\.network\/hermes@latest/, 'hermes plugin package installed');
+  assert.match(calls, /ours-hermes-install --skip-daemon/, 'ran the front-door with --skip-daemon');
+  assert.match(out, /Hermes plugin installed/, 'reports the Hermes plugin installed');
+  assert.match(out, /reload-mcp/, 'points the user at /reload-mcp to load the ours tools');
+  // No regression: Claude + Codex still install in the same run.
+  assert.match(calls, /claude plugin install ours@ours\.network/, 'claude still installs');
+  assert.match(calls, /codex plugin add ours@ours-codex-marketplace/, 'codex still installs');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
 test('never dead-end: an undrivable codex prints a manual path and the flow continues', () => {
   const { out, calls, tmp } = runInstall({ daemon: 'installed', codex: 'unsafe' });
   // We must NOT try to drive an unsafe codex…
@@ -171,7 +192,7 @@ test('never dead-end: an undrivable codex prints a manual path and the flow cont
 
 test('no harness at all: explains + exits cleanly, installs nothing', () => {
   const { out, calls, tmp } = runInstall({ daemon: 'installed', noHarness: true });
-  assert.match(out, /No Claude Code or Codex found/, 'says no harness is present');
+  assert.match(out, /No Claude Code, Codex, or Hermes found/, 'says no harness is present');
   assert.match(out, /Install one of them first/, 'tells the user what to do');
   assert.doesNotMatch(calls, /plugin/, 'no plugin work without a harness');
   assert.doesNotMatch(calls, /ours-fleet init/, 'bails before the later steps');

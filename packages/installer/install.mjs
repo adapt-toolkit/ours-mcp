@@ -3,7 +3,8 @@
 // bootstrap, and the `ours-install` command once the stack is on the machine).
 //
 // ONE installer for the WHOLE stack — ours core (the daemon) + the harness plugins (Claude Code /
-// Codex) + ours-fleet + the Telegram connector — for someone who ALREADY has Claude and/or Codex.
+// Codex / Hermes) + ours-fleet + the Telegram connector — for someone who ALREADY has Claude,
+// Codex, and/or Hermes.
 // Its whole job: install the stack cleanly, then hand back ONE copy-paste prompt the user drops
 // into their agent to finish all real configuration conversationally. No tokens, no port editing,
 // no config files. See packages/installer/README.md and the UX spec for the full contract.
@@ -16,7 +17,7 @@
 // installed/started/restarted — it prints exactly what it WOULD do. That is the safe way to walk
 // the whole flow on a machine you don't want to touch (and how the tests drive it).
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { homedir, userInfo, platform as osPlatform, release as osRelease } from 'node:os';
 import { join, dirname } from 'node:path';
 import { banner, heading, ok, info, warn, c, box, withSpinner, openTty, makeWriter, closeSync } from './lib/ui.mjs';
@@ -135,6 +136,21 @@ function detectHarness(name) {
   return { name, ...verdict };
 }
 
+// Hermes detection is DIFFERENT from Claude Code / Codex: Hermes has no driven CLI. Its ours plugin
+// (`ours-hermes-install`) never calls a `hermes` binary — it just writes ~/.hermes/config.yaml + the
+// skills — so "is it drivable?" is the wrong question. Per the Hermes plugin's own prerequisites,
+// presence == the config dir (~/.hermes, override with HERMES_DIR) exists. We still run the alias-safe
+// CLI probe in case a real `hermes` command is on PATH, purely to enrich detection; either signal
+// makes it installable. No config dir and no CLI → absent (skipped, like an uninstalled harness).
+function detectHermes() {
+  const dir = process.env.HERMES_DIR || join(homedir(), '.hermes');
+  const dirPresent = existsSync(dir);
+  const cli = detectHarness('hermes'); // best-effort — Hermes usually has no `--version` CLI
+  const status = dirPresent || cli.status === 'ok' ? 'ok' : 'absent';
+  const detail = dirPresent ? `config dir ${dir} present` : cli.detail;
+  return { name: 'hermes', label: 'Hermes', status, detail };
+}
+
 // Set by main() so the top-level catch can route a Ctrl+C (InstallCancelled) through the same
 // clean-exit path as the SIGINT handler.
 let cancelHandler = null;
@@ -152,7 +168,7 @@ const USAGE = `ours-install — the unified ours.network stack installer.
   ours-install [--dry-run] [--help] [--version]
 
 Guided ~3-minute setup for the whole stack: ours core (the daemon), the harness
-plugins (Claude Code + Codex), ours-fleet, and the Telegram connector — then one
+plugins (Claude Code + Codex + Hermes), ours-fleet, and the Telegram connector — then one
 copy-paste hand-off prompt. You approve each step; re-run any time to add a piece
 or update.
 
@@ -225,7 +241,10 @@ async function main() {
     { name: 'claude', label: 'Claude Code' },
     { name: 'codex', label: 'Codex' },
   ];
+  // Claude Code + Codex are driven CLIs (alias-safe --version probe); Hermes is config-dir based
+  // (see detectHermes) so it gets its own detector, appended after them.
   const harnesses = harnessSpecs.map((h) => ({ ...h, ...detectHarness(h.name) }));
+  harnesses.push(detectHermes());
   for (const h of harnesses) {
     if (h.status === 'ok') line(ok(`'${h.name}'  → real program (its plugin can be installed)`));
     else if (h.status === 'alias') line(warn(`'${h.name}'  → ${h.detail}  (I won't call it — see the note below; you can still install it by hand)`));
@@ -236,7 +255,7 @@ async function main() {
   const anyHarness = harnesses.some((h) => h.status !== 'absent');
   if (!anyHarness) {
     line('');
-    line(warn('No Claude Code or Codex found on this machine.'));
+    line(warn('No Claude Code, Codex, or Hermes found on this machine.'));
     line(info('Install one of them first, then re-run ours-install to wire it up.'));
     finish(ttyFd); return;
   }
@@ -431,17 +450,39 @@ async function main() {
     } else { failCodex(); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'failed', note: 'marketplace/install step failed' }); }
     return true;
   }
+  // Hermes: NOT a driven CLI. Its plugin install is `npm i -g @ours.network/hermes@<channel>` then
+  // `ours-hermes-install`, which writes ~/.hermes/config.yaml (the ours MCP server) + the skills. No
+  // marketplace/plugin-add, no alias-safety gate — nothing here calls the `hermes` binary. We pass
+  // --skip-daemon because the unified installer already owns the daemon (Step 1, chosen port);
+  // ours-hermes-install would otherwise re-ensure/restart it. Same never-dead-end contract as above.
+  async function installHermes() {
+    const go = yes('  Install the ours plugin into Hermes?', true);
+    if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'hermes', label: 'Hermes plugin', state: 'skipped' }); return false; }
+    const npmOk = await actSpin(`installing ${spec('hermes')}…`, `npm i -g ${spec('hermes')} (provides ours-hermes-install)`, () => runAsync(NPM, ['i', '-g', spec('hermes')]));
+    const inst = npmOk.ok
+      ? await act('ours-hermes-install --skip-daemon (writes ~/.hermes: ours MCP server + skills)', async () => run('ours-hermes-install', ['--skip-daemon'], { capture: true }))
+      : npmOk;
+    if (inst.ok) {
+      line(ok('Hermes plugin installed — the ours MCP server + skills are registered in ~/.hermes. No problems.'));
+      line(info("(run '/reload-mcp' in Hermes to load the ours tools.)"));
+      record({ key: 'hermes', label: 'Hermes plugin', state: 'installed', note: 'run /reload-mcp' });
+    } else { failHermes(); record({ key: 'hermes', label: 'Hermes plugin', state: 'failed', note: 'npm/ours-hermes-install step failed' }); }
+    return true;
+  }
 
   // ============================================================================================
-  // STEP 2 / 4 — harness plugins (Claude Code + Codex). The installer drives the plugin CLIs.
+  // STEP 2 / 4 — harness plugins (Claude Code + Codex + Hermes). The installer drives the plugin
+  // CLIs for Claude/Codex; Hermes installs via npm + ours-hermes-install (no CLI driving).
   // ============================================================================================
   line(heading('2/4 — harness plugins'));
-  line(info('These teach Claude Code and Codex the ours skills, so you can just talk to your agent'));
-  line(info("to message people and set things up. I'll install them for you — no commands to type."));
+  line(info('These teach Claude Code, Codex, and Hermes the ours skills, so you can just talk to your'));
+  line(info("agent to message people and set things up. I'll install them for you — no commands to type."));
   for (const h of harnesses) {
     if (h.status === 'absent') continue; // nothing to offer; pre-flight already noted it
     line('');
-    const acted = h.name === 'claude' ? await installClaude(h) : await installCodex(h);
+    const acted = h.name === 'claude' ? await installClaude(h)
+      : h.name === 'codex' ? await installCodex(h)
+        : await installHermes(h);
     cont(acted);
   }
 
@@ -472,7 +513,7 @@ async function main() {
         const r = await act(`claude plugin install ${CLAUDE_FLEET_PLUGIN}`, async () => run('claude', ['plugin', 'install', CLAUDE_FLEET_PLUGIN], { capture: true }));
         if (r.ok) { line(ok('Claude Code fleet plugin installed — you can spawn agents from Claude Code. No problems.')); fleetIn.push('Claude Code'); }
         else failClaudeFleet();
-      } else { // codex
+      } else if (h.name === 'codex') {
         if (h.status !== 'ok') { manualCodexFleet(h); continue; }
         await act(`codex plugin marketplace add ${CODEX_MARKET}`, async () => run('codex', ['plugin', 'marketplace', 'add', CODEX_MARKET], { capture: true }));
         const r = await act(`codex plugin add ${CODEX_FLEET_PLUGIN}`, async () => run('codex', ['plugin', 'add', CODEX_FLEET_PLUGIN], { capture: true }));
@@ -483,7 +524,10 @@ async function main() {
     // Only claim the skill is present where the fleet plugin actually installed.
     if (init.ok && fleetIn.length) line(ok(`ours-fleet ready — ${fleetIn.join(' + ')} now know the fleet skill. No problems.`));
     else if (init.ok) line(info('ours-fleet CLI is installed; add the fleet plugin to your harness with the commands above.'));
-    const fleetOk = init.ok && (fleetIn.length > 0 || harnesses.every((h) => h.status === 'absent'));
+    // Fleet plugins target Claude Code + Codex only (Hermes has none) — so "no fleet-capable harness
+    // to install into" means every claude/codex is absent, NOT every harness (Hermes doesn't count).
+    const fleetCapableAbsent = harnesses.filter((h) => h.name === 'claude' || h.name === 'codex').every((h) => h.status === 'absent');
+    const fleetOk = init.ok && (fleetIn.length > 0 || fleetCapableAbsent);
     record({ key: 'fleet', label: 'ours-fleet', state: fleetOk ? 'installed' : 'failed', version: globalVersion('@ours.network/fleet'), note: fleetIn.length ? fleetIn.join(' + ') : (init.ok ? 'CLI only — add plugin manually' : 'ours-fleet init failed') });
   } else {
     line(info('skipped cleanly — re-run ours-install any time to add it.'));
@@ -558,6 +602,13 @@ function failCodex() {
   line('    ' + c.cyan(`codex plugin marketplace add ${CODEX_MARKET}`));
   line('    ' + c.cyan('codex plugin add ours@ours-codex-marketplace'));
   line('    ' + c.cyan('npm i -g @ours.network/codex'));
+  line(info('Your daemon and other steps are intact. Continuing.'));
+}
+function failHermes() {
+  line(warn('Couldn\'t install the Hermes plugin automatically (network or npm).'));
+  line(info('Install it by hand — run these two, then run /reload-mcp in Hermes:'));
+  line('    ' + c.cyan('npm i -g @ours.network/hermes'));
+  line('    ' + c.cyan('ours-hermes-install'));
   line(info('Your daemon and other steps are intact. Continuing.'));
 }
 // --- fleet HARNESS PLUGIN never-dead-end messaging ---------------------------------------------
