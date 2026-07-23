@@ -530,6 +530,10 @@ application actor loads libraries
             // wires directly — it reads the bound monitoring_proxy and returns whether
             // ($sender_id,$cap,$verb) is allowed.
             $authorizer -> a2a_messaging::authorize_control,
+            // Thin a2a_capabilities wire routes delegate to messaging, which owns
+            // persisted per-contact ACK/retry state and the migration subscriber.
+            $on_advertise -> a2a_messaging::handle_capability_advertise,
+            $on_advertise_ack -> a2a_messaging::handle_capability_advertise_ack,
             $supported  -> cap_supported,
             // $advertise (Phase F): caps advertised on the wire piggyback ($caps in invite/restore
             // bundles) → self_caps, so self_advertises(cap_e2e_migrate)=TRUE and PEERS learn it into

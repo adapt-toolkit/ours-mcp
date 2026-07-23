@@ -1619,25 +1619,27 @@ async function contactRestoreSweep(id: Identity): Promise<void> {
   }
 }
 
-// Boot/upgrade RE-ADVERTISE (DAEMON CONTRACT, core 0.10 B1): push my fresh v2 AD
-// (+ caps piggyback) to every PRE-EXISTING LEGACY contact over the legacy channel.
-// A v2 peer ingests it (handle_readvertise_ad → learns my caps/pv, refreshes its
-// stored AD) and offers migration back; a still-v1 peer ignores it. This is the
-// ONLY bootstrap for a stable-era contact whose stored peer caps/pv predate DR:
-// without it neither advertise_migrate nor sweep_e2e_migrations can find it
-// eligible (they only offer to already-known-0.9 peers), so an existing contact
-// would never auto-migrate after both sides upgrade. The core trn is STATELESS +
-// idempotent (no _save_state; only sends), so calling it on every boot and GC
-// tick is safe and also covers a peer that comes online later.
-async function readvertiseOnUpgradeSweep(id: Identity): Promise<void> {
+// Generic capability reconciliation (Part C). The packet compares the persisted
+// previous list to the code-defined list and sends only to contacts whose ACK ledger
+// is stale/missing. Repeated boot/GC calls therefore retry offline/lost-ACK peers
+// without re-spamming confirmed peers. The legacy full-AD migration bootstrap is a
+// subscriber/special-case inside this same packet transaction.
+async function capabilityReconcileSweep(id: Identity): Promise<void> {
   try {
-    const readvertised = await withScopeAsync(async (lt) => {
-      const r = await mutatingTx(id, '::a2a_messaging::readvertise_on_upgrade', {}, lt);
-      return Number(r.Reduce('readvertised').Visualize());
+    const result = await withScopeAsync(async (lt) => {
+      const r = await mutatingTx(id, '::a2a_messaging::reconcile_advertise', {}, lt);
+      const num = (field: string) => (r.Reduce(field).IsNil() ? 0 : Number(r.Reduce(field).Visualize()));
+      return {
+        changed: /true/i.test(r.Reduce('changed').Visualize()),
+        capabilityAdvertised: num('capability_advertised'),
+        legacyReadvertised: num('legacy_readvertised'),
+      };
     });
-    if (readvertised > 0) log(`[${id.name}] re-advertised v2 AD to ${readvertised} pre-existing legacy contact(s) (migration bootstrap)`);
+    if (result.capabilityAdvertised > 0 || result.legacyReadvertised > 0) {
+      log(`[${id.name}] capability reconcile: changed=${result.changed} advertised=${result.capabilityAdvertised} legacy_migration_bootstrap=${result.legacyReadvertised}`);
+    }
   } catch (err) {
-    log(`[${id.name}] readvertise-on-upgrade sweep failed:`, String(err));
+    log(`[${id.name}] capability reconcile sweep failed:`, String(err));
   }
 }
 
@@ -2624,7 +2626,7 @@ async function restoreIdentity(name: string): Promise<Identity> {
   log(`[${name}] EXPOSED (routing + broker registration) — import phase complete`);
   // Eager restore: re-key degraded contacts + flush queues orphaned by a crash.
   await contactRestoreSweep(id);
-  // NOTE: the boot/upgrade re-advertise (readvertiseOnUpgradeSweep) is deliberately
+  // NOTE: capability reconciliation (capabilityReconcileSweep) is deliberately
   // NOT fired here. It must run AFTER the role-cert re-delegation pass in bootWrapper,
   // otherwise the push (and its retries) would ride a stale role cert and be rejected.
   // See the unified re-advertise pass after the re-delegation block.
@@ -2771,14 +2773,14 @@ async function bootWrapper(): Promise<void> {
     // async race where a retry timer would ride a stale cert. The push is delivered
     // only while the peer is online, and a mutual upgrade reconnects each side at a
     // different time, so fire once now and RE-fire on a short schedule to catch a peer
-    // that comes online shortly after us. readvertise_on_upgrade is STATELESS +
-    // idempotent (legacy-only filter; no _save_state), so retries and already-migrated
-    // contacts are safe no-ops. Roots re-advertise too (they need no cert refresh).
+    // that comes online shortly after us. Per-contact ACK state makes these retries
+    // no-ops for confirmed peers while retaining convergence for an offline peer.
+    // Roots reconcile too (they need no cert refresh).
     for (const id of identities.values()) {
-      await readvertiseOnUpgradeSweep(id);
+      await capabilityReconcileSweep(id);
       await e2eRecoverySweep(id);
       for (const ms of [10_000, 30_000, 90_000]) {
-        setTimeout(() => { readvertiseOnUpgradeSweep(id).catch(() => { /* logged inside */ }); }, ms);
+        setTimeout(() => { capabilityReconcileSweep(id).catch(() => { /* logged inside */ }); }, ms);
         setTimeout(() => { e2eRecoverySweep(id).catch(() => { /* logged inside */ }); }, ms);
       }
     }
@@ -4195,7 +4197,7 @@ function startGcTimer(): void {
             log(`gc(${id.name}) failed:`, String(e));
           }
           await contactRestoreSweep(id);
-          await readvertiseOnUpgradeSweep(id);
+          await capabilityReconcileSweep(id);
           await e2eRecoverySweep(id);
         }
       } finally {
