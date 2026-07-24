@@ -1,0 +1,21 @@
+// ours.network — OpenCode config block (reference).
+//
+// install.sh writes an equivalent managed block into ~/.config/opencode/opencode.json (or
+// opencode.jsonc) for you. This file is the manual reference: merge the "mcp" key below into
+// your existing config, then restart opencode.
+//
+// Wake-on-mail is in-session (the agent tails `ours-mcp watch <identity>` itself — see the
+// ours skill); there is no webhook route or external watcher to configure.
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // The ours MCP server. Points OpenCode directly at the globally-installed daemon proxy
+  // (`npm i -g @ours.network/mcp`). Tools appear as ours_<tool> (e.g. ours_get_messages).
+  "mcp": {
+    "ours": {
+      "type": "local",
+      "command": ["ours-mcp", "proxy"],
+      "enabled": true
+    }
+  }
+}
