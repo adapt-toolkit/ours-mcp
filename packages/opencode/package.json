@@ -42,7 +42,7 @@
   },
   "scripts": {
     "install-plugin": "bash install.sh",
-    "test": "node --test"
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "zod": "^4.0.0"
