@@ -64,11 +64,10 @@ before(() => {
   }
 });
 
-// --- minimal MCP stdio client (JSON-RPC 2.0, newline-delimited) — same shape as the one in
-// ours-monitor-e2e.test.mjs, kept separate/inline here so this file has zero dependency on the
-// (billing-blocked) e2e test file and can be reviewed/run fully standalone. ---
+// --- minimal MCP stdio client (JSON-RPC 2.0, newline-delimited), inline so this file is fully
+// self-contained and can be reviewed/run standalone. ---
 function mcpClient(env) {
-  // See the identical comment in ours-monitor-e2e.test.mjs: ours-mcp proxy's session-restore
+  // ours-mcp proxy's session-restore
   // self-recovers a prior identity binding keyed by the ambient CLAUDE_CODE_SESSION_ID env var,
   // which every proxy process spawned from this shell shares. A fresh random id per connection
   // means each one is a "new session" with nothing to restore, so sender/receiver never collide.

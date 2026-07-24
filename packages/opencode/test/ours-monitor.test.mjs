@@ -1,14 +1,14 @@
 // Unit tests for plugin/ours-monitor.impl.mjs (the implementation module — plugin/ours-
 // monitor.mjs itself is a thin loader-shape file re-exported as `server`/default only; see its
-// header comment and test/ours-monitor-e2e.test.mjs for why that split exists).
+// header comment for why that split exists).
 // Everything here mocks spawnWatch (the Bun.spawn-based watcher) and `client` (the OpenCode SDK
 // client) — no real process, no real HTTP call, no real model turn. That's deliberate: this
 // suite proves OUR code's logic (rate limiting, line classification, the start/stop/dispose
 // lifecycle, a rate-limit trip disarming rather than looping forever). The REAL watcher mechanics
 // — does Bun.spawn + incremental stream reading actually deliver lines from a real, never-exiting
 // `ours-mcp watch` process; does a real model turn actually get injected and reply — are proven
-// for real in test/ours-monitor-live-watch.test.mjs and test/ours-monitor-e2e.test.mjs, since a
-// mock never has to behave like the real, long-running child process it stands in for.
+// for real in test/ours-monitor-live-watch.test.mjs, since a mock never has to behave like the
+// real, long-running child process it stands in for.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
