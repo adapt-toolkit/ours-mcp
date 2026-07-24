@@ -63,9 +63,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { formatVersionAdvisory } from './version-advisory';
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, chmodSync, createWriteStream } from 'node:fs';
+import { join, dirname, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -74,6 +76,15 @@ const VERSION = typeof __OURS_VERSION__ !== 'undefined' ? __OURS_VERSION__ : '0.
 // Tools whose successful call binds an identity to this session. We watch for
 // them so we can re-assert the binding after an upstream reconnect.
 const BIND_TOOLS = new Set(['choose_identity', 'create_identity', 'create_root_identity']);
+
+// save_file (issue #34) is the ONE tool the proxy does not forward transparently.
+// The daemon runs as its owner and cannot write a cross-user recipient's chosen
+// path; THIS process runs as the agent's OS user and can. So we intercept the
+// call, fetch the file's raw bytes from the daemon's token-gated /files/<wire_id>
+// stream (scoped daemon-side to the bound identity's own folder), write them to
+// dest_path here, and synthesize the tool result. The bytes transit
+// daemon→proxy→disk and never enter the JSON-RPC result / model context.
+const SAVE_FILE_TOOL = 'save_file';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -360,6 +371,12 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
           if (params && BIND_TOOLS.has(params.name ?? '') && typeof params.arguments?.name === 'string') {
             pendingBind.set(msg.id as string | number, params.arguments.name);
           }
+          // Fulfil save_file locally (see SAVE_FILE_TOOL) — do NOT forward upstream.
+          if (params?.name === SAVE_FILE_TOOL) {
+            const args = (msg.params as { arguments?: Record<string, unknown> } | undefined)?.arguments ?? {};
+            void handleSaveFile(msg.id as string | number, args);
+            continue; // handled locally; the daemon never sees this tools/call
+          }
         }
         // Track it for the fail-back. Only frames that actually go upstream are
         // registered — a locally-absorbed re-initialize `continue`s above and never
@@ -427,6 +444,41 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
       if (id === undefined) continue;
       const e = inFlight.get(id);
       if (e) e.transport = t;
+    }
+  }
+
+  // Fulfil a save_file tools/call locally: pull the file's raw bytes from the
+  // daemon's token-gated stream (scoped daemon-side to the bound identity's own
+  // folder) and write them to dest_path as THIS process's OS user (the agent's).
+  // The bytes go daemon→proxy→disk and never appear in the JSON-RPC result. On
+  // any failure we reply with a clear, actionable error so the agent can fall
+  // back to the get_files path — we never hard-break.
+  async function handleSaveFile(id: string | number, args: Record<string, unknown>): Promise<void> {
+    const wireId = String(args.wire_id ?? '').trim();
+    const destPath = String(args.dest_path ?? '').trim();
+    const reply = (text: string, isError = false) =>
+      down
+        .send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], isError } } as unknown as JSONRPCMessage)
+        .catch((e) => log('save_file reply failed:', String(e)));
+    if (!wireId || !destPath) { await reply('save_file: both `wire_id` and `dest_path` are required.', true); return; }
+    if (!/^[A-Za-z0-9]+$/.test(wireId)) { await reply('save_file: invalid wire_id.', true); return; }
+    try {
+      const fetchUrl = new URL(url.href);
+      fetchUrl.pathname = `/files/${encodeURIComponent(wireId)}`;
+      fetchUrl.search = '';
+      const headers: Record<string, string> = { 'x-ours-lease-token': leaseToken };
+      if (opts.apiToken) headers['x-ours-api-token'] = opts.apiToken;
+      const resp = await fetch(fetchUrl, { headers });
+      if (resp.status === 401 || resp.status === 403) { await reply('save_file: ours daemon authentication failed; the monitor may be disarmed.', true); return; }
+      if (resp.status === 404) { await reply(`save_file: no file with wire_id ${wireId} is available to the bound identity. Run get_files first; it may already be saved, or it belongs to another identity.`, true); return; }
+      if (!resp.ok || !resp.body) { await reply(`save_file: ours daemon returned HTTP ${resp.status}. Your ours daemon may be too old to support save_file — update it, or use get_files and copy the returned path yourself.`, true); return; }
+      const abs = resolvePath(destPath);
+      mkdirSync(dirname(abs), { recursive: true });
+      await pipeline(Readable.fromWeb(resp.body as unknown as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(abs));
+      const size = statSync(abs).size;
+      await reply(`Saved file (wire_id ${wireId}) to ${abs} (${size} bytes). The bytes were streamed daemon→proxy→disk and never entered this result.`);
+    } catch (e) {
+      await reply(`save_file failed: ${String(e)}`, true);
     }
   }
 
