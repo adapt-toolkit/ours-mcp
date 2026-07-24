@@ -80,13 +80,13 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { resolve, join, dirname, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer as createHttpServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib';
 import * as fs from 'node:fs';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 
 import { adapt_wrapper } from '@adapt-toolkit/sdk/executables';
 import { PacketWrapperConfigurator } from '@adapt-toolkit/sdk/wrappers';
@@ -330,10 +330,6 @@ const notifyLogPath = (dir: string) => join(dir, 'notifications.log');
 // processed state; this is just the offline view the SessionStart hook reads
 // (it can't open the binary packet state itself).
 const unreadPath = (dir: string) => join(dir, 'unread.json');
-// Per-identity directory where get_files writes received file bytes to disk
-// (STATE_DIR/<identity>/files/<wire_id>-<safe_name>). The wake signal stays
-// content-free; bytes land here only on the explicit get_files egress.
-const filesDirFor = (id: Identity) => join(id.dir, 'files');
 
 function listPersistedNames(): string[] {
   if (!fs.existsSync(STATE_DIR)) return [];
@@ -2254,28 +2250,58 @@ function renderFiles(v: AdaptValue): string {
   return `${lines.length} file(s):\n${lines.join('\n')}`;
 }
 
-// Pull the bytes from a get_files result, write each file under the identity's
-// files/ dir, and return a human summary with on-disk paths. Bytes never touch
-// the notify/log path — this is the sole egress, mirroring get_messages.
-async function writeIncomingFiles(id: Identity, v: AdaptValue): Promise<string> {
-  if (v.IsNil()) return 'No new files.';
-  const dir = filesDirFor(id);
+// Pull the bytes from a get_files result and return them to the CALLER as MCP
+// embedded-resource content parts (base64 `blob` + mime), carried back over the
+// same token-gated /mcp HTTP channel the recipient already authenticates on —
+// NOT written to disk under the daemon owner's state dir.
+//
+// WHY (issue #34): the daemon runs as its owner and hosts every identity's
+// packet, so its state dir lives under the owner's 0700 HOME. Writing received
+// bytes to STATE_DIR/<identity>/files/… and handing the recipient that PATH
+// works only when the recipient is the SAME OS user. A cross-user recipient
+// (isolation by design) cannot traverse the owner's HOME → EACCES: delivery
+// succeeds at the protocol layer but is unreadable at the filesystem layer.
+// Loosening the HOME perms (or moving state to a group-shared path) would let
+// every same-group identity read EVERY identity's files, defeating per-identity
+// confidentiality. Streaming the bytes over the authenticated channel avoids
+// both: the recipient gets the content directly and can persist it wherever ITS
+// own user can write. Confidentiality is preserved structurally — files live in
+// per-identity packet state and leave ONLY via that identity's own get_files, so
+// another same-group identity's get_files never sees them, and nothing is left on
+// a group-readable path. This mirrors the notify-http-api fix, which resolved the
+// same cross-user EACCES for notifications.log by serving it over the token-gated
+// HTTP surface instead of a shared filesystem path.
+//
+// Bytes never touch the notify/log path — get_files is the sole egress, mirroring
+// get_messages. list_incoming_files stays metadata-only by design (see its tool).
+type FileContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'resource'; resource: { uri: string; mimeType: string; blob: string } };
+function receivedFilesResult(v: AdaptValue): { content: FileContentPart[]; isError: boolean } {
+  if (v.IsNil()) return textResult('No new files.');
   const lines: string[] = [];
+  const resources: Array<Extract<FileContentPart, { type: 'resource' }>> = [];
   for (let i = 0; ; i++) {
     const f = v.Reduce(i);
     if (f.IsNil()) break;
-    if (lines.length === 0) await mkdir(dir, { recursive: true });
     const name = f.Reduce('filename').Visualize();
-    const mime = f.Reduce('mime').Visualize();
+    const mime = f.Reduce('mime').Visualize() || 'application/octet-stream';
     const sender = f.Reduce('sender_name').Visualize();
     const wire = f.Reduce('wire_id').Visualize();
     const bytes = Buffer.from(f.Reduce('data').GetBinary());
-    const outPath = join(dir, `${wire}-${sanitizeFilename(name)}`);
-    await writeFile(outPath, bytes);
-    lines.push(`  • ${name} (${mime || 'application/octet-stream'}, ${bytes.length} B) from ${sender} → ${outPath} {${wire}}`);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    // Opaque, per-identity-scoped URI (never a real filesystem path — the bytes
+    // are the payload). sanitizeFilename keeps it a safe single path component.
+    const uri = `ours-file:///${wire}/${sanitizeFilename(name)}`;
+    resources.push({ type: 'resource', resource: { uri, mimeType: mime, blob: bytes.toString('base64') } });
+    lines.push(`  • ${name} (${mime}, ${bytes.length} B, sha256 ${sha256}) from ${sender} {${wire}}`);
   }
-  if (lines.length === 0) return 'No new files.';
-  return `${lines.length} new file(s):\n${lines.join('\n')}`;
+  if (lines.length === 0) return textResult('No new files.');
+  const summary =
+    `${lines.length} new file(s) — bytes attached as embedded resources (base64), ` +
+    `delivered over the authenticated channel (no filesystem handoff). ` +
+    `Decode and save each where you have write access:\n${lines.join('\n')}`;
+  return { content: [{ type: 'text' as const, text: summary }, ...resources], isError: false };
 }
 
 function renderPending(v: AdaptValue): Array<{ container_id: string; name: string; queued: number }> {
@@ -3261,9 +3287,13 @@ function createMcpServer(getSessionId: () => string): McpServer {
 
   server.tool(
     'get_files',
-    'Retrieve received files that have not been pulled yet: writes each to disk under ' +
-      'the identity state dir and returns its path + metadata. Flips them to "processed" — ' +
-      'the sole place file bytes leave the packet. Requires a bound identity.',
+    'Retrieve received files that have not been pulled yet: returns each file\'s bytes ' +
+      'inline as an MCP embedded resource (base64 blob + mime) plus a metadata/sha256 ' +
+      'summary, streamed over the authenticated channel — no filesystem handoff, so a ' +
+      'recipient running as a different OS user than the daemon owner gets the content ' +
+      'without needing access to the owner\'s private state dir. Flips them to "processed" — ' +
+      'the sole place file bytes leave the packet. Decode and save each where you have ' +
+      'write access. Requires a bound identity.',
     {},
     async () => {
       const { id, err } = boundOr();
@@ -3271,10 +3301,10 @@ function createMcpServer(getSessionId: () => string): McpServer {
       try {
         const out = await withScopeAsync(async (lt) => {
           const data = await mutatingTx(id!, '::actor::get_files', {}, lt);
-          return await writeIncomingFiles(id!, data.Reduce('files'));
+          return receivedFilesResult(data.Reduce('files'));
         });
         refreshUnread(id!);
-        return textResult(out);
+        return out;
       } catch (e) {
         return textResult(`get_files failed: ${String(e)}`, true);
       }
