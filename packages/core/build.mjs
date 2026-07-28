@@ -103,6 +103,15 @@ await build({
   outfile: resolve(dist, 'voice-setup.js'),
 });
 
+// Structured daemon-startup progress + bounded wait helpers. index.ts and
+// cli.ts inline these, while the standalone output keeps the deterministic
+// timeout/rendering contract directly unit-testable.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/startup-progress.ts')],
+  outfile: resolve(dist, 'startup-progress.js'),
+});
+
 // Ship ONLY the compiled MUFL packet (*.muflo) — never the .mu/.mm/.mufl source.
 // The MCP server loads the .muflo at runtime from dist/mufl_code/ by hash.
 const muflSrc = resolve(root, 'mufl_code');

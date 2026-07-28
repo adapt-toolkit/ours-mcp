@@ -109,6 +109,10 @@ import { OURS_COMPAT_VERSION } from './protocol';
 import { mimeFromExt, sanitizeFilename } from './files.js';
 import { e2eWireIdsFromEvents, buildMessagesPayload } from './inbox.js';
 import { isVoiceMessage, sttStatus, transcribeVoice, voiceDeliveryLine, type VoiceOutcome } from './transcribe.js';
+import {
+  createStartupProgressReporter,
+  type StartupProgressReporter,
+} from './startup-progress.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -126,6 +130,11 @@ const TRANSPORT = process.env.OURS_TRANSPORT ?? 'http';
 const PORT = CONFIG.port;
 const GC_INTERVAL_MS = CONFIG.gcIntervalMs;
 const API_VISIBILITY = CONFIG.apiVisibility;
+const startupHeartbeatMs = Number(process.env.OURS_TEST_STARTUP_HEARTBEAT_MS || '') || undefined;
+const startupProgress: StartupProgressReporter | null =
+  TRANSPORT === 'http'
+    ? createStartupProgressReporter(STATE_DIR, { heartbeatMs: startupHeartbeatMs })
+    : null;
 
 // stderr only — MCP speaks JSON-RPC over stdout.
 const log = (...parts: unknown[]) =>
@@ -2638,6 +2647,7 @@ async function restoreIdentity(name: string): Promise<Identity> {
 
 // ----- node bootstrap ---------------------------------------------------------
 async function bootWrapper(): Promise<void> {
+  startupProgress?.update('wrapper');
   UNIT = locateUnit();
   const argv = [
     '--broker_address', BROKER_URL,
@@ -2663,6 +2673,7 @@ async function bootWrapper(): Promise<void> {
   // pinned (a no-op for already-pinned ones — pin_registrar is idempotent for
   // the same keys, and reseeding from registrar.key keeps the registrar keys
   // stable across restarts — adapt #77).
+  startupProgress?.update('registrar');
   try {
     await ensureRegistrar();
   } catch (err) {
@@ -2675,15 +2686,29 @@ async function bootWrapper(): Promise<void> {
   // Recreate every persisted identity so it registers on the broker and can
   // receive mail regardless of whether any session is currently bound to it.
   const names = listPersistedNames();
+  // Deterministic integration-test seam: exercise slow/many restore progress
+  // without creating identity keys, state blobs, credentials, or packets.
+  // It is deliberately available only under an OURS_TEST_* name and only when
+  // the temporary state directory contains zero persisted identities.
+  const fakeRestoreCount = Math.max(0, Number(process.env.OURS_TEST_FAKE_RESTORE_COUNT || '') || 0);
+  const fakeRestoreMs = Math.max(0, Number(process.env.OURS_TEST_FAKE_RESTORE_MS || '') || 0);
+  const restoreTotal = names.length === 0 && fakeRestoreCount > 0 ? fakeRestoreCount : names.length;
+  startupProgress?.update('identities', { completed: 0, total: restoreTotal });
   // Ship-review round-2 major: reserve EVERY persisted name BEFORE the restore
   // loop — the stdio MCP server is already serving, and a create for a name whose
   // restore has not finished (or failed) must be rejected, not race the restore.
   for (const n of names) reservedNames.add(n);
-  if (names.length === 0) {
+  if (names.length === 0 && fakeRestoreCount > 0) {
+    log(`TEST: simulating ${fakeRestoreCount} fake identity restore(s), ${fakeRestoreMs}ms each`);
+    for (let i = 0; i < fakeRestoreCount; i++) {
+      if (fakeRestoreMs > 0) await new Promise((r) => setTimeout(r, fakeRestoreMs));
+      startupProgress?.update('identities', { completed: i + 1, total: fakeRestoreCount });
+    }
+  } else if (names.length === 0) {
     log('no persisted identities — start with create_identity');
   } else {
     log(`restoring ${names.length} identit${names.length === 1 ? 'y' : 'ies'}: ${names.join(', ')}`);
-    for (const name of names) {
+    for (const [index, name] of names.entries()) {
       try {
         const id = await restoreIdentity(name);
         if (registrar) {
@@ -2693,8 +2718,10 @@ async function bootWrapper(): Promise<void> {
       } catch (err) {
         log(`failed to restore "${name}":`, String(err));
       }
+      startupProgress?.update('identities', { completed: index + 1, total: names.length });
     }
   }
+  startupProgress?.update('reconciliation');
   // D4: start the periodic cluster sweep (reconcile + settle). Self-gated on
   // ENVELOPE_DISPATCH, so it is a dormant no-op until the live cutover.
   rebuildMonitoredChildren(); // RR9-C13: restore monitored-child→CP map from persisted truth
@@ -4233,6 +4260,12 @@ function stopGcTimer(): void {
 
 // ----- startup ----------------------------------------------------------------
 async function main() {
+  // Test-only immediate-failure seam for the CLI wait contract. This happens
+  // after the structured reporter exists, so the parent can distinguish a
+  // daemon-declared failure from a silent child exit.
+  if (process.env.OURS_TEST_STARTUP_FAIL === '1') {
+    throw new Error('forced startup failure (OURS_TEST_STARTUP_FAIL)');
+  }
   if (TRANSPORT === 'stdio') {
     // Connect MCP transport FIRST so the initialize handshake doesn't time out
     // while the wrapper + identities boot. A single stdio session has one fixed id.
@@ -4265,6 +4298,7 @@ async function main() {
   startGcTimer();
 
   log(`wrapper ready (identities=${identities.size}), starting HTTP server…`);
+  startupProgress?.update('server');
 
   const transports: Record<string, StreamableHTTPServerTransport> = {};
 
@@ -4485,6 +4519,7 @@ async function main() {
   httpServer.requestTimeout = 0;
 
   httpServer.listen(PORT, '127.0.0.1', () => {
+    startupProgress?.ready();
     log(`MCP server v${VERSION} ready (transport=http, port=${PORT}, visibility=${API_VISIBILITY}, identities=${identities.size}, state=${STATE_DIR}, broker=${BROKER_URL})`);
   });
 
@@ -4510,6 +4545,7 @@ async function main() {
 }
 
 main().catch((err) => {
+  startupProgress?.failed();
   log(`fatal startup error: ${err?.stack ?? err}`);
   process.exit(1);
 });
