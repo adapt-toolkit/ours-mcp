@@ -17,7 +17,17 @@ const server = createServer((req, res) => {
   req.on('end', () => {
     last = { method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks) };
     if (req.url.startsWith('/http401')) { res.writeHead(401); res.end('{"error":"bad key"}'); return; }
+    if (req.url.startsWith('/echo-key')) {
+      res.writeHead(401);
+      res.end('provider rejected do-not-leak-placeholder');
+      return;
+    }
     if (req.url.startsWith('/slow')) return; // never responds → timeout path
+    if (req.url.startsWith('/missing-text')) {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ unexpected: true }));
+      return;
+    }
     if (req.url.startsWith('/v1/listen')) {
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({ results: { channels: [{ alternatives: [{ transcript: 'dg text' }] }] } }));
@@ -144,6 +154,17 @@ const FNAME = 'voice-message-20260711-193210.m4a';
     provider: 'openai-compatible', apiKey: 'k', model: 'm', baseUrl: 'http://127.0.0.1:1/v1',
   });
   ok(!rConn.ok, 'connection refused → {ok:false}, never throws');
+
+  const rMalformed = await transcribeVoice(BYTES, FNAME, VOICE_MIME, {
+    provider: 'openai-compatible', apiKey: 'k', model: 'm', baseUrl: `${BASE}/missing-text`,
+  });
+  ok(!rMalformed.ok && rMalformed.error.includes('missing text'), 'malformed provider response → explicit failure, never a blank transcript');
+
+  const secret = 'do-not-leak-placeholder';
+  const rEcho = await transcribeVoice(BYTES, 'voice_705.ogg', 'audio/ogg; x-ours-kind=voice-message', {
+    provider: 'openai-compatible', apiKey: secret, model: 'm', baseUrl: `${BASE}/echo-key`,
+  });
+  ok(!rEcho.ok && rEcho.error.includes('[redacted]') && !rEcho.error.includes(secret), 'provider error body cannot echo the API key into diagnostics');
 }
 
 // ---- deterministic delivery lines ------------------------------------------------

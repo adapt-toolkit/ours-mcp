@@ -48,7 +48,7 @@ export const VOICE_MESSAGE_FILENAME_PREFIX = 'voice-message-';
  */
 export function isVoiceMessage(mime: string, filename: string): boolean {
   const parts = (mime ?? '').toLowerCase().split(';').map(p => p.trim());
-  if (parts.slice(1).includes(VOICE_MESSAGE_MIME_PARAM)) return true;
+  if (parts[0].startsWith('audio/') && parts.slice(1).includes(VOICE_MESSAGE_MIME_PARAM)) return true;
   return (
     filename.toLowerCase().startsWith(VOICE_MESSAGE_FILENAME_PREFIX) &&
     parts[0].startsWith('audio/')
@@ -165,13 +165,17 @@ async function request(
   url: string,
   init: RequestInit,
   timeoutMs: number,
+  secrets: string[] = [],
 ): Promise<{ ok: true; json: unknown } | { ok: false; error: string }> {
   const aborter = new AbortController();
   const timer = setTimeout(() => aborter.abort(), timeoutMs);
   try {
     const resp = await fetch(url, { ...init, signal: aborter.signal });
     if (!resp.ok) {
-      const detail = await resp.text().catch(() => '');
+      let detail = await resp.text().catch(() => '');
+      for (const secret of secrets) {
+        if (secret) detail = detail.split(secret).join('[redacted]');
+      }
       return { ok: false, error: `STT HTTP ${resp.status}${detail ? `: ${detail.slice(0, 200)}` : ''}` };
     }
     return { ok: true, json: await resp.json() };
@@ -201,6 +205,7 @@ const openaiCompatible: Adapter = async (bytes, filename, mime, cfg, timeoutMs) 
     `${cfg.baseUrl!.trim().replace(/\/$/, '')}/audio/transcriptions`,
     { method: 'POST', headers: { Authorization: `Bearer ${cfg.apiKey!.trim()}` }, body: form },
     timeoutMs,
+    [cfg.apiKey!.trim()],
   );
   if (!r.ok) return r;
   const text = textAtPath(r.json, 'text');
@@ -216,6 +221,7 @@ const elevenlabs: Adapter = async (bytes, filename, mime, cfg, timeoutMs) => {
     `${(cfg.baseUrl?.trim() || 'https://api.elevenlabs.io').replace(/\/$/, '')}/v1/speech-to-text`,
     { method: 'POST', headers: { 'xi-api-key': cfg.apiKey!.trim() }, body: form },
     timeoutMs,
+    [cfg.apiKey!.trim()],
   );
   if (!r.ok) return r;
   const text = textAtPath(r.json, 'text');
@@ -235,6 +241,7 @@ const deepgram: Adapter = async (bytes, _filename, mime, cfg, timeoutMs) => {
       body: new Uint8Array(bytes),
     },
     timeoutMs,
+    [cfg.apiKey!.trim()],
   );
   if (!r.ok) return r;
   const text = textAtPath(r.json, 'results.channels.0.alternatives.0.transcript');
@@ -271,7 +278,7 @@ const custom: Adapter = async (bytes, filename, mime, cfg, timeoutMs) => {
       ...(t.extraFields ?? {}),
     });
   }
-  const r = await request(url, { method: t.method?.trim() || 'POST', headers, body }, timeoutMs);
+  const r = await request(url, { method: t.method?.trim() || 'POST', headers, body }, timeoutMs, [cfg.apiKey!.trim()]);
   if (!r.ok) return r;
   const text = textAtPath(r.json, t.responseTextPath?.trim() || 'text');
   return text !== undefined

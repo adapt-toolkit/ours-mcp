@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync, mkdirSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -71,6 +71,10 @@ function runInstall(opts = {}, extraEnv = {}) {
   fakeBins(bin, opts);
   // Hermes is detected by its config dir (HOME/.hermes, since HOME=tmp) existing — create it on demand.
   if (opts.hermesPresent) mkdirSync(join(tmp, '.hermes'), { recursive: true });
+  if (opts.config) {
+    mkdirSync(join(tmp, '.ours'), { recursive: true });
+    writeFileSync(join(tmp, '.ours', 'config.json'), JSON.stringify(opts.config, null, 2) + '\n', { mode: 0o600 });
+  }
   // For the "no harness" case we must guarantee the host's real claude/codex can't leak in via the
   // inherited PATH — so use a restricted PATH (fake bin + coreutils) with node/bash symlinked in.
   let path = `${bin}:${process.env.PATH}`;
@@ -152,6 +156,42 @@ test('first install: config-first Step 0, daemon installed once with config + se
   const parsed = JSON.parse(readFileSync(cfg, 'utf8'));
   assert.ok(Number.isInteger(parsed.port), 'a numeric port persisted');
   assert.notEqual(parsed.port, 3051, 'never the reserved Telegram port');
+  assert.equal(parsed.stt, undefined, 'non-interactive fresh install never invents voice provider credentials');
+  assert.match(out, /Non-interactive mode leaves it unchanged/, 'headless voice setup is explicit and never blocks');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('update/rerun with complete voice setup detects capability and preserves the secret', () => {
+  const secret = 'placeholder-provider-key-123';
+  const config = { port: 3050, stt: { provider: 'deepgram', apiKey: secret, model: 'nova-test' } };
+  const { out, tmp } = runInstall({ daemon: 'installed', config });
+  assert.match(out, /Voice transcription is configured \(deepgram\)/);
+  assert.doesNotMatch(out, new RegExp(secret), 'secret never appears in installer output');
+  const after = JSON.parse(readFileSync(join(tmp, '.ours', 'config.json'), 'utf8'));
+  assert.equal(after.stt.apiKey, secret, 'idempotent rerun keeps the configured key');
+  assert.equal(statSync(join(tmp, '.ours', 'config.json')).mode & 0o777, 0o600);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('update with missing voice setup in non-interactive mode declines safely and offers rerun', () => {
+  const { out, tmp } = runInstall({ daemon: 'installed', config: { port: 3050 } });
+  assert.match(out, /Voice transcription is not configured/);
+  assert.match(out, /Run ours-install in a terminal/);
+  const after = JSON.parse(readFileSync(join(tmp, '.ours', 'config.json'), 'utf8'));
+  assert.equal(after.stt, undefined);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('environment-only complete voice setup is recognized without persisting the key', () => {
+  const secret = 'environment-placeholder-key-123';
+  const { out, tmp } = runInstall(
+    { daemon: 'installed', config: { port: 3050 } },
+    { OURS_STT_PROVIDER: 'deepgram', OURS_STT_API_KEY: secret },
+  );
+  assert.match(out, /Voice transcription is configured \(deepgram\)/);
+  assert.doesNotMatch(out, new RegExp(secret));
+  const after = JSON.parse(readFileSync(join(tmp, '.ours', 'config.json'), 'utf8'));
+  assert.equal(after.stt, undefined, 'environment key is not copied into config');
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -301,6 +341,102 @@ test('a full happy-path run terminates on its own after the summary (no end-hang
   rmSync(tmp, { recursive: true, force: true });
 });
 
+const PTY_VOICE_DECLINE = `
+import os, pty, sys, time, select
+env=dict(os.environ); env["OURS_INSTALL_DRY_RUN"]="1"; env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
+pid,fd=pty.fork()
+if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
+buf=b""; pending=b""; last=time.time(); st=None
+for _ in range(900):
+    try:w,s=os.waitpid(pid,os.WNOHANG)
+    except ChildProcessError:st="reaped";break
+    if w:st=s;break
+    r,_,_=select.select([fd],[],[],0.25)
+    if r:
+        try:d=os.read(fd,4096)
+        except OSError:break
+        if not d:break
+        buf+=d; pending+=d; last=time.time()
+        if pending.endswith((b"] ", b": ")):
+            reply=b"n\\n" if b"Set up voice transcription now?" in pending[-500:] else b"\\n"
+            os.write(fd,reply); pending=b""
+    elif time.time()-last>8:break
+if st is None:
+    for _ in range(40):
+        try:w,s=os.waitpid(pid,os.WNOHANG)
+        except ChildProcessError:st="reaped";break
+        if w:st=s;break
+        time.sleep(0.05)
+text=buf.decode(errors="replace")
+print("EXIT",os.WEXITSTATUS(st)) if isinstance(st,int) and os.WIFEXITED(st) else print("NOEXIT",st)
+print("DECLINE_OK" if "declined; offered again on re-run" in text else "DECLINE_MISSING")
+`;
+test('interactive voice setup can be declined without changing config and is offered on rerun',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const { tmp, env } = ptyBins();
+  const out = execFileSync('python3', ['-c', PTY_VOICE_DECLINE, INSTALL_MJS], {
+    encoding: 'utf8', timeout: 120_000, env,
+  });
+  assert.match(out, /EXIT 0/);
+  assert.match(out, /DECLINE_OK/);
+  assert.equal(existsSync(join(tmp, '.ours', 'config.json')), false, 'decline does not create a voice config');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+// Drive a FIRST install through the actual masked voice-key prompt. This proves the key is accepted
+// but never echoed into terminal output (the unit tests separately cover validation/storage).
+const PTY_VOICE_MASKED = `
+import os, pty, sys, time, select
+secret=b"pty-placeholder-secret-123"
+env=dict(os.environ); env["OURS_INSTALL_DRY_RUN"]="1"; env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
+pid,fd=pty.fork()
+if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
+buf=b""; pending=b""; last=time.time(); st=None
+def answer():
+    global pending
+    if not pending.endswith((b"] ", b": ")): return
+    tail=pending[-500:]
+    if b"Provider (openai-compatible" in tail: reply=b"deepgram\\n"
+    elif b"Provider API key" in tail: reply=secret+b"\\n"
+    else: reply=b"\\n"
+    os.write(fd,reply); pending=b""
+for _ in range(900):
+    try: w,s=os.waitpid(pid,os.WNOHANG)
+    except ChildProcessError: st="reaped";break
+    if w: st=s;break
+    r,_,_=select.select([fd],[],[],0.25)
+    if r:
+        try:d=os.read(fd,4096)
+        except OSError:break
+        if not d:break
+        buf+=d; pending+=d; last=time.time(); answer()
+    elif time.time()-last>8: break
+if st is None:
+    for _ in range(40):
+        try:w,s=os.waitpid(pid,os.WNOHANG)
+        except ChildProcessError:st="reaped";break
+        if w:st=s;break
+        time.sleep(0.05)
+text=buf.decode(errors="replace")
+print("EXIT", os.WEXITSTATUS(st)) if isinstance(st,int) and os.WIFEXITED(st) else print("NOEXIT",st)
+print("VOICE_OK" if "Voice transcription would be configured (deepgram)" in text else "VOICE_MISSING")
+print("SECRET_LEAK" if secret.decode() in text else "SECRET_HIDDEN")
+`;
+test('fresh interactive install accepts a masked voice key without terminal/log disclosure',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const { tmp, env } = ptyBins();
+  // Make the fake daemon initially absent so this is the fresh-install path.
+  fakeBins(join(tmp, 'bin'), { daemon: 'absent' });
+  const out = execFileSync('python3', ['-c', PTY_VOICE_MASKED, INSTALL_MJS], {
+    encoding: 'utf8', timeout: 120_000, env,
+  });
+  assert.match(out, /EXIT 0/);
+  assert.match(out, /VOICE_OK/);
+  assert.match(out, /SECRET_HIDDEN/);
+  assert.doesNotMatch(out, /SECRET_LEAK/);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
 // --- packaging: publishable standalone @ours.network/install (bin ships + zero external deps) ---
 test('package is a publishable standalone: name @ours.network/install, bin + files, no runtime deps', () => {
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'));
@@ -315,7 +451,7 @@ test('package is a publishable standalone: name @ours.network/install, bin + fil
   assert.ok(existsSync(join(PKG, 'LICENSE')), 'a LICENSE file is present to ship');
   // Self-contained: the installer + its lib import ONLY node built-ins (no @ours.network/* etc.).
   assert.ok(!pkg.dependencies || Object.keys(pkg.dependencies).length === 0, 'no runtime dependencies');
-  for (const f of ['install.mjs', 'lib/ui.mjs', 'lib/logic.mjs', 'lib/prompt.mjs']) {
+  for (const f of ['install.mjs', 'lib/ui.mjs', 'lib/logic.mjs', 'lib/prompt.mjs', 'lib/config.mjs']) {
     const src = readFileSync(join(PKG, f), 'utf8');
     const imports = [...src.matchAll(/^import[^']*'([^']+)'/gm)].map((m) => m[1]);
     for (const spec of imports) {

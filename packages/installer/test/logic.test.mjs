@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   canonHarnesses, suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
   detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
+  effectiveVoiceConfig, voiceSetupStatus, validateVoiceSecret, redactSensitive,
   DEFAULT_PORT, DEFAULT_BROKER, RESERVED_PORTS,
   resolveChannel, pkgTag, pkgSpec, DEFAULT_CHANNEL,
 } from '../lib/logic.mjs';
@@ -93,6 +94,50 @@ test('mergeConfig: patches only given keys, preserves the rest, trailing newline
   assert.ok(out.endsWith('\n'), 'trailing newline');
   // undefined patch values are ignored, not written.
   assert.equal(JSON.parse(mergeConfig({}, { port: undefined })).port, undefined);
+});
+
+test('voice readiness is capability-based, env-overridable, and never returns a key', () => {
+  assert.equal(voiceSetupStatus({}).ready, false);
+  assert.deepEqual(voiceSetupStatus({ stt: { provider: 'deepgram' } }).missing, ['apiKey']);
+  assert.equal(voiceSetupStatus({ stt: { provider: 'deepgram', apiKey: 'placeholder-key' } }).ready, true);
+  assert.equal(voiceSetupStatus({
+    stt: { provider: 'openai-compatible', apiKey: 'placeholder-key', model: 'whisper-x' },
+  }).missing[0], 'baseUrl');
+  assert.equal(voiceSetupStatus({
+    stt: { provider: 'elevenlabs', apiKey: 'placeholder-key' },
+  }).missing[0], 'model');
+  assert.equal(voiceSetupStatus({
+    stt: { provider: 'custom', apiKey: 'placeholder-key', custom: { url: 'https://stt.invalid/{model}' } },
+  }).missing[0], 'model');
+
+  const env = {
+    OURS_STT_PROVIDER: 'deepgram',
+    OURS_STT_API_KEY: 'environment-placeholder-key',
+    OURS_STT_MODEL: 'nova-test',
+  };
+  const effective = effectiveVoiceConfig({ stt: { provider: 'nope', apiKey: 'file-placeholder' } }, env);
+  assert.equal(effective.provider, 'deepgram');
+  const status = voiceSetupStatus({ stt: {} }, env);
+  assert.equal(status.ready, true);
+  assert.equal(status.keySource, 'environment');
+  assert.doesNotMatch(JSON.stringify(status), /environment-placeholder-key|file-placeholder/);
+});
+
+test('voice secret validation is provider-neutral but rejects missing/malformed input', () => {
+  assert.equal(validateVoiceSecret('').ok, false);
+  assert.equal(validateVoiceSecret('short').ok, false);
+  assert.equal(validateVoiceSecret('has whitespace').ok, false);
+  assert.equal(validateVoiceSecret('placeholder-key-123').ok, true);
+});
+
+test('secret redaction removes exact values and common keyed diagnostics', () => {
+  const secret = 'placeholder-secret-123';
+  const scrubbed = redactSensitive(
+    `provider echoed ${secret}; {"apiKey":"${secret}"} token=${secret}`,
+    [secret],
+  );
+  assert.doesNotMatch(scrubbed, new RegExp(secret));
+  assert.match(scrubbed, /\[redacted\]/);
 });
 
 test('parseVersion / parseStatus: pull versions + resolved broker/port out of CLI output', () => {

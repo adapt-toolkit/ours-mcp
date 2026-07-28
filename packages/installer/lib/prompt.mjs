@@ -63,6 +63,46 @@ export function askLine(write, fd, prompt, def = '') {
   return ans === '' ? def : ans;
 }
 
+// Secret variant of askLine: identical cancellation/backspace/default semantics, but typed
+// characters are never echoed (not even as placeholder stars). This keeps provider keys out of
+// terminal scrollback, curl|bash output, and captured CI logs.
+export function askSecret(write, fd, prompt, def = '') {
+  if (fd == null || ASSUME_YES()) return def;
+
+  const saved = spawnSync('stty', ['-g'], { stdio: [fd, 'pipe', 'ignore'], encoding: 'utf8' });
+  const rawOk = saved.status === 0
+    && spawnSync('stty', ['-icanon', '-echo', '-isig', 'min', '1', 'time', '0'], { stdio: [fd, 'ignore', 'ignore'] }).status === 0;
+  const restore = () => {
+    if (rawOk) spawnSync('stty', (saved.stdout || '').trim() ? [(saved.stdout || '').trim()] : ['sane'], { stdio: [fd, 'ignore', 'ignore'] });
+  };
+  if (!rawOk) {
+    // Fail closed: a cooked fallback would echo the secret. Returning null lets the caller
+    // explain that secure input is unavailable without ever reading a credential.
+    write(`${prompt}\n`);
+    return null;
+  }
+  // Disable echo BEFORE displaying the prompt. Otherwise an automated or very fast typist can
+  // submit bytes in the small prompt→stty window and have the terminal driver echo the secret.
+  write(prompt);
+
+  let s = '';
+  try {
+    for (;;) {
+      const b = readByte(fd);
+      if (b === null || b === 0x04) break;
+      if (b === 0x03) { restore(); write('^C'); throw new InstallCancelled(); }
+      if (b === 0x0a || b === 0x0d) { write('\n'); break; }
+      if (b === 0x7f || b === 0x08) { if (s.length) s = s.slice(0, -1); continue; }
+      if (b < 0x20) continue;
+      s += String.fromCharCode(b);
+    }
+  } finally {
+    restore();
+  }
+  const ans = s.trim();
+  return ans === '' ? def : ans;
+}
+
 // askYesNo: y/n with a default shown in caps. Returns boolean.
 export function askYesNo(write, fd, prompt, def = false) {
   if (fd == null || ASSUME_YES()) return def;
