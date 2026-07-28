@@ -22,6 +22,9 @@ const INSTALL_SH = join(PKG, 'install.sh');
 //   opts.codex       : 'ok' (default) | 'unsafe' (its --version returns junk, non-zero)
 //   opts.noHarness   : omit claude+codex bins entirely (nothing detected)
 //   opts.rootExists  : name → `ours-mcp create-root` reports it already exists (quiet no-op)
+//   opts.updateVersion : report v9.9.8 until npm updates core, then v9.9.9
+//   opts.voiceRestartTrace : model the canonical voice command's one restart in the call log
+//   opts.voiceRecoveryFailure : canonical setup exits 2 after its traced restart/rollback attempt
 //   opts.hermesPresent : create <HOME>/.hermes so Hermes is detected (config-dir based, handled in runInstall)
 function fakeBins(dir, opts = {}) {
   const daemonInstalled = opts.daemon !== 'absent';
@@ -30,8 +33,11 @@ function fakeBins(dir, opts = {}) {
 
   // ours-mcp: --version answers when "installed"; status reports running + a url line for the port;
   // create-root is a quiet no-op that echoes the existing name when opts.rootExists is set.
+  const installedVersion = opts.updateVersion
+    ? `[ -f "$CALLLOG.mcpupdated" ] && echo "ours-mcp v9.9.9" || echo "ours-mcp v9.9.8"`
+    : 'echo "ours-mcp v9.9.9"';
   const mcpVersion = daemonInstalled
-    ? `[ "$1" = "--version" ] && { echo "ours-mcp v9.9.9"; exit 0; }\n`
+    ? `[ "$1" = "--version" ] && { ${installedVersion}; exit 0; }\n`
     : `[ "$1" = "--version" ] && { [ -f "$CALLLOG.mcpinstalled" ] && { echo "ours-mcp v9.9.9"; exit 0; } || exit 1; }\n`;
   const createRoot = opts.rootExists
     ? `[ "$1" = "create-root" ] && { echo 'create-root: a root identity already exists ("${opts.rootExists}") — nothing to do.'; exit 0; }\n`
@@ -39,11 +45,17 @@ function fakeBins(dir, opts = {}) {
   write('ours-mcp',
     mcpVersion +
     `[ "$1" = "status" ] && { echo "ours-mcp: running"; echo "  url:    http://localhost:${port}/mcp (reachable)"; exit 0; }\n` +
+    `[ "$1" = "voice-status" ] && { if [ -f "$CALLLOG.voice-ready" ]; then echo '{"ready":true,"provider":"deepgram","apiKey":"configured","keySource":"config"}'; exit 0; else exit 1; fi; }\n` +
+    `[ "$1" = "voice-setup" ] && { ${opts.voiceRestartTrace
+      ? `echo "voice-provider-selected" >> "$CALLLOG"; echo "voice-config-written" >> "$CALLLOG"; echo "ours-mcp restart (voice-setup)" >> "$CALLLOG";`
+      : ''} ${opts.voiceRecoveryFailure
+      ? 'echo "canonical voice setup recovered by rollback"; exit 2;'
+      : 'touch "$CALLLOG.voice-ready"; echo "canonical ours-mcp voice-setup completed"; exit 0;'} }\n` +
     createRoot +
     `exit 0\n`);
 
   write('npm',
-    `case "$*" in *"@ours.network/mcp"*) touch "$CALLLOG.mcpinstalled";; esac\n` +
+    `case "$*" in *"@ours.network/mcp"*) touch "$CALLLOG.mcpinstalled" "$CALLLOG.mcpupdated";; esac\n` +
     `case "$1" in ls) echo "@ours.network/fleet@0.7.0"; echo "@ours.network/tg-connector@0.1.7";; esac\n` +
     `exit 0\n`);
 
@@ -176,7 +188,7 @@ test('update/rerun with complete voice setup detects capability and preserves th
 test('update with missing voice setup in non-interactive mode declines safely and offers rerun', () => {
   const { out, tmp } = runInstall({ daemon: 'installed', config: { port: 3050 } });
   assert.match(out, /Voice transcription is not configured/);
-  assert.match(out, /Run ours-install in a terminal/);
+  assert.match(out, /Run `ours-mcp voice-setup` in a terminal/);
   const after = JSON.parse(readFileSync(join(tmp, '.ours', 'config.json'), 'utf8'));
   assert.equal(after.stt, undefined);
   rmSync(tmp, { recursive: true, force: true });
@@ -284,13 +296,13 @@ elif os.WIFSIGNALED(st): print("SIGNAL", os.WTERMSIG(st))
 // A hermetic env for the pty tests: fake bins on PATH so the flow REACHES prompts on any machine
 // (a clean CI runner has no claude/codex/ours-mcp, so without this the installer would take the
 // "no harness" early-exit and never prompt). Returns { env, tmp }.
-function ptyBins() {
+function ptyBins(opts = {}) {
   const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
   const bin = join(tmp, 'bin');
   mkdirSync(bin, { recursive: true });
   const log = join(tmp, 'calls.log');
   writeFileSync(log, '');
-  fakeBins(bin, { daemon: 'installed' });
+  fakeBins(bin, { daemon: 'installed', ...opts });
   return { tmp, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log, HOME: tmp, SHELL: '/bin/bash' } };
 }
 
@@ -383,23 +395,18 @@ test('interactive voice setup can be declined without changing config and is off
   rmSync(tmp, { recursive: true, force: true });
 });
 
-// Drive a FIRST install through the actual masked voice-key prompt. This proves the key is accepted
-// but never echoed into terminal output (the unit tests separately cover validation/storage).
-const PTY_VOICE_MASKED = `
+// Drive a FIRST install through the voice offer and prove the installer delegates to the canonical
+// ours-mcp command instead of maintaining a second provider/token implementation.
+const PTY_VOICE_DELEGATED = `
 import os, pty, sys, time, select
-secret=b"pty-placeholder-secret-123"
-env=dict(os.environ); env["OURS_INSTALL_DRY_RUN"]="1"; env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
+env=dict(os.environ); env.pop("OURS_INSTALL_DRY_RUN",None); env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
 pid,fd=pty.fork()
 if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
 buf=b""; pending=b""; last=time.time(); st=None
 def answer():
     global pending
     if not pending.endswith((b"] ", b": ")): return
-    tail=pending[-500:]
-    if b"Provider (openai-compatible" in tail: reply=b"deepgram\\n"
-    elif b"Provider API key" in tail: reply=secret+b"\\n"
-    else: reply=b"\\n"
-    os.write(fd,reply); pending=b""
+    os.write(fd,b"\\n"); pending=b""
 for _ in range(900):
     try: w,s=os.waitpid(pid,os.WNOHANG)
     except ChildProcessError: st="reaped";break
@@ -419,22 +426,124 @@ if st is None:
         time.sleep(0.05)
 text=buf.decode(errors="replace")
 print("EXIT", os.WEXITSTATUS(st)) if isinstance(st,int) and os.WIFEXITED(st) else print("NOEXIT",st)
-print("VOICE_OK" if "Voice transcription would be configured (deepgram)" in text else "VOICE_MISSING")
-print("SECRET_LEAK" if secret.decode() in text else "SECRET_HIDDEN")
+print("DELEGATED" if "canonical ours-mcp voice-setup completed" in text else "DELEGATION_MISSING")
 `;
-test('fresh interactive install accepts a masked voice key without terminal/log disclosure',
+test('fresh interactive install delegates voice credentials to the canonical ours-mcp command',
   { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
   const { tmp, env } = ptyBins();
   // Make the fake daemon initially absent so this is the fresh-install path.
   fakeBins(join(tmp, 'bin'), { daemon: 'absent' });
-  const out = execFileSync('python3', ['-c', PTY_VOICE_MASKED, INSTALL_MJS], {
+  const out = execFileSync('python3', ['-c', PTY_VOICE_DELEGATED, INSTALL_MJS], {
     encoding: 'utf8', timeout: 120_000, env,
   });
   assert.match(out, /EXIT 0/);
-  assert.match(out, /VOICE_OK/);
-  assert.match(out, /SECRET_HIDDEN/);
-  assert.doesNotMatch(out, /SECRET_LEAK/);
+  assert.match(out, /DELEGATED/);
+  const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
+  const voiceAt = calls.indexOf('ours-mcp voice-setup');
+  const startAt = calls.indexOf('ours-mcp start');
+  assert.ok(voiceAt >= 0, 'canonical voice setup ran');
+  assert.ok(startAt > voiceAt, 'fresh install configures voice before the daemon first starts');
+  assert.equal(calls.match(/^ours-mcp start$/gm)?.length, 1, 'fresh install starts the daemon exactly once');
+  assert.doesNotMatch(calls, /^ours-mcp restart$/m, 'fresh install never restarts before or after first start');
+  assert.doesNotMatch(readFileSync(INSTALL_MJS, 'utf8'), /askSecret|Provider \(openai-compatible/,
+    'installer contains no duplicate credential prompt implementation');
   rmSync(tmp, { recursive: true, force: true });
+});
+
+const PTY_UPDATE_WITH_VOICE = `
+import os, pty, sys, time, select
+mode=sys.argv[2]
+env=dict(os.environ); env.pop("OURS_INSTALL_DRY_RUN",None); env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
+pid,fd=pty.fork()
+if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
+buf=b""; pending=b""; last=time.time(); st=None
+for _ in range(900):
+    try:w,s=os.waitpid(pid,os.WNOHANG)
+    except ChildProcessError:st="reaped";break
+    if w:st=s;break
+    r,_,_=select.select([fd],[],[],0.25)
+    if r:
+        try:d=os.read(fd,4096)
+        except OSError:break
+        if not d:break
+        buf+=d; pending+=d; last=time.time()
+        if pending.endswith((b"] ", b": ")):
+            tail=pending[-700:]
+            if b"check for an update now?" in tail: reply=b"y\\n"
+            elif mode=="decline" and b"Set up voice transcription now?" in tail: reply=b"n\\n"
+            else: reply=b"\\n"
+            os.write(fd,reply); pending=b""
+    elif time.time()-last>8:break
+if st is None:
+    for _ in range(40):
+        try:w,s=os.waitpid(pid,os.WNOHANG)
+        except ChildProcessError:st="reaped";break
+        if w:st=s;break
+        time.sleep(0.05)
+print("EXIT",os.WEXITSTATUS(st)) if isinstance(st,int) and os.WIFEXITED(st) else print("NOEXIT",st)
+`;
+test('update asks/configures voice before one restart and suppresses the normal update restart',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const { tmp, env } = ptyBins({ updateVersion: true, voiceRestartTrace: true });
+  const out = execFileSync('python3', ['-c', PTY_UPDATE_WITH_VOICE, INSTALL_MJS, 'accept'], {
+    encoding: 'utf8', timeout: 120_000, env,
+  });
+  assert.match(out, /EXIT 0/);
+  const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
+  const selectedAt = calls.indexOf('voice-provider-selected');
+  const configuredAt = calls.indexOf('voice-config-written');
+  const restartAt = calls.indexOf('ours-mcp restart (voice-setup)');
+  assert.ok(selectedAt >= 0 && configuredAt > selectedAt, 'provider selection precedes config write');
+  assert.ok(restartAt > configuredAt, 'provider prompt/config precede the canonical restart');
+  assert.equal(calls.match(/^ours-mcp restart \(voice-setup\)$/gm)?.length, 1,
+    'accepted voice setup owns exactly one restart');
+  assert.doesNotMatch(calls, /^ours-mcp restart$/m,
+    'installer does not add a redundant update restart after canonical voice setup');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('voice restart/readiness rollback signal suppresses a redundant installer restart loop',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const { tmp, env } = ptyBins({
+    updateVersion: true,
+    voiceRestartTrace: true,
+    voiceRecoveryFailure: true,
+  });
+  const out = execFileSync('python3', ['-c', PTY_UPDATE_WITH_VOICE, INSTALL_MJS, 'accept'], {
+    encoding: 'utf8', timeout: 120_000, env,
+  });
+  assert.match(out, /EXIT 0/);
+  const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
+  assert.equal(calls.match(/^ours-mcp restart \(voice-setup\)$/gm)?.length, 1,
+    'canonical recovery transaction is the only restart owner');
+  assert.doesNotMatch(calls, /^ours-mcp restart$/m,
+    'installer does not create a restart/rollback/restart loop after exit 2');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('declined or already-ready voice preserves one normal update restart',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  for (const mode of ['decline', 'ready']) {
+    const { tmp, env } = ptyBins({ updateVersion: true, voiceRestartTrace: true });
+    if (mode === 'ready') {
+      mkdirSync(join(tmp, '.ours'), { recursive: true });
+      writeFileSync(join(tmp, '.ours', 'config.json'), JSON.stringify({
+        port: 3050,
+        stt: { provider: 'deepgram', apiKey: 'ordering-placeholder-secret' },
+      }, null, 2) + '\n', { mode: 0o600 });
+      env.OURS_CONFIG = join(tmp, '.ours', 'config.json');
+    }
+    const out = execFileSync('python3', ['-c', PTY_UPDATE_WITH_VOICE, INSTALL_MJS, mode], {
+      encoding: 'utf8', timeout: 120_000, env,
+    });
+    assert.match(out, /EXIT 0/, `${mode} flow exits`);
+    const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
+    assert.equal(calls.match(/^ours-mcp restart$/gm)?.length, 1,
+      `${mode} flow keeps exactly one normal update restart`);
+    assert.doesNotMatch(calls, /^ours-mcp restart \(voice-setup\)$/m,
+      `${mode} flow does not invoke the voice transaction restart`);
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 // --- packaging: publishable standalone @ours.network/install (bin ships + zero external deps) ---

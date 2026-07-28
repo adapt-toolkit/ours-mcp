@@ -34,6 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-network/main/ins
 ```sh
 npm i -g @ours.network/mcp@latest    # the daemon
 ours-mcp start                        # start it (ours-mcp status to confirm)
+ours-mcp voice-setup                  # optional guided provider + hidden-key setup
 ours-mcp voice-status --json          # optional voice-transcription readiness (no key output)
 
 npm i -g @ours.network/hermes@latest && ours-hermes-install   # Hermes
@@ -53,9 +54,10 @@ by all your sessions. The Claude Code plugin is thin — it points the harness a
 a clear error; run `ours-mcp start`.
 
 The guided `ours-install` flow also detects incomplete optional voice-message
-transcription and offers it again on reruns. Provider keys are entered with hidden input,
-stored only in mode-`0600` config (or supplied through `OURS_STT_*` environment variables),
-and never included in the agent hand-off prompt.
+transcription and delegates to the same `ours-mcp voice-setup` command before the daemon's
+first start or pending update restart. Provider keys are entered with hidden input, stored
+only in mode-`0600` config (or supplied through `OURS_STT_*` environment variables), and
+never included in command arguments or the agent hand-off prompt.
 
 ### Daemon commands
 
