@@ -13,6 +13,7 @@
 #   @ours.network/hermes     packages/hermes       (no internal deps)
 #   @ours.network/codex      packages/codex        (pins @ours.network/mcp)
 #   @ours.network/install    packages/installer    (self-contained — no internal deps)
+#   @ours.network/opencode   packages/opencode     (self-contained — depends only on zod)
 # (Claude Code and Codex plugin manifests are not npm packages, but their user-visible versions
 # stay at the suite version.)
 #
@@ -49,6 +50,7 @@ MANAGED=(
   "@ours.network/hermes|packages/hermes/package.json|"
   "@ours.network/codex|packages/codex/package.json|@ours.network/mcp"
   "@ours.network/install|packages/installer/package.json|"
+  "@ours.network/opencode|packages/opencode/package.json|"
 )
 
 # Every native plugin manifest in the repo — bumped to the same suite version.
@@ -63,9 +65,14 @@ case "$MODE" in stable|nightly|promote) ;; *) echo "[bump] unknown OURS_RELEASE_
 log "release mode: $MODE"
 
 # Highest existing <minor_base>-nightly.<N> index published for a package on npm, else 0.
-# Robust against npm view returning a JSON array, a single JSON string, or nothing.
+# Robust against npm view returning a JSON array, a single JSON string, or nothing — and
+# against a package that has NEVER been published (npm view exits E404; captured into a
+# variable first, not piped directly, so that failure can't propagate through `set -o
+# pipefail` into the caller under `set -e`).
 nightly_max_index() { # <pkg-name> <minor_base>
-  npm view "$1" versions --json 2>/dev/null | node -e '
+  local versions_json
+  versions_json=$(npm view "$1" versions --json 2>/dev/null || echo '[]')
+  printf '%s' "$versions_json" | node -e '
     let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
       let a; try { a = JSON.parse(s || "[]"); } catch { a = []; }
       if (!Array.isArray(a)) a = [a];
@@ -242,6 +249,7 @@ if [[ "$MODE" == nightly ]]; then
   emit "hermes-version=${NEWV[@ours.network/hermes]}"
   emit "codex-version=${NEWV[@ours.network/codex]}"
   emit "install-version=${NEWV[@ours.network/install]}"
+  emit "opencode-version=${NEWV[@ours.network/opencode]}"
   exit 0
 fi
 
@@ -264,3 +272,4 @@ emit "plugin-version=${NEWV[@ours.network/claude-code]}"
 emit "hermes-version=${NEWV[@ours.network/hermes]}"
 emit "codex-version=${NEWV[@ours.network/codex]}"
 emit "install-version=${NEWV[@ours.network/install]}"
+emit "opencode-version=${NEWV[@ours.network/opencode]}"
