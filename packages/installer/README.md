@@ -49,12 +49,14 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
    `3051`, reserved for the Telegram connector). Applied once, then the stack is built with it.
 3. **Four consent gates**, each paced with a clean `✓ … No problems.` line + an explicit
    **Continue?** — never a start-twice-then-ask, never a silent failure:
-   - **1/4 ours core (the daemon)** — write config → install/start ONCE → boot service. On a
-     re-run it reuses the running config (no re-ask) and only updates when you say yes.
-     After core readiness, the installer checks `ours-mcp voice-status --json`. Complete
-     voice setup is kept without prompting. Missing/incomplete setup is offered on every
-     interactive rerun: provider, model/endpoint where required, and a hidden API-key prompt.
-     The secret is written atomically to mode-`0600` config; a failed daemon reload rolls back.
+   - **1/4 ours core (the daemon)** — write config → optional voice setup → install/start ONCE
+     → boot service. On a re-run it reuses the running config (no re-ask) and only updates when
+     you say yes. Complete voice setup is kept without prompting. Missing/incomplete setup is
+     offered before the first start or pending update restart, then delegated to the canonical
+     `ours-mcp voice-setup` provider selector and hidden API-key prompt. Accepted setup owns the
+     one restart/readiness transaction; declining or already-ready setup preserves the normal
+     core lifecycle. The secret is written atomically to mode-`0600` config; a failed daemon
+     reload rolls back.
    - **2/4 harness plugins** — the installer **drives the plugin CLIs itself**
      (`claude plugin marketplace add …` + `claude plugin install ours@ours.network`;
      `codex plugin marketplace add …` + `codex plugin add ours@ours-codex-marketplace`). Choosing

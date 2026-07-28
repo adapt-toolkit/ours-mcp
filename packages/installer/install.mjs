@@ -22,14 +22,14 @@ import { readFileSync, existsSync } from 'node:fs';
 import { homedir, userInfo, platform as osPlatform, release as osRelease } from 'node:os';
 import { join } from 'node:path';
 import { banner, heading, ok, info, warn, c, box, withSpinner, openTty, makeWriter, closeSync } from './lib/ui.mjs';
-import { askLine, askSecret, askYesNo, isCancel } from './lib/prompt.mjs';
+import { askLine, askYesNo, isCancel } from './lib/prompt.mjs';
 import {
   suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
   detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
-  voiceSetupStatus, validateVoiceSecret, redactSensitive, VOICE_PROVIDERS,
+  voiceSetupStatus,
   DEFAULT_PORT, resolveChannel, pkgSpec,
 } from './lib/logic.mjs';
-import { atomicWriteConfig, transactionalConfigUpdate } from './lib/config.mjs';
+import { atomicWriteConfig } from './lib/config.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
 // Release channel: OURS_CHANNEL=nightly installs @nightly for mcp/tg-connector/plugin
@@ -88,7 +88,12 @@ async function actSpin(label, desc, fn) {
 // --- daemon probes (always safe to run — read-only) --------------------------------------------
 const daemonVersionLine = () => (run('ours-mcp', ['--version'], { capture: true }).out.split('\n')[0] || '').trim();
 const daemonStatusText = () => run('ours-mcp', ['status'], { capture: true }).out;
-const daemonRunning = () => run('ours-mcp', ['status'], { capture: true }).code === 0;
+function daemonLifecycleState() {
+  const status = run('ours-mcp', ['status'], { capture: true });
+  if (!status.ok) return 'stopped';
+  return /^\s*pid:\s*\d+/m.test(status.out) ? 'managed' : 'external';
+}
+const daemonRunning = () => daemonLifecycleState() !== 'stopped';
 const globalVersion = (pkg) => {
   const ls = run(NPM, ['ls', '-g', pkg], { capture: true }).out;
   const m = ls.match(new RegExp(pkg.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') + '@([0-9][0-9.]*)'));
@@ -331,8 +336,88 @@ async function main() {
   const summary = [];
   const record = (row) => summary.push(row);
 
+  // Voice setup is part of the core lifecycle, not a follow-up after it. On a
+  // fresh install this runs after the CLI is installed/configured but before
+  // the first daemon start. On an update it runs before any pending restart;
+  // a successful canonical voice-setup owns that one restart/readiness check.
+  // Declining, headless skipping, or an already-complete setup leaves the
+  // caller's normal start/restart lifecycle untouched.
+  const offerVoiceSetup = ({ readinessAfterStart = false, daemonState = 'stopped' } = {}) => {
+    line(heading('Voice messages'));
+    const cfgBefore = readConfigObject();
+    const probed = daemonVoiceCapability();
+    const localStatus = voiceSetupStatus(cfgBefore, process.env);
+    const voiceStatus = probed ?? localStatus;
+    if (voiceStatus.ready) {
+      line(ok(`Voice transcription is configured (${voiceStatus.provider}). API key: configured, never displayed.`));
+      record({ key: 'voice', label: 'Voice transcription', state: 'current', note: voiceStatus.provider });
+      cont(false);
+      return { setupRan: false, restartHandled: false };
+    }
+    if (!interactive) {
+      line(info('Voice transcription is not configured. Non-interactive mode leaves it unchanged.'));
+      line(info('Run `ours-mcp voice-setup` in a terminal, or supply OURS_STT_* environment values.'));
+      record({ key: 'voice', label: 'Voice transcription', state: 'skipped', note: 'interactive setup available on re-run' });
+      cont(false);
+      return { setupRan: false, restartHandled: false };
+    }
+
+    line(info('Voice notes can be transcribed by a provider you choose. Audio is sent to that'));
+    line(info('provider; use a self-hosted endpoint if it must stay local. The API key is hidden.'));
+    if (!yes('  Set up voice transcription now?', true)) {
+      line(info('skipped — this will be offered again on the next installer run.'));
+      record({ key: 'voice', label: 'Voice transcription', state: 'skipped', note: 'declined; offered again on re-run' });
+      cont(false);
+      return { setupRan: false, restartHandled: false };
+    }
+
+    line(info('Opening the canonical ours-mcp voice setup (same command you can re-run later).'));
+    const setupArgs = ['voice-setup', ...(DRY ? ['--dry-run'] : [])];
+    const setup = run('ours-mcp', setupArgs);
+    if (!setup.ok) {
+      line(warn('Voice setup did not complete; no installer-side credential fallback was used.'));
+      line(info('Run `ours-mcp voice-setup` directly to try again.'));
+      record({ key: 'voice', label: 'Voice transcription', state: 'failed', note: 'ours-mcp voice-setup did not complete' });
+      cont();
+      // Exit 2 is the canonical command's explicit signal that it already
+      // attempted restart/readiness and rollback. Never layer the pending
+      // installer update restart on top of that recovery transaction.
+      return { setupRan: true, restartHandled: setup.code === 2 };
+    }
+    if (DRY) {
+      line(ok('Canonical voice setup dry-run completed; no config or daemon state changed.'));
+      record({ key: 'voice', label: 'Voice transcription', state: 'current', note: 'voice-setup dry-run' });
+      cont();
+      return { setupRan: true, restartHandled: false };
+    }
+    if (readinessAfterStart) {
+      line(ok('Voice configuration saved securely; it will be readiness-checked after the first daemon start.'));
+      record({ key: 'voice', label: 'Voice transcription', state: 'installed', note: 'configured before first start' });
+      cont();
+      return { setupRan: true, restartHandled: false };
+    }
+
+    const verified = daemonVoiceCapability();
+    if (verified?.ready) {
+      line(ok(`Voice transcription is ready (${verified.provider}); API key remains hidden.`));
+      record({ key: 'voice', label: 'Voice transcription', state: 'installed', note: verified.provider });
+    } else {
+      line(warn('Voice setup returned without a ready capability; inspect `ours-mcp voice-status`.'));
+      record({ key: 'voice', label: 'Voice transcription', state: 'failed', note: 'readiness check failed' });
+    }
+    cont();
+    // Exit 0 also covers config-only success for a stopped daemon or an
+    // externally launched daemon. Only a still-managed daemon proves that
+    // canonical setup owned apply + readiness and may suppress an update
+    // restart.
+    return {
+      setupRan: true,
+      restartHandled: daemonState === 'managed' && daemonLifecycleState() === 'managed',
+    };
+  };
+
   // ============================================================================================
-  // STEP 1 / 4 — ours core (the daemon). Config-first: write config → install/start ONCE.
+  // STEP 1 / 4 — ours core (the daemon). Config-first: write config → optional voice → start ONCE.
   // ============================================================================================
   line(heading('1/4 — ours core (the daemon)'));
   line(info('This is the piece that lets your agents talk to each other securely. Everything else'));
@@ -351,155 +436,61 @@ async function main() {
     const patch = { port: chosenPort };
     if (chosenBroker) patch.brokerUrl = chosenBroker;
     await act(`write config (${configPath()}) with port ${chosenPort}${chosenBroker ? ' + custom broker' : ''}`, async () => { writeConfigPatch(patch); return { ok: true }; });
+    const voice = offerVoiceSetup({ readinessAfterStart: true });
     const started = await act(`ours-mcp start (port ${chosenPort})`, async () => run('ours-mcp', ['start']));
     const svc = await act('ours-mcp install-service (survives reboot)', async () => run('ours-mcp', ['install-service']));
     if (started.ok) line(ok(`ours core ready — running on port ${chosenPort}. No problems.`));
     else line(warn(`could not auto-start — run '${c.cyan('ours-mcp start')}' to bring it up.`));
     if (!svc.ok && !svc.dry) line(warn(`boot-service not installed — retry '${c.cyan('ours-mcp install-service')}' later.`));
+    if (voice.setupRan && !DRY && started.ok) {
+      const verified = daemonVoiceCapability();
+      if (verified?.ready) {
+        line(ok(`Voice transcription readiness confirmed (${verified.provider}) after the first start.`));
+      } else {
+        line(warn('Voice configuration was saved, but readiness was not confirmed after start; run `ours-mcp voice-status`.'));
+        const row = summary.find((entry) => entry.key === 'voice');
+        if (row) {
+          row.state = 'failed';
+          row.note = 'readiness check failed after first start';
+        }
+      }
+    }
     record({ key: 'core', label: 'ours core (daemon)', state: started.ok ? 'installed' : 'failed', version: parseVersion(daemonVersionLine()), note: 'starts on boot' });
   } else {
     // Installed: offer an update; never re-ask config; reuse the running port everywhere.
-    const running = daemonRunning();
+    const daemonState = daemonLifecycleState();
+    const running = daemonState !== 'stopped';
     const upd = yes(`  ours core is installed (${before || '?'}) — check for an update now?`, false);
+    let pendingUpdateRestart = false;
+    let after = before;
     if (upd) {
       await actSpin(`updating ${spec('mcp')}…`, `npm i -g ${spec('mcp')}`, () => runAsync(NPM, ['i', '-g', spec('mcp')]));
-      const after = parseVersion(daemonVersionLine());
-      if (before && after && before !== after) {
+      after = parseVersion(daemonVersionLine());
+      pendingUpdateRestart = !!(before && after && before !== after);
+    }
+
+    const voice = offerVoiceSetup({ daemonState });
+    if (pendingUpdateRestart && !voice.restartHandled) {
+      const restartState = daemonLifecycleState();
+      if (restartState === 'external') {
+        line(warn(`ours core updated (v${before} → v${after}); restart its external launcher to load the update.`));
+      } else {
         await act(`ours-mcp restart (now v${after})`, async () => { if (!run('ours-mcp', ['restart']).ok) run('ours-mcp', ['start']); return { ok: true }; });
         line(ok(`ours core updated (v${before} → v${after}) and restarted. No problems.`));
-      } else {
-        line(ok(`ours core already current${after ? ` (v${after})` : ''} — nothing to change.`));
       }
+    } else if (pendingUpdateRestart) {
+      const voiceFailed = summary.find((entry) => entry.key === 'voice')?.state === 'failed';
+      line(voiceFailed
+        ? warn(`ours core updated (v${before} → v${after}); voice setup handled restart/rollback but did not change voice settings.`)
+        : ok(`ours core updated (v${before} → v${after}); voice setup performed the required restart and readiness check.`));
+    } else if (upd) {
+      line(ok(`ours core already current${after ? ` (v${after})` : ''} — nothing to change.`));
     } else {
       line(ok(`ours core ready — running on port ${chosenPort}${running ? '' : ' (start with ours-mcp start)'}. No problems.`));
     }
     record({ key: 'core', label: 'ours core (daemon)', state: 'current', version: (parseVersion(daemonVersionLine()) || before), note: `port ${chosenPort}` });
   }
   cont();
-
-  // ============================================================================================
-  // Voice-message transcription — capability-based and safe to re-run. A complete setup is kept
-  // without prompting. An incomplete setup is offered every interactive run, including updates.
-  // Headless/CI never blocks or invents a provider/key. Secrets are read without echo and the
-  // config transaction is atomic + 0600; a failed daemon restart restores the previous file.
-  // ============================================================================================
-  if (summary.some((r) => r.key === 'core' && (r.state === 'installed' || r.state === 'current'))) {
-    line(heading('Voice messages'));
-    const cfgBefore = readConfigObject();
-    const probed = daemonVoiceCapability();
-    const localStatus = voiceSetupStatus(cfgBefore, process.env);
-    const voiceStatus = probed ?? localStatus;
-    if (voiceStatus.ready) {
-      line(ok(`Voice transcription is configured (${voiceStatus.provider}). API key: configured, never displayed.`));
-      record({ key: 'voice', label: 'Voice transcription', state: 'current', note: voiceStatus.provider });
-      cont(false);
-    } else if (!interactive) {
-      line(info('Voice transcription is not configured. Non-interactive mode leaves it unchanged.'));
-      line(info('Run ours-install in a terminal to enter the provider key with masked input.'));
-      record({ key: 'voice', label: 'Voice transcription', state: 'skipped', note: 'interactive setup available on re-run' });
-      cont(false);
-    } else {
-      line(info('Voice notes can be transcribed by a provider you choose. Audio is sent to that'));
-      line(info('provider; use a self-hosted endpoint if it must stay local. The API key is masked.'));
-      const configure = yes('  Set up voice transcription now?', true);
-      if (!configure) {
-        line(info('skipped — this will be offered again on the next installer run.'));
-        record({ key: 'voice', label: 'Voice transcription', state: 'skipped', note: 'declined; offered again on re-run' });
-        cont(false);
-      } else {
-        const fileVoice = cfgBefore?.stt && typeof cfgBefore.stt === 'object' ? cfgBefore.stt : {};
-        const providerDefault = String(process.env.OURS_STT_PROVIDER || fileVoice.provider || '').trim().toLowerCase();
-        const provider = ask(
-          `  Provider (${VOICE_PROVIDERS.join(' / ')})${providerDefault ? ` [${providerDefault}]` : ''}: `,
-          providerDefault,
-        ).trim().toLowerCase();
-        let setupError = '';
-        if (!VOICE_PROVIDERS.includes(provider)) setupError = `choose one of: ${VOICE_PROVIDERS.join(', ')}`;
-
-        let model = String(process.env.OURS_STT_MODEL || fileVoice.model || '').trim();
-        let baseUrl = String(process.env.OURS_STT_BASE_URL || fileVoice.baseUrl || '').trim();
-        let customUrl = String(fileVoice.custom?.url || '').trim();
-        if (!setupError && provider === 'openai-compatible') {
-          baseUrl = ask(`  Provider /v1 base URL${baseUrl ? ` [${baseUrl}]` : ''}: `, baseUrl).trim();
-          model = ask(`  Model name (sent verbatim)${model ? ` [${model}]` : ''}: `, model).trim();
-        } else if (!setupError && provider === 'elevenlabs') {
-          model = ask(`  ElevenLabs model id${model ? ` [${model}]` : ''}: `, model).trim();
-          baseUrl = ask(`  Custom base URL (Enter for provider default)${baseUrl ? ` [${baseUrl}]` : ''}: `, baseUrl).trim();
-        } else if (!setupError && provider === 'deepgram') {
-          model = ask(`  Model (optional; Enter for provider default)${model ? ` [${model}]` : ''}: `, model).trim();
-          baseUrl = ask(`  Custom base URL (optional)${baseUrl ? ` [${baseUrl}]` : ''}: `, baseUrl).trim();
-        } else if (!setupError && provider === 'custom') {
-          customUrl = ask(`  Full transcription endpoint URL${customUrl ? ` [${customUrl}]` : ''}: `, customUrl).trim();
-          model = ask(`  Model (optional unless URL contains {model})${model ? ` [${model}]` : ''}: `, model).trim();
-        }
-
-        const envHasKey = !!process.env.OURS_STT_API_KEY?.trim();
-        let keyToPersist = String(fileVoice.apiKey || '').trim();
-        if (!setupError && !envHasKey) {
-          const keyPrompt = keyToPersist
-            ? '  Provider API key [configured; Enter keeps it]: '
-            : '  Provider API key (input hidden): ';
-          const entered = askSecret(write, ttyFd, keyPrompt, keyToPersist);
-          if (entered === null) setupError = 'secure hidden input is unavailable on this terminal';
-          else {
-            const valid = validateVoiceSecret(entered);
-            if (!valid.ok) setupError = valid.reason;
-            else keyToPersist = valid.value;
-          }
-        }
-
-        const nextStt = {
-          ...fileVoice,
-          provider,
-          ...(keyToPersist ? { apiKey: keyToPersist } : {}),
-          ...(model ? { model } : {}),
-          ...(baseUrl ? { baseUrl } : {}),
-          ...(provider === 'custom' && customUrl
-            ? { custom: { ...(fileVoice.custom ?? {}), url: customUrl } }
-            : {}),
-        };
-        const intended = voiceSetupStatus({ ...cfgBefore, stt: nextStt }, process.env);
-        if (!setupError && !intended.ready) setupError = intended.reason;
-
-        if (setupError) {
-          line(warn(`Voice setup was not saved: ${redactSensitive(setupError, [keyToPersist])}.`));
-          line(info('No existing configuration was changed; re-run ours-install to try again.'));
-          record({ key: 'voice', label: 'Voice transcription', state: 'failed', note: 'incomplete setup; config unchanged' });
-          cont();
-        } else if (DRY) {
-          line('  ' + c.dim(`[dry-run] would: atomically update ${configPath()} (mode 0600) and restart ours-mcp`));
-          line(ok(`Voice transcription would be configured (${provider}); API key stays hidden.`));
-          record({ key: 'voice', label: 'Voice transcription', state: 'installed', note: `${provider} (dry-run)` });
-          cont();
-        } else {
-          const updated = transactionalConfigUpdate(
-            configPath(),
-            mergeConfig(cfgBefore, { stt: nextStt }),
-            () => {
-              const r = run('ours-mcp', ['restart'], { capture: true });
-              if (!r.ok) return { ok: false, error: r.err || r.out };
-              const verified = daemonVoiceCapability();
-              return verified && !verified.ready
-                ? { ok: false, error: verified.reason || 'voice capability remained incomplete after restart' }
-                : { ok: true };
-            },
-          );
-          if (!updated.ok && updated.stage === 'write') {
-            line(warn(`Could not save voice setup: ${redactSensitive(updated.error instanceof Error ? updated.error.message : String(updated.error), [keyToPersist])}.`));
-            line(info('The prior config is intact; no restart was attempted.'));
-            record({ key: 'voice', label: 'Voice transcription', state: 'failed', note: 'config write failed; prior config intact' });
-          } else if (!updated.ok) {
-            line(warn(`Daemon restart failed; ${updated.rolledBack ? 'restored the prior config' : 'automatic rollback also failed — inspect the config before restarting'}.`));
-            record({ key: 'voice', label: 'Voice transcription', state: 'failed', note: updated.rolledBack ? 'restart failed; rolled back' : 'restart and rollback failed' });
-          } else {
-            line(ok(`Voice transcription configured (${provider}) and daemon restarted. API key saved in mode-0600 config.`));
-            record({ key: 'voice', label: 'Voice transcription', state: 'installed', note: provider });
-          }
-          cont();
-        }
-      }
-    }
-  }
 
   // ============================================================================================
   // Human identity — created DURING install, right after the daemon is confirmed reachable (the
