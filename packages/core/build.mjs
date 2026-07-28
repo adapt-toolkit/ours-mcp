@@ -89,6 +89,13 @@ await build({
   outfile: resolve(dist, 'transcribe.js'),
 });
 
+// Pure Linux process-state parser used by daemon stop polling.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/process-state.ts')],
+  outfile: resolve(dist, 'process-state.js'),
+});
+
 // Ship ONLY the compiled MUFL packet (*.muflo) — never the .mu/.mm/.mufl source.
 // The MCP server loads the .muflo at runtime from dist/mufl_code/ by hash.
 const muflSrc = resolve(root, 'mufl_code');

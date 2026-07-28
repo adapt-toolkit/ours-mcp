@@ -49,6 +49,7 @@ import {
 } from './config';
 import { runProxy } from './proxy';
 import { sttStatus } from './transcribe';
+import { linuxProcHasExited } from './process-state';
 
 // systemctl/journalctl --user (install-service / uninstall-service) locate the
 // user bus via $XDG_RUNTIME_DIR/bus. sudo/su shells run inside the CALLING
@@ -140,6 +141,21 @@ function readPid(): number | null {
 function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0); // signal 0 = existence check
+    // On Linux, kill(pid, 0) also succeeds for a zombie. Treat that already-exited
+    // state as dead so `stop` does not sit through its full polling window while
+    // init/systemd is merely waiting to reap the detached daemon.
+    if (process.platform === 'linux') {
+      try {
+        if (linuxProcHasExited(fs.readFileSync(`/proc/${pid}/stat`, 'utf8'))) return false;
+      } catch {
+        // The process may have disappeared between kill(0) and the proc read.
+        try {
+          process.kill(pid, 0);
+        } catch {
+          return false;
+        }
+      }
+    }
     return true;
   } catch {
     return false;
