@@ -348,6 +348,18 @@ async function cmdSetup(): Promise<void> {
     const gcStr = await ask('GC interval (ms)', String(current.gcIntervalMs));
     const autoStartStr = await ask('proxy auto-starts daemon (true/false)', String(current.autoStart));
     const visibilityStr = await ask('HTTP visibility (owner=same-user only / shared=cross-user w/ token / open=all local users)', current.apiVisibility);
+    out('');
+    out('  Voice-message transcription (STT). Leave provider empty to keep it off —');
+    out('  agents then deterministically tell users voice messages cannot be read.');
+    out('  No provider or model is assumed; model strings pass to your provider verbatim.');
+    const sttProvider = (await rl.question(`  STT provider (openai-compatible / elevenlabs / deepgram / custom, empty=off) [${current.stt?.provider ?? ''}]: `)).trim() || (current.stt?.provider ?? '');
+    let sttModel = current.stt?.model ?? '';
+    let sttBaseUrl = current.stt?.baseUrl ?? '';
+    if (sttProvider) {
+      sttModel = await ask('STT model (verbatim, e.g. whisper-large-v3-turbo / scribe_v1 / nova-2)', sttModel);
+      sttBaseUrl = await ask('STT base URL (required for openai-compatible; empty = provider default)', sttBaseUrl);
+      out('  (API key is not prompted to avoid echoing it — set OURS_STT_API_KEY or edit stt.apiKey in the config file.)');
+    }
 
     const port = parseInt(portStr, 10);
     if (!Number.isFinite(port) || port <= 0) {
@@ -367,6 +379,14 @@ async function cmdSetup(): Promise<void> {
     }
     // Preserve an existing apiToken (e.g. a shared secret) across setup; it's not
     // prompted here to avoid echoing it to the terminal — edit config to change it.
+    const stt = sttProvider
+      ? {
+          ...(current.stt ?? {}),
+          provider: sttProvider,
+          ...(sttModel ? { model: sttModel } : {}),
+          ...(sttBaseUrl ? { baseUrl: sttBaseUrl } : {}),
+        }
+      : current.stt;   // never drop an existing block (incl. apiKey) on empty answer
     next = {
       brokerUrl,
       port,
@@ -375,6 +395,7 @@ async function cmdSetup(): Promise<void> {
       autoStart,
       apiVisibility: apiVisibility as ApiVisibility,
       ...(current.apiToken ? { apiToken: current.apiToken } : {}),
+      ...(stt ? { stt } : {}),
     };
   } finally {
     rl.close();
