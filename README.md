@@ -68,7 +68,10 @@ ours-mcp watch [name]   # stream one line per new inbound message (wake source)
 ```
 
 `start` launches a detached background process — it survives closing your terminal but not a
-reboot. For boot-persistence, install it as a service:
+reboot. Startup and restart show phase/count progress while the daemon restores identities.
+Healthy slow restoration can run for up to three minutes; a frozen progress heartbeat or
+genuine daemon failure still returns nonzero. Interactive terminals update one line, while
+redirected/CI output uses concise stable lines. For boot-persistence, install it as a service:
 
 ```sh
 ours-mcp install-service     # systemd user service (Linux) or launchd agent (macOS)

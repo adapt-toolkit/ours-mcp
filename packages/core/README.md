@@ -62,6 +62,26 @@ cannot be run per session. Each session instead runs a thin `ours-mcp proxy`
 Platform plugins ship only the proxy invocation; they never own or restart the
 daemon.
 
+`ours-mcp start` and `ours-mcp restart` do not treat an open socket as readiness.
+They wait for an authenticated response from the daemon's normal control
+surface (`/identities`) after the protocol runtime, contact-book registrar,
+persisted identities, and boot reconciliation are complete. In owner mode the
+CLI dynamically discovers the mode-`0600` token minted by the daemon before it
+declares readiness; shared and open modes preserve their configured auth
+semantics. During that wait the daemon publishes a mode-`0600`
+`startup-progress.json` in its state directory. The structured record contains
+only a phase, timestamps, process/boot identifiers, and identity counts — never
+identity names, container IDs, keys, packet contents, or state paths.
+
+Interactive terminals update one progress line; redirected/noninteractive runs
+emit concise stable lines such as `startup: Restoring identities 3/12`. A
+heartbeat distinguishes active work from a frozen process: 30 seconds without
+an update is a failure, and an absolute three-minute bound prevents an
+event-loop-active stall from waiting forever. Immediate daemon failure remains
+nonzero. The same daemon bootstrap/reporting path is used by foreground
+`serve`, Linux systemd, macOS launchd, and either native or WASM-backed ADAPT
+runtimes; service managers keep their existing lifecycle behavior.
+
 On connect, the proxy runs a compatibility handshake against the daemon's
 `/state-dir` report (`{ version, compat }`). `compat` is the wire-contract
 version (`src/protocol.ts`) — distinct from the package version, bumped only on

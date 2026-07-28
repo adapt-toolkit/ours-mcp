@@ -51,6 +51,13 @@ import { runProxy } from './proxy';
 import { sttStatus } from './transcribe';
 import { linuxProcHasExited } from './process-state';
 import { runVoiceSetup, VOICE_SETUP_HELP } from './voice-setup';
+import {
+  formatStartupProgress,
+  readStartupProgress,
+  renderStartupProgress,
+  waitForStartup,
+  type StartupWaitFailure,
+} from './startup-progress';
 
 // systemctl/journalctl --user (install-service / uninstall-service) locate the
 // user bus via $XDG_RUNTIME_DIR/bus. sudo/su shells run inside the CALLING
@@ -68,11 +75,15 @@ if (!process.env.XDG_RUNTIME_DIR && typeof process.getuid === 'function') {
 const CONFIG = loadConfig();
 const STATE_DIR = CONFIG.stateDir;
 const PORT = CONFIG.port;
-// Bearer token for the daemon HTTP surface (Part B). Clients never mint it
-// (generate:false) — only the daemon does. owner mode: same-user reads the 0600
-// file; shared mode: OURS_API_TOKEN/config; open mode: null (no header sent).
-const API_TOKEN = resolveApiToken(CONFIG, { generate: false })?.token ?? null;
-const apiHeaders = (): Record<string, string> => (API_TOKEN ? { 'x-ours-api-token': API_TOKEN } : {});
+// Bearer token for the daemon HTTP surface (Part B). Resolve it per request:
+// during `start`, the CLI process exists BEFORE the daemon mints owner mode's
+// 0600 token file. Caching the initial null would make an unauthenticated
+// liveness probe look ready while the normal control surface was still unusable.
+// Clients never mint it (generate:false) — only the daemon does.
+const apiHeaders = (): Record<string, string> => {
+  const token = resolveApiToken(CONFIG, { generate: false })?.token ?? null;
+  return token ? { 'x-ours-api-token': token } : {};
+};
 const BROKER_URL = CONFIG.brokerUrl;
 const PID_PATH = join(STATE_DIR, 'daemon.pid');
 const LOG_PATH = join(STATE_DIR, 'daemon.log');
@@ -200,6 +211,63 @@ async function waitForPort(port: number, totalMs = 30_000): Promise<boolean> {
   return false;
 }
 
+function testTimeout(name: string, fallback: number): number {
+  const value = Number(process.env[name] || '');
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const STARTUP_ABSOLUTE_MS = testTimeout('OURS_TEST_STARTUP_ABSOLUTE_MS', 180_000);
+const STARTUP_INACTIVITY_MS = testTimeout('OURS_TEST_STARTUP_INACTIVITY_MS', 30_000);
+const STARTUP_POLL_MS = testTimeout('OURS_TEST_STARTUP_POLL_MS', 400);
+
+async function daemonReady(port: number): Promise<boolean> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), Math.min(1_000, STARTUP_POLL_MS));
+  try {
+    // READY means the ordinary authenticated control surface works, not merely
+    // that unauthenticated introspection or a TCP listener exists. In owner mode
+    // apiHeaders() discovers the token file the child just minted; shared mode
+    // uses the operator token; open mode intentionally sends no header.
+    const resp = await fetch(`http://127.0.0.1:${port}/identities`, {
+      signal: ctrl.signal,
+      headers: apiHeaders(),
+    });
+    const ready = resp.ok;
+    try { await resp.body?.cancel(); } catch { /* response status is sufficient */ }
+    return ready;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function formatWaitDuration(ms: number): string {
+  if (ms < 1_000) return `${Math.round(ms)}ms`;
+  if (ms % 60_000 === 0) return `${ms / 60_000}m`;
+  return `${Math.round(ms / 1_000)}s`;
+}
+
+function startupFailureMessage(
+  reason: StartupWaitFailure,
+  lastProgress: ReturnType<typeof readStartupProgress>,
+): string {
+  const last = lastProgress ? ` Last phase: ${formatStartupProgress(lastProgress)}.` : '';
+  if (reason === 'process-exited' || reason === 'daemon-reported-failure') {
+    return `daemon exited before becoming ready.${last}`;
+  }
+  if (reason === 'inactivity-timeout') {
+    return (
+      `daemon startup made no observable progress for ${formatWaitDuration(STARTUP_INACTIVITY_MS)}.` +
+      `${last} The process is still running, but startup is stalled.`
+    );
+  }
+  return (
+    `daemon startup did not finish within ${formatWaitDuration(STARTUP_ABSOLUTE_MS)}.` +
+    `${last} The bounded wait expired.`
+  );
+}
+
 async function cmdStart(): Promise<void> {
   const existing = runningPid();
   if (existing) {
@@ -229,14 +297,30 @@ async function cmdStart(): Promise<void> {
   fs.writeFileSync(PID_PATH, String(child.pid));
 
   out(`starting ours-mcp (pid ${child.pid})…`);
-  const ready = await waitForPort(PORT);
-  if (ready) {
+  const interactive = Boolean(process.stderr.isTTY);
+  let progressShown = false;
+  const result = await waitForStartup({
+    pid: child.pid,
+    absoluteMs: STARTUP_ABSOLUTE_MS,
+    inactivityMs: STARTUP_INACTIVITY_MS,
+    pollMs: STARTUP_POLL_MS,
+    isProcessAlive: () => isAlive(child.pid!),
+    isReady: () => daemonReady(PORT),
+    readProgress: () => readStartupProgress(STATE_DIR),
+    onProgress: (progress) => {
+      progressShown = true;
+      process.stderr.write(renderStartupProgress(progress, interactive));
+    },
+  });
+  if (progressShown && interactive) process.stderr.write('\n');
+
+  if (result.ok) {
     out(`ours-mcp is up on http://localhost:${PORT}/mcp`);
     out(`  broker: ${BROKER_URL}`);
     out(`  state:  ${STATE_DIR}`);
     out(`  logs:   ${LOG_PATH}`);
   } else {
-    err(`daemon started (pid ${child.pid}) but port ${PORT} did not open within 30s — check ${LOG_PATH}.`);
+    err(`${startupFailureMessage(result.reason, result.lastProgress)} Check ${LOG_PATH}.`);
     process.exit(1);
   }
 }
@@ -1139,9 +1223,9 @@ function usage(): void {
   out('ours-mcp — daemon for the ours MCP server');
   out('');
   out('Usage: ours-mcp <command>');
-  out('  start     start the daemon in the background');
+  out('  start     start in the background; show structured progress until ready');
   out('  stop      stop the running daemon');
-  out('  restart   stop then start');
+  out('  restart   stop then start; healthy slow restores may take up to 3 minutes');
   out('  status    show whether the daemon is running (incl. CLI + running-daemon version)');
   out('  version   print the CLI version and the running daemon version (GET /version)');
   out('  setup     interactively edit the config file (broker / port / state dir / gc)');
@@ -1256,7 +1340,7 @@ async function main(): Promise<void> {
         url: `http://127.0.0.1:${PORT}/mcp`,
         ensureDaemon: CONFIG.autoStart ? ensureDaemonRunning : undefined,
         stateDir: STATE_DIR,
-        apiToken: API_TOKEN ?? undefined,
+        apiToken: resolveApiToken(CONFIG, { generate: false })?.token,
       });
       break;
     case 'install-service':
