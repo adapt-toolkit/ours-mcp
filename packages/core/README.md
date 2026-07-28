@@ -24,6 +24,31 @@ exposes the messaging tools — each a thin wrapper over one MUFL user transacti
 | `OURS_STATE_DIR` | `~/.ours` | Node identity + serialized state. Distinct per node. |
 | `OURS_BROKER_URL` | `wss://broker1.ours.network` | The ADAPT broker to connect through. Set to `ws://localhost:9000` for a local broker. |
 
+### Voice-message transcription
+
+Voice transcription is off until a provider and key (plus provider-required fields) are
+configured. Check readiness without exposing credentials:
+
+```sh
+ours-mcp voice-status --json
+```
+
+Run `ours-install` interactively for guided, masked setup. It writes the config atomically
+with mode `0600` and rolls back if the daemon cannot reload it. For environment-only service
+configuration use `OURS_STT_PROVIDER`, `OURS_STT_API_KEY`, `OURS_STT_MODEL`,
+`OURS_STT_BASE_URL`, and `OURS_STT_LANGUAGE`; environment values override file fields.
+
+The supported providers are `openai-compatible` (explicit base URL + model),
+`elevenlabs` (model), `deepgram`, and `custom` (`stt.custom.url`). Incoming voice remains
+a file and is transcribed only when its real `audio/*` MIME also carries
+`x-ours-kind=voice-message` (or its legacy filename starts `voice-message-`). The original
+bytes are saved whether transcription succeeds, is unconfigured, exceeds the size cap, or
+the provider fails. Provider error text is scrubbed if it echoes the configured key.
+
+Telegram fallback preserves its original OGG/Opus bytes and `.ogg` filename and advertises
+`audio/ogg; x-ours-kind=voice-message`; the connector's v2 message envelope correlates the
+separate file using `attachment.wire_id`.
+
 ## Daemon lifecycle
 
 This package is the **single owner of the daemon lifecycle**. `ours-mcp start`

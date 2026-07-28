@@ -48,6 +48,7 @@ import {
   type ApiVisibility,
 } from './config';
 import { runProxy } from './proxy';
+import { sttStatus } from './transcribe';
 
 // systemctl/journalctl --user (install-service / uninstall-service) locate the
 // user bus via $XDG_RUNTIME_DIR/bus. sudo/su shells run inside the CALLING
@@ -358,7 +359,8 @@ async function cmdSetup(): Promise<void> {
     if (sttProvider) {
       sttModel = await ask('STT model (verbatim, e.g. whisper-large-v3-turbo / scribe_v1 / nova-2)', sttModel);
       sttBaseUrl = await ask('STT base URL (required for openai-compatible; empty = provider default)', sttBaseUrl);
-      out('  (API key is not prompted to avoid echoing it — set OURS_STT_API_KEY or edit stt.apiKey in the config file.)');
+      out('  (API key is not echoed here. Run `ours-install` for masked guided setup,');
+      out('   or set OURS_STT_API_KEY for environment-only secret injection.)');
     }
 
     const port = parseInt(portStr, 10);
@@ -404,9 +406,18 @@ async function cmdSetup(): Promise<void> {
   writeConfig(next);
   out('');
   out(`wrote ${path} (mode 0600):`);
-  out(JSON.stringify(next, null, 2));
+  const display = {
+    ...next,
+    ...(next.apiToken ? { apiToken: '[redacted]' } : {}),
+    ...(next.stt ? { stt: { ...next.stt, ...(next.stt.apiKey ? { apiKey: '[redacted]' } : {}) } } : {}),
+  };
+  out(JSON.stringify(display, null, 2));
 
-  const shadowed = (['OURS_BROKER_URL', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_GC_INTERVAL_MS', 'OURS_AUTOSTART', 'OURS_API_VISIBILITY', 'OURS_API_TOKEN'] as const)
+  const shadowed = ([
+    'OURS_BROKER_URL', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_GC_INTERVAL_MS',
+    'OURS_AUTOSTART', 'OURS_API_VISIBILITY', 'OURS_API_TOKEN', 'OURS_STT_PROVIDER',
+    'OURS_STT_API_KEY', 'OURS_STT_MODEL', 'OURS_STT_BASE_URL', 'OURS_STT_LANGUAGE',
+  ] as const)
     .filter((k) => process.env[k] !== undefined);
   if (shadowed.length) {
     out('');
@@ -433,6 +444,25 @@ async function cmdSetup(): Promise<void> {
   await cmdStop();
   const r = spawnSync(process.execPath, [SELF, 'start'], { stdio: 'inherit' });
   if (r.status !== 0) process.exit(r.status ?? 1);
+}
+
+function cmdVoiceStatus(args: string[]): void {
+  const status = sttStatus(CONFIG.stt);
+  const provider = CONFIG.stt?.provider?.trim().toLowerCase() || null;
+  const keySource = process.env.OURS_STT_API_KEY?.trim()
+    ? 'environment'
+    : CONFIG.stt?.apiKey?.trim()
+      ? 'config'
+      : 'missing';
+  const result = status.ready
+    ? { ready: true, provider: status.provider, apiKey: 'configured', keySource }
+    : { ready: false, provider, apiKey: keySource === 'missing' ? 'missing' : 'configured', keySource, reason: status.reason };
+  if (args.includes('--json')) {
+    out(JSON.stringify(result));
+    return;
+  }
+  if (result.ready) out(`voice transcription: ready (${result.provider}; API key from ${result.keySource})`);
+  else out(`voice transcription: not ready — ${result.reason}`);
 }
 
 // ─── define-local-identity-file ──────────────────────────────────────────────
@@ -1057,6 +1087,7 @@ function usage(): void {
   out('  status    show whether the daemon is running (incl. CLI + running-daemon version)');
   out('  version   print the CLI version and the running daemon version (GET /version)');
   out('  setup     interactively edit the config file (broker / port / state dir / gc)');
+  out('  voice-status [--json]  check voice-transcription readiness (never prints the API key)');
   out('  serve     run in the foreground (used by start; handy for debugging)');
   out('  watch [identity]  stream one line per new inbound message (wake source for a Monitor)');
   out('  proxy     per-session stdio shim → daemon (stable binding; for the MCP client config)');
@@ -1129,6 +1160,10 @@ async function main(): Promise<void> {
       break;
     case 'setup':
       await cmdSetup();
+      break;
+    case 'voice-status':
+    case 'stt-status':
+      cmdVoiceStatus(process.argv.slice(3));
       break;
     case 'create-root':
       await cmdCreateRoot(process.argv.slice(3));
