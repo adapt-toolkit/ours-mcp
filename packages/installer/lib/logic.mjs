@@ -111,6 +111,89 @@ export function mergeConfig(existing, patch) {
   return JSON.stringify(out, null, 2) + '\n';
 }
 
+export const VOICE_PROVIDERS = ['openai-compatible', 'elevenlabs', 'deepgram', 'custom'];
+
+// Resolve only the STT fields the daemon itself accepts. Environment values override
+// config.json field-by-field, matching packages/core/src/config.ts. The returned object
+// may contain a secret, so callers must never print or serialize it into diagnostics.
+export function effectiveVoiceConfig(config = {}, env = {}) {
+  const file = config?.stt && typeof config.stt === 'object' ? config.stt : {};
+  const out = { ...file };
+  const envFields = {
+    provider: env.OURS_STT_PROVIDER,
+    apiKey: env.OURS_STT_API_KEY,
+    model: env.OURS_STT_MODEL,
+    baseUrl: env.OURS_STT_BASE_URL,
+    language: env.OURS_STT_LANGUAGE,
+  };
+  for (const [key, raw] of Object.entries(envFields)) {
+    if (typeof raw === 'string' && raw.trim()) out[key] = raw.trim();
+  }
+  return out;
+}
+
+// Capability/readiness check, deliberately based on required fields rather than a package
+// version. Reasons contain field names only — never secret values.
+export function voiceSetupStatus(config = {}, env = {}) {
+  const stt = effectiveVoiceConfig(config, env);
+  const provider = String(stt.provider || '').trim().toLowerCase();
+  if (!provider) return { ready: false, provider: '', reason: 'no voice provider configured', missing: ['provider'] };
+  if (!VOICE_PROVIDERS.includes(provider)) {
+    return { ready: false, provider, reason: `unsupported voice provider "${provider}"`, missing: ['provider'] };
+  }
+  if (!String(stt.apiKey || '').trim()) {
+    return { ready: false, provider, reason: `voice provider "${provider}" is missing its API key`, missing: ['apiKey'] };
+  }
+  if (provider === 'openai-compatible') {
+    const missing = [];
+    if (!String(stt.baseUrl || '').trim()) missing.push('baseUrl');
+    if (!String(stt.model || '').trim()) missing.push('model');
+    if (missing.length) return { ready: false, provider, reason: `openai-compatible voice setup is missing ${missing.join(' and ')}`, missing };
+  }
+  if (provider === 'elevenlabs' && !String(stt.model || '').trim()) {
+    return { ready: false, provider, reason: 'elevenlabs voice setup is missing model', missing: ['model'] };
+  }
+  if (provider === 'custom') {
+    if (!String(stt.custom?.url || '').trim()) {
+      return { ready: false, provider, reason: 'custom voice setup is missing custom.url', missing: ['custom.url'] };
+    }
+    const wantsModel = stt.custom.url.includes('{model}')
+      || (stt.custom.modelField !== undefined && stt.custom.modelField !== '');
+    if (wantsModel && !String(stt.model || '').trim()) {
+      return { ready: false, provider, reason: 'custom voice setup references a model but model is missing', missing: ['model'] };
+    }
+  }
+  return {
+    ready: true,
+    provider,
+    reason: 'voice transcription is configured',
+    missing: [],
+    keySource: typeof env.OURS_STT_API_KEY === 'string' && env.OURS_STT_API_KEY.trim() ? 'environment' : 'config',
+  };
+}
+
+// Provider keys have different shapes, so validation is intentionally conservative: reject
+// empty, tiny, whitespace-containing, or control-character input without assuming a vendor prefix.
+export function validateVoiceSecret(input) {
+  const value = String(input || '').trim();
+  if (value.length < 8) return { ok: false, reason: 'API key must contain at least 8 characters' };
+  if (/[\s\x00-\x1f\x7f]/.test(value)) return { ok: false, reason: 'API key must not contain whitespace or control characters' };
+  return { ok: true, value };
+}
+
+// Last-resort diagnostic scrubber. Code should avoid putting secrets into errors in the first
+// place; this protects unexpected provider/tool errors before they reach a terminal or log.
+export function redactSensitive(text, secrets = []) {
+  let out = String(text ?? '');
+  for (const raw of secrets) {
+    const secret = String(raw || '');
+    if (secret) out = out.split(secret).join('[redacted]');
+  }
+  return out
+    .replace(/("(?:apiKey|apiToken|token)"\s*:\s*")[^"]*(")/gi, '$1[redacted]$2')
+    .replace(/((?:api[_ -]?key|token)\s*[=:]\s*)\S+/gi, '$1[redacted]');
+}
+
 // parseVersion: pull the first x.y.z out of a version string (e.g. `ours-mcp v0.9.9`), matching
 // install.sh's `grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1`. Returns '' when none is present.
 export function parseVersion(text) {

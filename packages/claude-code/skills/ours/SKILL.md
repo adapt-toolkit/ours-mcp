@@ -74,6 +74,12 @@ Walk the user through these, checking each. Stop and help at the first one that 
    interactive `ours-mcp setup` (this edits config only — it is NOT identity setup).
    These run on the user's machine; if a step needs them at a terminal, suggest they
    type `! ours-mcp status` etc.
+   Then check optional voice support with `ours-mcp voice-status --json`. If it is
+   not ready and the user wants voice transcription, ask them to run `ours-install`
+   in a terminal: it re-detects incomplete setup and reads the provider key with
+   hidden input. **Never ask for, paste, echo, or put the key in chat/tool arguments.**
+   Environment-only operators may set `OURS_STT_*` themselves. Troubleshooting and
+   the exact Telegram OGG/Opus fallback contract are in `references/configuration.md`.
 2. **Plugin installed.** `/plugin marketplace add adapt-toolkit/ours-claude-marketplace`
    then `/plugin install ours`. The plugin just points Claude Code at the daemon and
    bundles this skill.

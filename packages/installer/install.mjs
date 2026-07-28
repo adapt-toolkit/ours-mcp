@@ -6,27 +6,30 @@
 // Codex / Hermes) + ours-fleet + the Telegram connector — for someone who ALREADY has Claude,
 // Codex, and/or Hermes.
 // Its whole job: install the stack cleanly, then hand back ONE copy-paste prompt the user drops
-// into their agent to finish all real configuration conversationally. No tokens, no port editing,
-// no config files. See packages/installer/README.md and the UX spec for the full contract.
+// into their agent to finish remaining configuration conversationally. Voice API credentials are
+// the one guided secret flow: interactive, masked, optional, and written atomically with mode 0600.
+// See packages/installer/README.md and the UX spec for the full contract.
 //
 // Design pillars (from the spec): config FIRST then act once; consent-first (Enter = no change);
 // slow, per-step "✓ … no problems" + Continue?; never silently broken; idempotent + safe re-run;
-// alias-safety / never-hang; deep config deferred to the copy-paste hand-off.
+// alias-safety / never-hang; most deep config deferred to the copy-paste hand-off.
 //
 // SAFETY: every side-effecting action goes through act(); with OURS_INSTALL_DRY_RUN=1 nothing is
 // installed/started/restarted — it prints exactly what it WOULD do. That is the safe way to walk
 // the whole flow on a machine you don't want to touch (and how the tests drive it).
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { homedir, userInfo, platform as osPlatform, release as osRelease } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { banner, heading, ok, info, warn, c, box, withSpinner, openTty, makeWriter, closeSync } from './lib/ui.mjs';
-import { askLine, askYesNo, isCancel } from './lib/prompt.mjs';
+import { askLine, askSecret, askYesNo, isCancel } from './lib/prompt.mjs';
 import {
   suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
   detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
+  voiceSetupStatus, validateVoiceSecret, redactSensitive, VOICE_PROVIDERS,
   DEFAULT_PORT, resolveChannel, pkgSpec,
 } from './lib/logic.mjs';
+import { atomicWriteConfig, transactionalConfigUpdate } from './lib/config.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
 // Release channel: OURS_CHANNEL=nightly installs @nightly for mcp/tg-connector/plugin
@@ -103,9 +106,19 @@ function configPath() { return process.env.OURS_CONFIG || join(homedir(), '.ours
 function readConfigObject() { try { return JSON.parse(readFileSync(configPath(), 'utf8')); } catch { return {}; } }
 function writeConfigPatch(patch) {
   const p = configPath();
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, mergeConfig(readConfigObject(), patch));
+  atomicWriteConfig(p, mergeConfig(readConfigObject(), patch));
   return p;
+}
+
+function daemonVoiceCapability() {
+  const r = run('ours-mcp', ['voice-status', '--json'], { capture: true, timeout: 6000 });
+  if (!r.ok) return null;
+  try {
+    const parsed = JSON.parse(r.out.trim());
+    return typeof parsed?.ready === 'boolean' ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 // Block the thread for `ms` without a subprocess — used for the brief daemon-reachability wait
@@ -369,6 +382,130 @@ async function main() {
     record({ key: 'core', label: 'ours core (daemon)', state: 'current', version: (parseVersion(daemonVersionLine()) || before), note: `port ${chosenPort}` });
   }
   cont();
+
+  // ============================================================================================
+  // Voice-message transcription — capability-based and safe to re-run. A complete setup is kept
+  // without prompting. An incomplete setup is offered every interactive run, including updates.
+  // Headless/CI never blocks or invents a provider/key. Secrets are read without echo and the
+  // config transaction is atomic + 0600; a failed daemon restart restores the previous file.
+  // ============================================================================================
+  if (summary.some((r) => r.key === 'core' && (r.state === 'installed' || r.state === 'current'))) {
+    line(heading('Voice messages'));
+    const cfgBefore = readConfigObject();
+    const probed = daemonVoiceCapability();
+    const localStatus = voiceSetupStatus(cfgBefore, process.env);
+    const voiceStatus = probed ?? localStatus;
+    if (voiceStatus.ready) {
+      line(ok(`Voice transcription is configured (${voiceStatus.provider}). API key: configured, never displayed.`));
+      record({ key: 'voice', label: 'Voice transcription', state: 'current', note: voiceStatus.provider });
+      cont(false);
+    } else if (!interactive) {
+      line(info('Voice transcription is not configured. Non-interactive mode leaves it unchanged.'));
+      line(info('Run ours-install in a terminal to enter the provider key with masked input.'));
+      record({ key: 'voice', label: 'Voice transcription', state: 'skipped', note: 'interactive setup available on re-run' });
+      cont(false);
+    } else {
+      line(info('Voice notes can be transcribed by a provider you choose. Audio is sent to that'));
+      line(info('provider; use a self-hosted endpoint if it must stay local. The API key is masked.'));
+      const configure = yes('  Set up voice transcription now?', true);
+      if (!configure) {
+        line(info('skipped — this will be offered again on the next installer run.'));
+        record({ key: 'voice', label: 'Voice transcription', state: 'skipped', note: 'declined; offered again on re-run' });
+        cont(false);
+      } else {
+        const fileVoice = cfgBefore?.stt && typeof cfgBefore.stt === 'object' ? cfgBefore.stt : {};
+        const providerDefault = String(process.env.OURS_STT_PROVIDER || fileVoice.provider || '').trim().toLowerCase();
+        const provider = ask(
+          `  Provider (${VOICE_PROVIDERS.join(' / ')})${providerDefault ? ` [${providerDefault}]` : ''}: `,
+          providerDefault,
+        ).trim().toLowerCase();
+        let setupError = '';
+        if (!VOICE_PROVIDERS.includes(provider)) setupError = `choose one of: ${VOICE_PROVIDERS.join(', ')}`;
+
+        let model = String(process.env.OURS_STT_MODEL || fileVoice.model || '').trim();
+        let baseUrl = String(process.env.OURS_STT_BASE_URL || fileVoice.baseUrl || '').trim();
+        let customUrl = String(fileVoice.custom?.url || '').trim();
+        if (!setupError && provider === 'openai-compatible') {
+          baseUrl = ask(`  Provider /v1 base URL${baseUrl ? ` [${baseUrl}]` : ''}: `, baseUrl).trim();
+          model = ask(`  Model name (sent verbatim)${model ? ` [${model}]` : ''}: `, model).trim();
+        } else if (!setupError && provider === 'elevenlabs') {
+          model = ask(`  ElevenLabs model id${model ? ` [${model}]` : ''}: `, model).trim();
+          baseUrl = ask(`  Custom base URL (Enter for provider default)${baseUrl ? ` [${baseUrl}]` : ''}: `, baseUrl).trim();
+        } else if (!setupError && provider === 'deepgram') {
+          model = ask(`  Model (optional; Enter for provider default)${model ? ` [${model}]` : ''}: `, model).trim();
+          baseUrl = ask(`  Custom base URL (optional)${baseUrl ? ` [${baseUrl}]` : ''}: `, baseUrl).trim();
+        } else if (!setupError && provider === 'custom') {
+          customUrl = ask(`  Full transcription endpoint URL${customUrl ? ` [${customUrl}]` : ''}: `, customUrl).trim();
+          model = ask(`  Model (optional unless URL contains {model})${model ? ` [${model}]` : ''}: `, model).trim();
+        }
+
+        const envHasKey = !!process.env.OURS_STT_API_KEY?.trim();
+        let keyToPersist = String(fileVoice.apiKey || '').trim();
+        if (!setupError && !envHasKey) {
+          const keyPrompt = keyToPersist
+            ? '  Provider API key [configured; Enter keeps it]: '
+            : '  Provider API key (input hidden): ';
+          const entered = askSecret(write, ttyFd, keyPrompt, keyToPersist);
+          if (entered === null) setupError = 'secure hidden input is unavailable on this terminal';
+          else {
+            const valid = validateVoiceSecret(entered);
+            if (!valid.ok) setupError = valid.reason;
+            else keyToPersist = valid.value;
+          }
+        }
+
+        const nextStt = {
+          ...fileVoice,
+          provider,
+          ...(keyToPersist ? { apiKey: keyToPersist } : {}),
+          ...(model ? { model } : {}),
+          ...(baseUrl ? { baseUrl } : {}),
+          ...(provider === 'custom' && customUrl
+            ? { custom: { ...(fileVoice.custom ?? {}), url: customUrl } }
+            : {}),
+        };
+        const intended = voiceSetupStatus({ ...cfgBefore, stt: nextStt }, process.env);
+        if (!setupError && !intended.ready) setupError = intended.reason;
+
+        if (setupError) {
+          line(warn(`Voice setup was not saved: ${redactSensitive(setupError, [keyToPersist])}.`));
+          line(info('No existing configuration was changed; re-run ours-install to try again.'));
+          record({ key: 'voice', label: 'Voice transcription', state: 'failed', note: 'incomplete setup; config unchanged' });
+          cont();
+        } else if (DRY) {
+          line('  ' + c.dim(`[dry-run] would: atomically update ${configPath()} (mode 0600) and restart ours-mcp`));
+          line(ok(`Voice transcription would be configured (${provider}); API key stays hidden.`));
+          record({ key: 'voice', label: 'Voice transcription', state: 'installed', note: `${provider} (dry-run)` });
+          cont();
+        } else {
+          const updated = transactionalConfigUpdate(
+            configPath(),
+            mergeConfig(cfgBefore, { stt: nextStt }),
+            () => {
+              const r = run('ours-mcp', ['restart'], { capture: true });
+              if (!r.ok) return { ok: false, error: r.err || r.out };
+              const verified = daemonVoiceCapability();
+              return verified && !verified.ready
+                ? { ok: false, error: verified.reason || 'voice capability remained incomplete after restart' }
+                : { ok: true };
+            },
+          );
+          if (!updated.ok && updated.stage === 'write') {
+            line(warn(`Could not save voice setup: ${redactSensitive(updated.error instanceof Error ? updated.error.message : String(updated.error), [keyToPersist])}.`));
+            line(info('The prior config is intact; no restart was attempted.'));
+            record({ key: 'voice', label: 'Voice transcription', state: 'failed', note: 'config write failed; prior config intact' });
+          } else if (!updated.ok) {
+            line(warn(`Daemon restart failed; ${updated.rolledBack ? 'restored the prior config' : 'automatic rollback also failed — inspect the config before restarting'}.`));
+            record({ key: 'voice', label: 'Voice transcription', state: 'failed', note: updated.rolledBack ? 'restart failed; rolled back' : 'restart and rollback failed' });
+          } else {
+            line(ok(`Voice transcription configured (${provider}) and daemon restarted. API key saved in mode-0600 config.`));
+            record({ key: 'voice', label: 'Voice transcription', state: 'installed', note: provider });
+          }
+          cont();
+        }
+      }
+    }
+  }
 
   // ============================================================================================
   // Human identity — created DURING install, right after the daemon is confirmed reachable (the

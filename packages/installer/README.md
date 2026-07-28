@@ -1,8 +1,8 @@
 # @ours.network/install — `ours-install`
 
 The **unified ours.network stack installer**. ONE guided ~3-minute flow that installs the WHOLE
-stack for someone who already has Claude Code and/or Codex, then hands back a single copy-paste
-prompt to finish setup conversationally.
+stack for someone who already has Claude Code, Codex, and/or Hermes, safely offers optional
+voice-message transcription, then hands back a single copy-paste prompt for remaining setup.
 
 ## Install
 
@@ -43,7 +43,7 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
    answers `--version` promptly. A shell alias / hanging wrapper is **never called** (that would
    hang the run) — it's reported plainly with a fix, and a manual-install path is always offered.
    If neither harness exists it says so and exits.
-2. **Config-first** (first install only) — the only two settings the user ever types, up front:
+2. **Config-first** (first install only) — the daemon's two base settings, up front:
    the **broker** (end-to-end encrypted; the broker never sees message content — almost everyone
    just presses Enter) and the **port** (probes `3050`; only asks if it's busy; never hands out
    `3051`, reserved for the Telegram connector). Applied once, then the stack is built with it.
@@ -51,6 +51,10 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
    **Continue?** — never a start-twice-then-ask, never a silent failure:
    - **1/4 ours core (the daemon)** — write config → install/start ONCE → boot service. On a
      re-run it reuses the running config (no re-ask) and only updates when you say yes.
+     After core readiness, the installer checks `ours-mcp voice-status --json`. Complete
+     voice setup is kept without prompting. Missing/incomplete setup is offered on every
+     interactive rerun: provider, model/endpoint where required, and a hidden API-key prompt.
+     The secret is written atomically to mode-`0600` config; a failed daemon reload rolls back.
    - **2/4 harness plugins** — the installer **drives the plugin CLIs itself**
      (`claude plugin marketplace add …` + `claude plugin install ours@ours.network`;
      `codex plugin marketplace add …` + `codex plugin add ours@ours-codex-marketplace`). Choosing
@@ -64,7 +68,7 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
    copy-paste prompt** (root identity + fleet + Telegram) with the steps for any skipped/failed
    component dropped out. Copied to the clipboard where supported.
 
-The root identity is **deferred to the hand-off** — zero identity typing during install. Because
+The human identity is created idempotently after the daemon becomes reachable. Because
 `curl … | bash` gives the script its input over the pipe, every prompt is read from the
 controlling terminal (`/dev/tty`), so the flow still works piped.
 
@@ -79,6 +83,10 @@ OURS_INSTALL_DRY_RUN=1 bash install.sh     # walk the WHOLE flow, install/change
 exactly the commands it *would* run (npm installs, `ours-mcp start`, plugin adds, `ours-fleet
 init`, service installs) without executing them. That is the safe way to preview the flow on a
 machine you don't want to touch, and how the integration tests drive it.
+
+Non-interactive runs never prompt for or synthesize voice credentials. Supply a complete
+`OURS_STT_*` environment configuration yourself, or rerun interactively later; missing setup
+is reported and left unchanged.
 
 | var | meaning |
 |---|---|
@@ -132,5 +140,5 @@ OURS_UNINSTALL_DAEMON=yes \
   published components.
 - **Idempotent + safe to re-run.** A re-run adds a skipped piece, re-points the plugins, or (only
   when you say yes) updates a component; an already-current daemon is left untouched, its running
-  port reused everywhere. Deep configuration (identities, bot tokens, fleet roles) is intentionally
-  **not** done here — it's the copy-paste hand-off's job.
+  port and complete voice setup are reused everywhere. Bot tokens and fleet roles remain in the
+  copy-paste hand-off; provider keys never enter that prompt or agent chat.

@@ -34,6 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-network/main/ins
 ```sh
 npm i -g @ours.network/mcp@latest    # the daemon
 ours-mcp start                        # start it (ours-mcp status to confirm)
+ours-mcp voice-status --json          # optional voice-transcription readiness (no key output)
 
 npm i -g @ours.network/hermes@latest && ours-hermes-install   # Hermes
 npm i -g @ours.network/codex@latest  && ours-codex-install    # Codex
@@ -50,6 +51,11 @@ The daemon connects to the public broker by default — no broker to run; it's a
 by all your sessions. The Claude Code plugin is thin — it points the harness at
 `http://localhost:3050/mcp` and bundles the skill. If the daemon isn't running, the tools return
 a clear error; run `ours-mcp start`.
+
+The guided `ours-install` flow also detects incomplete optional voice-message
+transcription and offers it again on reruns. Provider keys are entered with hidden input,
+stored only in mode-`0600` config (or supplied through `OURS_STT_*` environment variables),
+and never included in the agent hand-off prompt.
 
 ### Daemon commands
 
