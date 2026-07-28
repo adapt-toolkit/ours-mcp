@@ -96,6 +96,13 @@ await build({
   outfile: resolve(dist, 'process-state.js'),
 });
 
+// Pure/setup helpers used by focused config-transaction tests.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/voice-setup.ts')],
+  outfile: resolve(dist, 'voice-setup.js'),
+});
+
 // Ship ONLY the compiled MUFL packet (*.muflo) — never the .mu/.mm/.mufl source.
 // The MCP server loads the .muflo at runtime from dist/mufl_code/ by hash.
 const muflSrc = resolve(root, 'mufl_code');

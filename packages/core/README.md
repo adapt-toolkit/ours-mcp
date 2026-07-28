@@ -30,13 +30,16 @@ Voice transcription is off until a provider and key (plus provider-required fiel
 configured. Check readiness without exposing credentials:
 
 ```sh
+ours-mcp voice-setup
 ours-mcp voice-status --json
 ```
 
-Run `ours-install` interactively for guided, masked setup. It writes the config atomically
-with mode `0600` and rolls back if the daemon cannot reload it. For environment-only service
-configuration use `OURS_STT_PROVIDER`, `OURS_STT_API_KEY`, `OURS_STT_MODEL`,
-`OURS_STT_BASE_URL`, and `OURS_STT_LANGUAGE`; environment values override file fields.
+`voice-setup` presents a keyboard-driven single-choice provider selector and reads the
+provider key with hidden input. It writes config atomically with mode `0600`, preserves
+unrelated fields, and rolls back if the managed daemon cannot restart and report ready.
+It never accepts a key in command arguments. For environment-only service configuration
+use `OURS_STT_PROVIDER`, `OURS_STT_API_KEY`, `OURS_STT_MODEL`, `OURS_STT_BASE_URL`, and
+`OURS_STT_LANGUAGE`; environment values override file fields.
 
 The supported providers are `openai-compatible` (explicit base URL + model),
 `elevenlabs` (model), `deepgram`, and `custom` (`stt.custom.url`). Incoming voice remains

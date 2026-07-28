@@ -50,6 +50,7 @@ import {
 import { runProxy } from './proxy';
 import { sttStatus } from './transcribe';
 import { linuxProcHasExited } from './process-state';
+import { runVoiceSetup, VOICE_SETUP_HELP } from './voice-setup';
 
 // systemctl/journalctl --user (install-service / uninstall-service) locate the
 // user bus via $XDG_RUNTIME_DIR/bus. sudo/su shells run inside the CALLING
@@ -375,7 +376,7 @@ async function cmdSetup(): Promise<void> {
     if (sttProvider) {
       sttModel = await ask('STT model (verbatim, e.g. whisper-large-v3-turbo / scribe_v1 / nova-2)', sttModel);
       sttBaseUrl = await ask('STT base URL (required for openai-compatible; empty = provider default)', sttBaseUrl);
-      out('  (API key is not echoed here. Run `ours-install` for masked guided setup,');
+      out('  (API key is not echoed here. Run `ours-mcp voice-setup` for guided hidden input,');
       out('   or set OURS_STT_API_KEY for environment-only secret injection.)');
     }
 
@@ -479,6 +480,47 @@ function cmdVoiceStatus(args: string[]): void {
   }
   if (result.ready) out(`voice transcription: ready (${result.provider}; API key from ${result.keySource})`);
   else out(`voice transcription: not ready — ${result.reason}`);
+}
+
+async function cmdVoiceSetup(args: string[]): Promise<void> {
+  if (args.includes('--help') || args.includes('-h')) {
+    out(VOICE_SETUP_HELP);
+    return;
+  }
+  const allowed = new Set(['--dry-run']);
+  const unknown = args.filter((arg) => !allowed.has(arg));
+  if (unknown.length) {
+    // Never reflect an unsupported argument: an operator may have mistaken a
+    // provider key for a positional value, and argv must not become output.
+    err('voice-setup: unsupported command-line option or argument');
+    err('The provider key is never accepted as a CLI argument. Run `ours-mcp voice-setup --help`.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const managed = runningPid() !== null;
+  const reachable = await portOpen(PORT);
+  const code = await runVoiceSetup({
+    configFile: configPath(),
+    env: process.env,
+    dryRun: args.includes('--dry-run'),
+    daemonState: managed ? 'managed' : reachable ? 'external' : 'stopped',
+    apply: async () => {
+      const restarted = spawnSync(process.execPath, [SELF, 'restart'], { stdio: 'inherit' });
+      if (restarted.error || restarted.status !== 0) return { ok: false };
+      const checked = spawnSync(process.execPath, [SELF, 'voice-status', '--json'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      if (checked.error || checked.status !== 0) return { ok: false };
+      try {
+        return { ok: JSON.parse(checked.stdout || '{}').ready === true };
+      } catch {
+        return { ok: false };
+      }
+    },
+  });
+  if (code !== 0) process.exitCode = code;
 }
 
 // ─── define-local-identity-file ──────────────────────────────────────────────
@@ -1103,6 +1145,7 @@ function usage(): void {
   out('  status    show whether the daemon is running (incl. CLI + running-daemon version)');
   out('  version   print the CLI version and the running daemon version (GET /version)');
   out('  setup     interactively edit the config file (broker / port / state dir / gc)');
+  out('  voice-setup [--dry-run]  securely choose a provider and configure its hidden API key');
   out('  voice-status [--json]  check voice-transcription readiness (never prints the API key)');
   out('  serve     run in the foreground (used by start; handy for debugging)');
   out('  watch [identity]  stream one line per new inbound message (wake source for a Monitor)');
@@ -1180,6 +1223,10 @@ async function main(): Promise<void> {
     case 'voice-status':
     case 'stt-status':
       cmdVoiceStatus(process.argv.slice(3));
+      break;
+    case 'voice-setup':
+    case 'stt-setup':
+      await cmdVoiceSetup(process.argv.slice(3));
       break;
     case 'create-root':
       await cmdCreateRoot(process.argv.slice(3));
