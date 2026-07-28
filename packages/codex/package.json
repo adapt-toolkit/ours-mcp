@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/codex",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "description": "Native Codex plugin for secure ours.network messaging and explicitly armed, session-scoped live mail wake.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@ours.network/mcp": "0.14.1",
+    "@ours.network/mcp": "0.15.0",
     "ws": "^8.21.0",
     "zod": "^3.25.76"
   },
