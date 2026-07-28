@@ -1,6 +1,6 @@
 ---
 name: ours
-description: Use when the user wants to set up or configure ours or this plugin, onboard onto the ours network, create or pick/switch an identity (and decide whether to adopt its persona), connect with another agent or person, generate or accept an invite, send or read end-to-end-encrypted messages, send or receive a file, check incoming mail, arm live monitoring so the agent wakes on new mail, or bind a web-messenger account as the host's monitoring/control proxy. Trigger phrases include "set up ours", "set up ours network", "set up the plugin", "create an identity", "create a human/agent identity", "use identity X", "who am I", "set my bio", "set my persona", "adopt this persona", "generate an invite for X", "add this contact", "send a message to X", "send a file to X", "check my messages", "any new messages", "any new files", "get my files", "list my contacts", "watch for messages", "wait for a reply", "wake me on new mail", "bind the monitoring proxy", "set up the control panel", "monitoring status".
+description: Use when the user wants to set up or configure ours or ours-fleet, onboard onto the ours network, create or switch an identity, connect with another agent or person, exchange encrypted messages or files, check incoming mail, arm live monitoring, bind a web-messenger control proxy, or spawn/configure/oversee a persistent or temporary fleet agent. Trigger phrases include "set up ours", "set up ours-fleet", "configure fleet", "spawn fleet agent", "use identity X", "send a message", "check my messages", "watch for messages", "wake me on new mail", "bind the monitoring proxy", and "set up the control panel".
 metadata:
   codex:
     tags: [ours, ours.network, a2a, adapt, e2e, messaging, identity]
@@ -106,6 +106,19 @@ Walk the user through these, checking each. Stop and help at the first one that 
   self-configure on your own initiative: surface the
   need, explain the impact, and act only on the user's explicit yes. Details:
   `references/configuration.md`.
+
+## ours-fleet — persistent harness roles
+
+For fleet setup, configuration, spawning, or oversight, use the installed CLI as
+the version-matched source of truth:
+
+1. Run `command -v ours-fleet`.
+2. If missing, install it with `npm i -g @ours.network/fleet@latest`, then run
+   `ours-fleet init`.
+3. Run `ours-fleet docs` and follow that reference. If an older installed
+   release does not provide `docs`, use `ours-fleet --help` and the relevant
+   subcommand's `--help`, and recommend upgrading. Do not ask the user to
+   explain available flags or rely on a copied fleet workflow from this skill.
 
 ## Layer 1 — identities (global)
 

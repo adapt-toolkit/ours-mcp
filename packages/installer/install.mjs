@@ -37,12 +37,6 @@ let DRY = !!process.env.OURS_INSTALL_DRY_RUN;
 const SELFHOST_URL = 'ours.network';
 const CLAUDE_MARKET = 'adapt-toolkit/ours-claude-marketplace';
 const CODEX_MARKET = 'adapt-toolkit/ours-codex-marketplace';
-// The ours-fleet HARNESS PLUGINS (separate from the `ours` plugin) — these are what actually give
-// Claude Code / Codex the fleet skill. Claude: plugin "fleet" in the ours.network marketplace
-// (@ours.network/fleet-claude-code). Codex: plugin "ours-fleet" in the ours-codex-marketplace
-// (@ours.network/fleet-codex).
-const CLAUDE_FLEET_PLUGIN = 'fleet@ours.network';
-const CODEX_FLEET_PLUGIN = 'ours-fleet@ours-codex-marketplace';
 
 const sink = (s) => process.stdout.write(s);
 const line = (s = '') => sink(`${s}\n`);
@@ -501,34 +495,16 @@ async function main() {
     const init = await act('ours-fleet init (one-time host setup: units, dirs, linger)', async () => run('ours-fleet', ['init']));
     if (!init.ok) line(warn(`ours-fleet host setup didn't finish — retry '${c.cyan('ours-fleet init')}'.`));
 
-    // Install the fleet HARNESS PLUGIN into each real+safe harness — the piece that actually gives
-    // Claude Code / Codex the fleet skill. Same drive-the-CLI, alias-safe, loud-on-failure pattern
-    // as Step 2; never dead-ends. (The `ours` plugin does NOT bundle this — it's a separate plugin.)
-    const fleetIn = [];
-    for (const h of harnesses) {
-      if (h.status === 'absent') continue;
-      if (h.name === 'claude') {
-        if (h.status !== 'ok') { manualClaudeFleet(h); continue; }
-        await act(`claude plugin marketplace add ${CLAUDE_MARKET}`, async () => run('claude', ['plugin', 'marketplace', 'add', CLAUDE_MARKET], { capture: true }));
-        const r = await act(`claude plugin install ${CLAUDE_FLEET_PLUGIN}`, async () => run('claude', ['plugin', 'install', CLAUDE_FLEET_PLUGIN], { capture: true }));
-        if (r.ok) { line(ok('Claude Code fleet plugin installed — you can spawn agents from Claude Code. No problems.')); fleetIn.push('Claude Code'); }
-        else failClaudeFleet();
-      } else if (h.name === 'codex') {
-        if (h.status !== 'ok') { manualCodexFleet(h); continue; }
-        await act(`codex plugin marketplace add ${CODEX_MARKET}`, async () => run('codex', ['plugin', 'marketplace', 'add', CODEX_MARKET], { capture: true }));
-        const r = await act(`codex plugin add ${CODEX_FLEET_PLUGIN}`, async () => run('codex', ['plugin', 'add', CODEX_FLEET_PLUGIN], { capture: true }));
-        if (r.ok) { line(ok('Codex fleet plugin installed — you can spawn agents from Codex. No problems.')); fleetIn.push('Codex'); }
-        else failCodexFleet();
-      }
+    if (init.ok) {
+      line(ok('ours-fleet ready — the core ours plugin discovers every option through `ours-fleet docs`. No problems.'));
     }
-    // Only claim the skill is present where the fleet plugin actually installed.
-    if (init.ok && fleetIn.length) line(ok(`ours-fleet ready — ${fleetIn.join(' + ')} now know the fleet skill. No problems.`));
-    else if (init.ok) line(info('ours-fleet CLI is installed; add the fleet plugin to your harness with the commands above.'));
-    // Fleet plugins target Claude Code + Codex only (Hermes has none) — so "no fleet-capable harness
-    // to install into" means every claude/codex is absent, NOT every harness (Hermes doesn't count).
-    const fleetCapableAbsent = harnesses.filter((h) => h.name === 'claude' || h.name === 'codex').every((h) => h.status === 'absent');
-    const fleetOk = init.ok && (fleetIn.length > 0 || fleetCapableAbsent);
-    record({ key: 'fleet', label: 'ours-fleet', state: fleetOk ? 'installed' : 'failed', version: globalVersion('@ours.network/fleet'), note: fleetIn.length ? fleetIn.join(' + ') : (init.ok ? 'CLI only — add plugin manually' : 'ours-fleet init failed') });
+    record({
+      key: 'fleet',
+      label: 'ours-fleet',
+      state: init.ok ? 'installed' : 'failed',
+      version: globalVersion('@ours.network/fleet'),
+      note: init.ok ? 'CLI + core-plugin discovery' : 'ours-fleet init failed',
+    });
   } else {
     line(info('skipped cleanly — re-run ours-install any time to add it.'));
     record({ key: 'fleet', label: 'ours-fleet', state: 'skipped' });
@@ -611,38 +587,6 @@ function failHermes() {
   line('    ' + c.cyan('ours-hermes-install'));
   line(info('Your daemon and other steps are intact. Continuing.'));
 }
-// --- fleet HARNESS PLUGIN never-dead-end messaging ---------------------------------------------
-function manualClaudeFleet(h) {
-  line(warn(h.status === 'alias'
-    ? '"claude" is installed as an alias, so I can\'t add the fleet plugin for you.'
-    : 'Couldn\'t safely drive "claude" to add the fleet plugin.'));
-  line(info('Add it yourself — inside Claude Code, run these two:'));
-  line('    ' + c.cyan(`/plugin marketplace add ${CLAUDE_MARKET}`));
-  line('    ' + c.cyan('/plugin install fleet'));
-}
-function failClaudeFleet() {
-  line(warn('Couldn\'t install the Claude Code fleet plugin automatically.'));
-  line(info('Install it by hand — inside Claude Code, run these two, then re-run ours-install:'));
-  line('    ' + c.cyan(`/plugin marketplace add ${CLAUDE_MARKET}`));
-  line('    ' + c.cyan('/plugin install fleet'));
-  line(info('Your daemon and other steps are intact. Continuing.'));
-}
-function manualCodexFleet(h) {
-  line(warn(h.status === 'alias'
-    ? '"codex" is installed as an alias, so I can\'t add the fleet plugin for you.'
-    : 'Couldn\'t safely drive "codex" to add the fleet plugin.'));
-  line(info('Add it yourself — run these two in your terminal:'));
-  line('    ' + c.cyan(`codex plugin marketplace add ${CODEX_MARKET}`));
-  line('    ' + c.cyan(`codex plugin add ${CODEX_FLEET_PLUGIN}`));
-}
-function failCodexFleet() {
-  line(warn('Couldn\'t install the Codex fleet plugin automatically.'));
-  line(info('Install it by hand — run these two, then re-run ours-install:'));
-  line('    ' + c.cyan(`codex plugin marketplace add ${CODEX_MARKET}`));
-  line('    ' + c.cyan(`codex plugin add ${CODEX_FLEET_PLUGIN}`));
-  line(info('Your daemon and other steps are intact. Continuing.'));
-}
-
 // --- final summary + copy-paste hand-off -------------------------------------------------------
 function endScreen({ ttyFd, summary, chosenPort, chosenBroker }) {
   line('');

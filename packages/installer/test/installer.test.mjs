@@ -116,13 +116,16 @@ test('update path: daemon present → drives plugin CLIs, creates human identity
   assert.match(calls, /codex plugin add ours@ours-codex-marketplace/, 'codex plugin add');
   assert.match(calls, /npm i -g @ours\.network\/codex@latest/, 'ours-codex launcher installed with the codex plugin');
   assert.match(out, /AUTO wake-up/, 'explains what ours-codex is (background wake vs blocking)');
-  // ours-fleet: CLI + host setup, AND the fleet HARNESS PLUGIN installed into each harness.
+  // ours-fleet: CLI + host setup. The already-installed core ours plugin points
+  // agents at `ours-fleet docs`; no second fleet-specific plugin is needed.
   assert.match(calls, /npm i -g @ours\.network\/fleet@latest/, 'fleet package installed');
   assert.match(calls, /ours-fleet init/, 'fleet host setup run');
-  assert.match(calls, /claude plugin install fleet@ours\.network/, 'Claude fleet plugin installed');
-  assert.match(calls, /codex plugin add ours-fleet@ours-codex-marketplace/, 'Codex fleet plugin installed');
-  assert.match(out, /Claude Code fleet plugin installed/, 'reports the Claude fleet plugin');
-  assert.match(out, /Codex fleet plugin installed/, 'reports the Codex fleet plugin');
+  assert.doesNotMatch(calls, /claude plugin install fleet@ours\.network/,
+    'does not install the retired Claude fleet plugin');
+  assert.doesNotMatch(calls, /codex plugin add ours-fleet@ours-codex-marketplace/,
+    'does not install the retired Codex fleet plugin');
+  assert.match(out, /ours-fleet docs/,
+    'reports the authoritative discovery command provided by the core skill');
   // Telegram default No → skipped, and its hand-off step drops out.
   assert.doesNotMatch(calls, /ours-tg-connector/, 'telegram skipped by default');
   assert.match(out, /Telegram connector.*skipped/, 'summary shows telegram skipped');
