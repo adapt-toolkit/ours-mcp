@@ -18,6 +18,7 @@ const INSTALL_SH = join(PKG, 'install.sh');
 
 // Build a temp bin dir of fakes that append "<name> <args>" to $CALLLOG and behave per opts.
 //   opts.daemon      : 'installed' (default) | 'absent'
+//   opts.daemonState : 'managed' (default) | 'stopped' | 'external'
 //   opts.daemonPort  : port to advertise in `ours-mcp status` (default 3050)
 //   opts.codex       : 'ok' (default) | 'unsafe' (its --version returns junk, non-zero)
 //   opts.noHarness   : omit claude+codex bins entirely (nothing detected)
@@ -28,6 +29,7 @@ const INSTALL_SH = join(PKG, 'install.sh');
 //   opts.hermesPresent : create <HOME>/.hermes so Hermes is detected (config-dir based, handled in runInstall)
 function fakeBins(dir, opts = {}) {
   const daemonInstalled = opts.daemon !== 'absent';
+  const daemonState = opts.daemonState || 'managed';
   const port = opts.daemonPort || 3050;
   const write = (n, body) => { const p = join(dir, n); writeFileSync(p, `#!/bin/bash\nprintf '%s %s\\n' "${n}" "$*" >> "$CALLLOG"\n${body}`); chmodSync(p, 0o755); };
 
@@ -44,7 +46,13 @@ function fakeBins(dir, opts = {}) {
     : `[ "$1" = "create-root" ] && { echo "created root identity"; exit 0; }\n`;
   write('ours-mcp',
     mcpVersion +
-    `[ "$1" = "status" ] && { echo "ours-mcp: running"; echo "  url:    http://localhost:${port}/mcp (reachable)"; exit 0; }\n` +
+    `[ "$1" = "status" ] && { ${
+      daemonState === 'stopped'
+        ? 'echo "ours-mcp: stopped"; exit 1;'
+        : daemonState === 'external'
+          ? `echo "ours-mcp: running (no pidfile — external launcher)"; echo "  url:    http://localhost:${port}/mcp (reachable)"; exit 0;`
+          : `echo "ours-mcp: running"; echo "  pid:    4242"; echo "  url:    http://localhost:${port}/mcp (reachable)"; exit 0;`
+    } }\n` +
     `[ "$1" = "voice-status" ] && { if [ -f "$CALLLOG.voice-ready" ]; then echo '{"ready":true,"provider":"deepgram","apiKey":"configured","keySource":"config"}'; exit 0; else exit 1; fi; }\n` +
     `[ "$1" = "voice-setup" ] && { ${opts.voiceRestartTrace
       ? `echo "voice-provider-selected" >> "$CALLLOG"; echo "voice-config-written" >> "$CALLLOG"; echo "ours-mcp restart (voice-setup)" >> "$CALLLOG";`
@@ -303,7 +311,21 @@ function ptyBins(opts = {}) {
   const log = join(tmp, 'calls.log');
   writeFileSync(log, '');
   fakeBins(bin, { daemon: 'installed', ...opts });
-  return { tmp, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLLOG: log, HOME: tmp, SHELL: '/bin/bash' } };
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith('OURS_')),
+  );
+  return {
+    tmp,
+    env: {
+      ...inherited,
+      PATH: `${bin}:${process.env.PATH}`,
+      CALLLOG: log,
+      HOME: tmp,
+      SHELL: '/bin/bash',
+      OURS_CONFIG: join(tmp, '.ours', 'config.json'),
+      OURS_STATE_DIR: join(tmp, '.ours'),
+    },
+  };
 }
 
 test('Ctrl+C at a prompt aborts cleanly (exit 130 + message), never hangs',
@@ -480,7 +502,9 @@ if st is None:
         except ChildProcessError:st="reaped";break
         if w:st=s;break
         time.sleep(0.05)
+text=buf.decode(errors="replace")
 print("EXIT",os.WEXITSTATUS(st)) if isinstance(st,int) and os.WIFEXITED(st) else print("NOEXIT",st)
+print("EXTERNAL_HANDOFF" if "restart its external launcher to load the update" in text else "NO_EXTERNAL_HANDOFF")
 `;
 test('update asks/configures voice before one restart and suppresses the normal update restart',
   { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
@@ -499,6 +523,41 @@ test('update asks/configures voice before one restart and suppresses the normal 
     'accepted voice setup owns exactly one restart');
   assert.doesNotMatch(calls, /^ours-mcp restart$/m,
     'installer does not add a redundant update restart after canonical voice setup');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('stopped-daemon update configures voice then preserves one normal update restart',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const { tmp, env } = ptyBins({ updateVersion: true, daemonState: 'stopped' });
+  const out = execFileSync('python3', ['-c', PTY_UPDATE_WITH_VOICE, INSTALL_MJS, 'accept'], {
+    encoding: 'utf8', timeout: 120_000, env,
+  });
+  assert.match(out, /EXIT 0/);
+  assert.match(out, /NO_EXTERNAL_HANDOFF/, 'stopped daemon remains installer-managed');
+  const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
+  const configuredAt = calls.indexOf('ours-mcp voice-setup');
+  const restartAt = calls.indexOf('ours-mcp restart');
+  assert.ok(configuredAt >= 0, 'canonical voice setup ran while the daemon was stopped');
+  assert.ok(restartAt > configuredAt, 'the normal update restart follows config-only voice setup');
+  assert.equal(calls.match(/^ours-mcp restart$/gm)?.length, 1,
+    'stopped update keeps exactly one normal update restart');
+  assert.doesNotMatch(calls, /^ours-mcp restart \(voice-setup\)$/m,
+    'stopped canonical setup does not claim a managed restart');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('external-daemon update leaves restart ownership with the external launcher',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const { tmp, env } = ptyBins({ updateVersion: true, daemonState: 'external' });
+  const out = execFileSync('python3', ['-c', PTY_UPDATE_WITH_VOICE, INSTALL_MJS, 'accept'], {
+    encoding: 'utf8', timeout: 120_000, env,
+  });
+  assert.match(out, /EXIT 0/);
+  assert.match(out, /EXTERNAL_HANDOFF/, 'operator receives the external-launcher restart handoff');
+  const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
+  assert.match(calls, /^ours-mcp voice-setup$/m, 'canonical config-only voice setup ran');
+  assert.doesNotMatch(calls, /^ours-mcp restart(?: \(voice-setup\))?$/m,
+    'installer does not seize restart ownership from an external launcher');
   rmSync(tmp, { recursive: true, force: true });
 });
 

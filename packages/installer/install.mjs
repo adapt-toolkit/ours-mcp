@@ -88,7 +88,12 @@ async function actSpin(label, desc, fn) {
 // --- daemon probes (always safe to run — read-only) --------------------------------------------
 const daemonVersionLine = () => (run('ours-mcp', ['--version'], { capture: true }).out.split('\n')[0] || '').trim();
 const daemonStatusText = () => run('ours-mcp', ['status'], { capture: true }).out;
-const daemonRunning = () => run('ours-mcp', ['status'], { capture: true }).code === 0;
+function daemonLifecycleState() {
+  const status = run('ours-mcp', ['status'], { capture: true });
+  if (!status.ok) return 'stopped';
+  return /^\s*pid:\s*\d+/m.test(status.out) ? 'managed' : 'external';
+}
+const daemonRunning = () => daemonLifecycleState() !== 'stopped';
 const globalVersion = (pkg) => {
   const ls = run(NPM, ['ls', '-g', pkg], { capture: true }).out;
   const m = ls.match(new RegExp(pkg.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') + '@([0-9][0-9.]*)'));
@@ -337,7 +342,7 @@ async function main() {
   // a successful canonical voice-setup owns that one restart/readiness check.
   // Declining, headless skipping, or an already-complete setup leaves the
   // caller's normal start/restart lifecycle untouched.
-  const offerVoiceSetup = ({ readinessAfterStart = false } = {}) => {
+  const offerVoiceSetup = ({ readinessAfterStart = false, daemonState = 'stopped' } = {}) => {
     line(heading('Voice messages'));
     const cfgBefore = readConfigObject();
     const probed = daemonVoiceCapability();
@@ -401,7 +406,14 @@ async function main() {
       record({ key: 'voice', label: 'Voice transcription', state: 'failed', note: 'readiness check failed' });
     }
     cont();
-    return { setupRan: true, restartHandled: true };
+    // Exit 0 also covers config-only success for a stopped daemon or an
+    // externally launched daemon. Only a still-managed daemon proves that
+    // canonical setup owned apply + readiness and may suppress an update
+    // restart.
+    return {
+      setupRan: true,
+      restartHandled: daemonState === 'managed' && daemonLifecycleState() === 'managed',
+    };
   };
 
   // ============================================================================================
@@ -446,7 +458,8 @@ async function main() {
     record({ key: 'core', label: 'ours core (daemon)', state: started.ok ? 'installed' : 'failed', version: parseVersion(daemonVersionLine()), note: 'starts on boot' });
   } else {
     // Installed: offer an update; never re-ask config; reuse the running port everywhere.
-    const running = daemonRunning();
+    const daemonState = daemonLifecycleState();
+    const running = daemonState !== 'stopped';
     const upd = yes(`  ours core is installed (${before || '?'}) — check for an update now?`, false);
     let pendingUpdateRestart = false;
     let after = before;
@@ -456,10 +469,15 @@ async function main() {
       pendingUpdateRestart = !!(before && after && before !== after);
     }
 
-    const voice = offerVoiceSetup();
+    const voice = offerVoiceSetup({ daemonState });
     if (pendingUpdateRestart && !voice.restartHandled) {
-      await act(`ours-mcp restart (now v${after})`, async () => { if (!run('ours-mcp', ['restart']).ok) run('ours-mcp', ['start']); return { ok: true }; });
-      line(ok(`ours core updated (v${before} → v${after}) and restarted. No problems.`));
+      const restartState = daemonLifecycleState();
+      if (restartState === 'external') {
+        line(warn(`ours core updated (v${before} → v${after}); restart its external launcher to load the update.`));
+      } else {
+        await act(`ours-mcp restart (now v${after})`, async () => { if (!run('ours-mcp', ['restart']).ok) run('ours-mcp', ['start']); return { ok: true }; });
+        line(ok(`ours core updated (v${before} → v${after}) and restarted. No problems.`));
+      }
     } else if (pendingUpdateRestart) {
       const voiceFailed = summary.find((entry) => entry.key === 'voice')?.state === 'failed';
       line(voiceFailed
