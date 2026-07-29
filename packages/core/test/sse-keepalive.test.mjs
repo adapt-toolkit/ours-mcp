@@ -84,7 +84,13 @@ async function startServer(keepaliveMs) {
   srv.requestTimeout = 0; // as the daemon does, so Node's own 300s timer is not the thing under test
   const port = await freePort();
   await new Promise((r) => srv.listen(port, '127.0.0.1', r));
-  return { port, close: () => new Promise((r) => srv.close(r)) };
+  // closeAllConnections() first: a held-open SSE stream keeps the server's
+  // connection list non-empty, and srv.close() waits for it — so without this the
+  // teardown hangs forever and every later test in the file silently never runs.
+  return {
+    port,
+    close: () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r); }),
+  };
 }
 
 async function initSession(port) {
@@ -203,11 +209,14 @@ if (process.env.OURS_SLOW_SSE_TEST === '1') {
   // dies in the field — and report how long it survived while completely idle.
   async function surviveIdle(port, sid, ms) {
     const t0 = Date.now();
+    const ac = new AbortController();
+    let reader = null;
     try {
       const r = await fetch(`http://127.0.0.1:${port}/mcp`, {
         headers: { Accept: 'text/event-stream', 'mcp-session-id': sid, 'mcp-protocol-version': '2025-03-26' },
+        signal: ac.signal,
       });
-      const reader = r.body.getReader();
+      reader = r.body.getReader();
       const deadline = Date.now() + ms;
       for (;;) {
         const left = deadline - Date.now();
@@ -218,6 +227,10 @@ if (process.env.OURS_SLOW_SSE_TEST === '1') {
       }
     } catch (e) {
       return { survivedMs: Date.now() - t0, error: String(e && e.message ? e.message : e) };
+    } finally {
+      // Release the stream, or the server-side teardown below blocks on it.
+      try { await reader?.cancel(); } catch { /* already gone */ }
+      try { ac.abort(); } catch { /* already aborted */ }
     }
   }
 
