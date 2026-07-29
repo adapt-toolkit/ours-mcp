@@ -314,6 +314,8 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
 
   // ---- upstream lifecycle ---------------------------------------------------
   let up: StreamableHTTPClientTransport | null = null;
+  /** Read `up` without TS narrowing it to null (it is assigned inside openUpstream). */
+  const currentUp = (): StreamableHTTPClientTransport | null => up;
   let upReady = false;
   let shuttingDown = false;
   let reconnecting = false;
@@ -714,6 +716,18 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   process.on('SIGINT', () => void shutdown(0));
   process.on('SIGTERM', () => void shutdown(0));
 
+  // Dying silently is the failure mode being fixed everywhere else here, so do not
+  // let the proxy itself do it. Node's default for an unhandled rejection is to
+  // exit 1, which downstream sees only as "the connector went away", with no reason
+  // recorded anywhere. Log loudly and keep serving: a proxy still up with one
+  // failed operation is strictly better than one that vanished without a trace.
+  process.on('unhandledRejection', (reason) => {
+    log('UNHANDLED REJECTION (proxy stays up):', reason instanceof Error ? (reason.stack ?? reason.message) : String(reason));
+  });
+  process.on('uncaughtException', (err) => {
+    log('UNCAUGHT EXCEPTION (proxy stays up):', err?.stack ?? String(err));
+  });
+
   // Read the daemon's self-report (non-blocking: a missing/old daemon must not
   // break startup). If the package versions differ, set versionAdvisory — it
   // will be appended to the MCP initialize result's instructions so the model
@@ -750,8 +764,21 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
       catch (e) { log('initial upstream connect failed, retrying:', String(e)); await sleep(delay); delay = Math.min(Math.floor(delay * 1.5), 10_000); }
     }
     upReady = true;
+    // Check the transport instead of asserting `up!` on every iteration. This loop
+    // awaits, and dropUpstream() can null `up` during that await — the next
+    // iteration would then evaluate `.send` on null and throw a SYNCHRONOUS
+    // TypeError. The trailing .catch() structurally cannot catch it: the throw
+    // happens on property access, before send() returns a promise. Inside this
+    // void-discarded async IIFE that becomes an unhandled rejection, and Node's
+    // default for that is to exit 1. (The identical line in reconnect() survives
+    // only because it sits inside a try/catch.) Unflushed frames are re-queued
+    // rather than dropped.
     const queued = pendingToUp.splice(0);
-    for (const m of queued) await up!.send(m).catch((err) => log('flush failed:', String(err)));
+    for (let i = 0; i < queued.length; i++) {
+      const t = currentUp();
+      if (!t) { pendingToUp.unshift(...queued.slice(i)); break; }
+      await t.send(queued[i]).catch((err: unknown) => log('flush failed:', String(err)));
+    }
     log(`upstream ready — stdio ⇄ ${url.href}`);
   })();
 
