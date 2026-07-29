@@ -290,6 +290,28 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     sweeper.unref?.();
   }
 
+  // ---- notification-stream escalation (DEFECT B) ----------------------------
+  // Anti-churn: A2A-8 deliberately made transient SSE errors log-only so a blip
+  // could not churn the session and lose the binding. That intent is preserved —
+  // we escalate ONLY on the SDK's terminal "retries exhausted" message, never on a
+  // transient one, and a cooldown stops escalations chaining into a hot loop.
+  const ESCALATION_COOLDOWN_MS = 60_000;
+  const MAX_ESCALATIONS = 3;
+  let lastEscalation = 0;
+  let escalations = 0;
+
+  // Tell the MODEL, not just stderr. A deaf agent with a quiet log is the failure
+  // mode we are fixing; loud has to mean loud in the channel someone is reading.
+  function notifyDownstream(level: 'error' | 'warning', text: string): void {
+    down
+      .send({
+        jsonrpc: '2.0',
+        method: 'notifications/message',
+        params: { level, logger: 'ours-proxy', data: text },
+      } as unknown as JSONRPCMessage)
+      .catch((e) => log('downstream notify failed:', String(e)));
+  }
+
   // ---- upstream lifecycle ---------------------------------------------------
   let up: StreamableHTTPClientTransport | null = null;
   let upReady = false;
@@ -558,7 +580,37 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     // lose the binding. Genuine session death still recovers: a daemon restart
     // surfaces on the next POST via the failed-send path in forwardUp (re-queue +
     // dropUpstream), and a full transport close still hits onclose below.
-    t.onerror = (e) => log('upstream error:', String(e));
+    //
+    // …but an EXHAUSTED notification stream is NOT transient, and must not stay a
+    // silent permanent death (DEFECT B). The SDK's terminal message is a stable
+    // string; on it we escalate to a real reconnect, which routes through the
+    // EXISTING single-flight reconnect() and its 500ms→10s backoff rather than a
+    // parallel recovery path. Anti-churn is preserved by a cooldown, so escalations
+    // cannot chain into a hot loop, and by a cap — after which we go LOUD rather
+    // than quiet: stderr is loud to nobody who is watching, so we also tell the
+    // MODEL, downstream, that its notifications are dead.
+    t.onerror = (e) => {
+      const msg = String(e);
+      log('upstream error:', msg);
+      if (!/Maximum reconnection attempts \(\d+\) exceeded/.test(msg)) return;
+      const now = Date.now();
+      if (now - lastEscalation < ESCALATION_COOLDOWN_MS) {
+        log(`notification stream exhausted again within cooldown — not escalating (${Math.round((now - lastEscalation) / 1000)}s since last)`);
+        return;
+      }
+      lastEscalation = now;
+      escalations++;
+      if (escalations > MAX_ESCALATIONS) {
+        log(`NOTIFICATION STREAM DEAD — ${escalations - 1} reconnect escalations exhausted; server→client notifications are NOT arriving`);
+        notifyDownstream(
+          'error',
+          `ours proxy: the server→client notification stream could not be re-established after ${escalations - 1} attempts. Tool calls still work, but you will NOT receive new-mail or other server notifications until this session reconnects. Treat any "waiting for a message" as unreliable.`,
+        );
+        return;
+      }
+      log(`notification stream exhausted its retries — escalating to a full reconnect (${escalations}/${MAX_ESCALATIONS})`);
+      dropUpstream(t, 'notification stream exhausted');
+    };
     t.onclose = () => dropUpstream(t, 'closed');
   }
 
@@ -568,6 +620,22 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   async function openUpstream(): Promise<void> {
     if (opts.ensureDaemon) await opts.ensureDaemon().catch((e) => log('ensureDaemon:', String(e)));
     const t = new StreamableHTTPClientTransport(url, {
+      // DEFECT B. The standalone GET SSE IS reconnectable, but the SDK default
+      // maxRetries is 2 — i.e. two CONSECUTIVE failed reconnect attempts, at
+      // 1000ms and 1500ms, so it gives up ~2.5s in. (The counter resets to 0 on
+      // each fresh stream failure, so this is a consecutive-failure budget, not a
+      // per-process one.) Under the observed pressure — nine disconnects in forty
+      // minutes — that budget is walked to exhaustion, and on exhaustion the SDK
+      // calls onerror and stops: notifications die permanently while tool calls
+      // keep working. An agent in that state is deaf but not dead, with no signal
+      // to anyone. 5 retries with the same backoff buys ~15s of in-place recovery
+      // instead of ~2.5s, and escalation below handles the rest.
+      reconnectionOptions: {
+        initialReconnectionDelay: 1000,
+        maxReconnectionDelay: 30_000,
+        reconnectionDelayGrowFactor: 1.5,
+        maxRetries: 5,
+      },
       requestInit: {
         headers: {
           'x-ours-lease-token': leaseToken,
@@ -620,6 +688,10 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
         const queued = pendingToUp.splice(0);
         for (const m of queued) await up!.send(m).catch((e) => log('flush failed:', String(e)));
         log('upstream reconnected', boundIdentity ? `(re-bound "${boundIdentity}")` : '');
+        // A healthy session earns a fresh escalation budget — otherwise the cap
+        // would be a per-process total and a long-lived proxy would eventually go
+        // loud over unrelated blips spread across hours.
+        escalations = 0;
         reconnecting = false;
         return;
       } catch (e) {
