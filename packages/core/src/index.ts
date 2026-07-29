@@ -4607,6 +4607,20 @@ async function main() {
     for (const id of identities.values()) {
       try { saveState(id); } catch (err) { log(`[${id.name}] shutdown save failed:`, String(err)); }
     }
+    // READ THIS BEFORE MAKING SHUTDOWN GRACEFUL.
+    // The SSE keepalive holds every idle client stream open INDEFINITELY. Before
+    // it existed, an idle stream self-terminated at ~300s (undici's inter-chunk
+    // bodyTimeout), so the connection list drained on its own and an awaited
+    // graceful shutdown would have worked. It no longer does.
+    // Today we are safe only because close() below is NOT awaited and process.exit
+    // runs on the very next line — an invariant that is easy to remove for
+    // excellent reasons. If you convert this to an awaited drain WITHOUT this
+    // line, the daemon will hang on every stop, and hang WORSE THE MORE IDLE
+    // CLIENTS ARE ATTACHED. Measured: an awaited close() with one keepalive-held
+    // stream was still blocked after 3000ms; unawaited returned in 0ms.
+    // closeAllConnections() destroys those sockets first, which is what makes a
+    // graceful shutdown safe rather than accidentally-safe.
+    httpServer.closeAllConnections?.();
     httpServer.close();
     process.exit(0);
   };
