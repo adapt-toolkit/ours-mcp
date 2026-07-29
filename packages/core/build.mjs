@@ -112,6 +112,16 @@ await build({
   outfile: resolve(dist, 'startup-progress.js'),
 });
 
+// SSE keepalive (the 300s inter-chunk-timeout fix). index.ts imports it via
+// './sse-keepalive.js'; emit a standalone module too so test/sse-keepalive.test.mjs
+// can drive the REAL shipped function against a real HTTP server + the real MCP
+// transport, rather than a copy of it living in the test.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/sse-keepalive.ts')],
+  outfile: resolve(dist, 'sse-keepalive.js'),
+});
+
 // Ship ONLY the compiled MUFL packet (*.muflo) — never the .mu/.mm/.mufl source.
 // The MCP server loads the .muflo at runtime from dist/mufl_code/ by hash.
 const muflSrc = resolve(root, 'mufl_code');

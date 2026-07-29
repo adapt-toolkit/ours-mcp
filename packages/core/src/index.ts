@@ -113,6 +113,7 @@ import {
   createStartupProgressReporter,
   type StartupProgressReporter,
 } from './startup-progress.js';
+import { armSseKeepalive } from './sse-keepalive.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -4345,6 +4346,66 @@ async function main() {
   const sessionReaper = setInterval(reapDeadSessions, 60_000);
   sessionReaper.unref?.();
 
+  // ---- undeliverable-response detection (diagnostics only) --------------------
+  // When a POST SSE stream is gone, the SDK skips the write SILENTLY
+  // (webStandardStreamableHttp.js: `stream` is undefined so the write block is not
+  // entered) and then throws `No connection established for request ID: <id>` once
+  // all responses for that stream are ready; Protocol turns that into
+  // `Failed to send response: …` on server.onerror. We set no onerror today, so the
+  // daemon KNOWS by exact request id that it produced an answer nobody received —
+  // and discards that knowledge.
+  //
+  // This is INSTRUMENTATION, NOT A FIX. It cannot deliver the lost response: if the
+  // stream is dead there is nowhere for a daemon-generated error to go either. Its
+  // value is that it covers EVERY client — plugin, proxy and third-party alike —
+  // and turns an invisible loss into evidence about a cause we do not yet know.
+  //
+  // Bounded so it cannot grow: the map records id -> method for in-flight requests
+  // only, capped and TTL-pruned (we never observe completion, so it must self-trim).
+  const REQ_META_MAX = 1000;
+  const REQ_META_TTL_MS = 10 * 60_000;
+  const requestMeta = new Map<string, { method: string; at: number }>();
+  const noteRequestMeta = (sid: string, body: unknown): void => {
+    const list = Array.isArray(body) ? body : [body];
+    for (const m of list) {
+      const msg = m as { id?: unknown; method?: unknown } | null;
+      if (!msg || typeof msg !== 'object') continue;
+      if (msg.id === undefined || msg.id === null || typeof msg.method !== 'string') continue;
+      requestMeta.set(`${sid}:${String(msg.id)}`, { method: msg.method, at: Date.now() });
+    }
+    if (requestMeta.size > REQ_META_MAX) {
+      const cutoff = Date.now() - REQ_META_TTL_MS;
+      for (const [k, v] of requestMeta) {
+        if (v.at < cutoff) requestMeta.delete(k);
+        if (requestMeta.size <= REQ_META_MAX) break;
+      }
+      // Still over cap after TTL pruning: drop oldest-first (Map preserves order).
+      while (requestMeta.size > REQ_META_MAX) {
+        const oldest = requestMeta.keys().next();
+        if (oldest.done) break;
+        requestMeta.delete(oldest.value);
+      }
+    }
+  };
+
+  // Must never throw: this runs INSIDE an error handler.
+  const reportUndeliverable = (sid: string, err: unknown): void => {
+    try {
+      const text = err instanceof Error ? err.message : String(err);
+      const m = /No connection established for request ID:\s*(\S+)/.exec(text);
+      if (!m) return; // some other transport error — not our concern here
+      const rid = m[1];
+      const meta = requestMeta.get(`${sid}:${rid}`);
+      requestMeta.delete(`${sid}:${rid}`);
+      log(
+        `UNDELIVERABLE RESPONSE session=${sid.slice(0, 8)}… request_id=${rid} ` +
+          `method=${meta?.method ?? 'unknown'} ` +
+          `age_ms=${meta ? Date.now() - meta.at : 'unknown'} at=${new Date().toISOString()} ` +
+          `— the answer was produced but its stream was already gone`,
+      );
+    } catch { /* diagnostics must never escalate */ }
+  };
+
   const httpServer = createHttpServer(async (req, res) => {
     const url = new URL(req.url!, `http://localhost:${PORT}`);
     // Unauthenticated liveness/introspection: lets `ours-mcp watch` learn the
@@ -4426,7 +4487,9 @@ async function main() {
         const headers = { token: hdrToken, pid: Number.isInteger(hdrPid) ? hdrPid : undefined };
         if (sessionId && transports[sessionId]) {
           sessionHeaders.set(sessionId, headers);
+          noteRequestMeta(sessionId, body);
           enterInflight(sessionId);
+          armSseKeepalive(res);
           try { await transports[sessionId].handleRequest(req, res, body); }
           finally { leaveInflight(sessionId); }
         } else if (!sessionId && isInitializeRequest(body)) {
@@ -4444,6 +4507,11 @@ async function main() {
           });
           // Per-container tools resolve their identity from this transport's id.
           const server = createMcpServer(() => transport.sessionId ?? 'pending');
+          // Capture the "produced an answer nobody could receive" signal that was
+          // being discarded. Protocol chains any pre-existing transport.onerror, but
+          // the send-failure path reports on the SERVER's onerror (Protocol._onerror),
+          // so that is the hook we need. Set before connect().
+          server.server.onerror = (err) => reportUndeliverable(transport.sessionId ?? 'pending', err);
           transport.onclose = () => {
             const sid = transport.sessionId;
             if (sid) {
@@ -4464,6 +4532,7 @@ async function main() {
             // necessary nor safe to call from within onclose.
           };
           await server.connect(transport);
+          armSseKeepalive(res);
           await transport.handleRequest(req, res, body);
         } else {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -4477,6 +4546,7 @@ async function main() {
           return;
         }
         enterInflight(sessionId);
+        armSseKeepalive(res); // the standalone notification SSE — the long-lived one
         try { await transports[sessionId].handleRequest(req, res); }
         finally { leaveInflight(sessionId); }
       } else if (req.method === 'DELETE') {
