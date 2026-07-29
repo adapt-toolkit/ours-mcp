@@ -209,8 +209,113 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     } catch { /* dir absent on first run — nothing to prune */ }
   }
 
+  // ---- in-flight request tracking / fail-back (DEFECT A) --------------------
+  // A request that POSTed successfully but whose response stream then broke is
+  // never retried by the SDK (a POST stream has isReconnectable=false and, with no
+  // eventStore, no priming event, so needsReconnect=false) and never surfaces:
+  // transport.onerror fires but carries NO request id, so nothing here can
+  // correlate it. The caller waits forever.
+  //
+  // WHAT THIS IS AND IS NOT. This does NOT prevent the hang and makes no claim
+  // about what causes it — as of 2026-07-29 the cause is genuinely unknown (nine
+  // captured SSE disconnects produced exactly one hang, which killed the
+  // reconnect-race theory). It converts an unbounded silent wait into a bounded,
+  // visible failure. That is correct under EVERY candidate cause, which is
+  // precisely why it is the safe thing to build while the cause is unknown — and
+  // the waited_ms it reports is evidence for diagnosing the real one.
+  //
+  // SCOPE, STATED HONESTLY: this protects callers on the PROXY path only. Clients
+  // that reach the daemon through the MCP plugin get nothing from it. It is not a
+  // fix for any particular third-party deployment's hang.
+  //
+  // WE NEVER REPLAY THE REQUEST. Replay is not safe for arbitrary tools —
+  // get_messages MARKS MAIL READ and delivers exactly once, so a blind retry could
+  // consume messages that reach nobody, turning a hang into silent data loss. If
+  // replay is ever wanted it starts from an explicit allowlist of proven-idempotent
+  // tools, never a denylist. A clean error lets the caller decide with knowledge we
+  // do not have here.
+  //
+  // Default 120s is deliberately ABOVE the MCP SDK's own 60s client timeout
+  // (DEFAULT_REQUEST_TIMEOUT_MSEC) so we never pre-empt a decision the caller would
+  // make for itself; an SDK-based client fails on its own first. The beneficiary is
+  // a caller with no timeout of its own, plus our stderr visibility. Measured tool
+  // round-trips on a live daemon are 3–43ms, so the headroom is three orders of
+  // magnitude — this cannot fire on a healthy call.
+  const REQUEST_TIMEOUT_MS = (() => {
+    const raw = (process.env.OURS_REQUEST_TIMEOUT_MS ?? '').trim();
+    if (raw === '') return 120_000;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 120_000; // 0 disables the watchdog
+  })();
+
+  type InFlight = {
+    method: string;
+    sentAt: number;
+    deadline: number;
+    transport: StreamableHTTPClientTransport | null; // which upstream actually carried it
+    progressToken?: string | number;
+  };
+  const inFlight = new Map<string | number, InFlight>();
+  const progressTokens = new Map<string | number, string | number>(); // progressToken -> request id
+
+  // Fail a request back to Claude as a real JSON-RPC error. MCP's own codes:
+  // -32001 RequestTimeout, -32000 ConnectionClosed.
+  function failRequest(id: string | number, code: number, reason: string): void {
+    const e = inFlight.get(id);
+    if (!e) return;
+    inFlight.delete(id);
+    if (e.progressToken !== undefined) progressTokens.delete(e.progressToken);
+    const waitedMs = Date.now() - e.sentAt;
+    log(`FAILING BACK request id=${String(id)} method=${e.method} waited_ms=${waitedMs} reason=${reason}`);
+    down
+      .send({
+        jsonrpc: '2.0',
+        id,
+        error: {
+          code,
+          message: `ours proxy: no response from the ours daemon for "${e.method}" after ${waitedMs}ms (${reason}). The request was NOT retried — retry it yourself if it is safe to repeat.`,
+          data: { reason, method: e.method, waitedMs },
+        },
+      } as unknown as JSONRPCMessage)
+      .catch((err) => log('fail-back send failed:', String(err)));
+  }
+
+  // PRIMARY trigger: the watchdog. Cause-agnostic — it does not care why the answer
+  // never came. A single sweeper rather than a timer per request.
+  if (REQUEST_TIMEOUT_MS > 0) {
+    const sweeper = setInterval(() => {
+      const now = Date.now();
+      for (const [id, e] of [...inFlight]) if (e.deadline <= now) failRequest(id, -32001, 'watchdog timeout');
+    }, 1000);
+    sweeper.unref?.();
+  }
+
+  // ---- notification-stream escalation (DEFECT B) ----------------------------
+  // Anti-churn: A2A-8 deliberately made transient SSE errors log-only so a blip
+  // could not churn the session and lose the binding. That intent is preserved —
+  // we escalate ONLY on the SDK's terminal "retries exhausted" message, never on a
+  // transient one, and a cooldown stops escalations chaining into a hot loop.
+  const ESCALATION_COOLDOWN_MS = 60_000;
+  const MAX_ESCALATIONS = 3;
+  let lastEscalation = 0;
+  let escalations = 0;
+
+  // Tell the MODEL, not just stderr. A deaf agent with a quiet log is the failure
+  // mode we are fixing; loud has to mean loud in the channel someone is reading.
+  function notifyDownstream(level: 'error' | 'warning', text: string): void {
+    down
+      .send({
+        jsonrpc: '2.0',
+        method: 'notifications/message',
+        params: { level, logger: 'ours-proxy', data: text },
+      } as unknown as JSONRPCMessage)
+      .catch((e) => log('downstream notify failed:', String(e)));
+  }
+
   // ---- upstream lifecycle ---------------------------------------------------
   let up: StreamableHTTPClientTransport | null = null;
+  /** Read `up` without TS narrowing it to null (it is assigned inside openUpstream). */
+  const currentUp = (): StreamableHTTPClientTransport | null => up;
   let upReady = false;
   let shuttingDown = false;
   let reconnecting = false;
@@ -256,6 +361,23 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
             pendingBind.set(msg.id as string | number, params.arguments.name);
           }
         }
+        // Track it for the fail-back. Only frames that actually go upstream are
+        // registered — a locally-absorbed re-initialize `continue`s above and never
+        // reaches here, and our synthetic frames go through forwardUp directly
+        // rather than through this handler, so neither is ever tracked.
+        if (REQUEST_TIMEOUT_MS > 0) {
+          const id = msg.id as string | number;
+          const meta = (msg.params as { _meta?: { progressToken?: string | number } } | undefined)?._meta;
+          const now = Date.now();
+          inFlight.set(id, {
+            method: typeof msg.method === 'string' ? msg.method : 'unknown',
+            sentAt: now,
+            deadline: now + REQUEST_TIMEOUT_MS,
+            transport: null,
+            progressToken: meta?.progressToken,
+          });
+          if (meta?.progressToken !== undefined) progressTokens.set(meta.progressToken, id);
+        }
       }
       toForward.push(msg);
     }
@@ -295,15 +417,55 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     } as unknown as JSONRPCMessage);
   }
 
+  // Record which upstream transport actually carried each tracked request. Set at
+  // SEND time, not registration time: a frame buffered while upstream is down goes
+  // out on the NEXT transport, and must not be swept when the old one dies.
+  function markSentOn(raw: JSONRPCMessage, t: StreamableHTTPClientTransport): void {
+    if (REQUEST_TIMEOUT_MS <= 0) return;
+    for (const m of asList(raw)) {
+      const id = (m as AnyMsg).id as string | number | undefined;
+      if (id === undefined) continue;
+      const e = inFlight.get(id);
+      if (e) e.transport = t;
+    }
+  }
+
   function forwardUp(raw: JSONRPCMessage): void {
     if (upReady && up) {
       const sentOn = up;
+      markSentOn(raw, sentOn);
       up.send(raw).catch((e) => {
-        // frame never reached daemon — re-queue for the reconnect replay, then
-        // drop the dead upstream. A daemon restart surfaces HERE (failed POST,
-        // "No valid session ID"), NOT as transport.onclose.
+        // A daemon restart surfaces HERE (failed POST, "No valid session ID"), NOT
+        // as transport.onclose. Drop the dead upstream so we reconnect.
+        //
+        // *** DO NOT RE-QUEUE REQUESTS HERE. *** This used to push `raw` onto
+        // pendingToUp unconditionally, on the premise that a rejected send means
+        // "the frame never reached the daemon". THAT PREMISE IS FALSE: send() also
+        // rejects when the POST was ACCEPTED and the daemon ran the tool, but the
+        // response stream then broke. reconnect() replays pendingToUp, so that path
+        // could silently execute a tool call TWICE — and for get_messages, which
+        // marks mail read and delivers exactly once, the second run consumes
+        // messages that reach nobody. A hang turned into silent data loss.
+        // (Caught by test/proxy-request-failback.test.mjs, which observed the same
+        // request arriving at the daemon twice.)
+        //
+        // So: notifications are fire-and-forget and safe to re-queue; requests are
+        // NOT, and are failed back to the caller instead. The caller knows whether
+        // repeating is safe; we do not.
         log('upstream send failed:', String(e));
-        pendingToUp.push(raw);
+        const parts = asList(raw);
+        const replayable = parts.filter((m) => !isRequest(m as AnyMsg));
+        if (replayable.length) {
+          pendingToUp.push(
+            (Array.isArray(raw) ? replayable : replayable[0]) as unknown as JSONRPCMessage,
+          );
+        }
+        for (const m of parts) {
+          const msg = m as AnyMsg;
+          if (isRequest(msg) && inFlight.has(msg.id as string | number)) {
+            failRequest(msg.id as string | number, -32000, 'upstream send failed');
+          }
+        }
         dropUpstream(sentOn, 'send failed');
       });
     } else {
@@ -321,6 +483,17 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     log(`upstream dropped (${reason}) — reconnecting`);
     upReady = false; const old = up; up = null;
     try { void old?.close?.(); } catch {}
+    // SECONDARY trigger: a request that was carried by the transport we just tore
+    // down provably cannot be answered — its response stream died with it. Fail
+    // those now instead of making the caller wait out the watchdog. This is an
+    // OPTIMISATION on latency-to-error only, and is deliberately not relied upon:
+    // it is cause-specific, and the watchdog above is what actually guarantees the
+    // caller stops waiting.
+    if (old) {
+      for (const [id, e] of [...inFlight]) {
+        if (e.transport === old) failRequest(id, -32000, `upstream dropped (${reason})`);
+      }
+    }
     void reconnect();
   }
   // ---- upstream (daemon) → downstream (Claude) ------------------------------
@@ -329,8 +502,26 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
       const forward: AnyMsg[] = [];
       for (const m of asList(raw)) {
         const msg = m as AnyMsg;
+        // A progress notification means the request IS alive and being worked on.
+        // The SDK's own resetTimeoutOnProgress defaults to FALSE, so without this
+        // the watchdog would kill long calls the caller is happily waiting on —
+        // a correctness requirement, not a nicety.
+        if (msg.method === 'notifications/progress') {
+          const tok = (msg.params as { progressToken?: string | number } | undefined)?.progressToken;
+          if (tok !== undefined) {
+            const rid = progressTokens.get(tok);
+            const e = rid !== undefined ? inFlight.get(rid) : undefined;
+            if (e) e.deadline = Date.now() + REQUEST_TIMEOUT_MS;
+          }
+        }
         if (isResponse(msg)) {
           const id = msg.id as string | number;
+          // Answered — stop watching it.
+          const tracked = inFlight.get(id);
+          if (tracked) {
+            inFlight.delete(id);
+            if (tracked.progressToken !== undefined) progressTokens.delete(tracked.progressToken);
+          }
           // Capture the negotiated protocol version from any initialize result
           // (Claude's first one, and replayed ones), then mirror it upstream so
           // subsequent requests carry the mcp-protocol-version header.
@@ -391,7 +582,37 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     // lose the binding. Genuine session death still recovers: a daemon restart
     // surfaces on the next POST via the failed-send path in forwardUp (re-queue +
     // dropUpstream), and a full transport close still hits onclose below.
-    t.onerror = (e) => log('upstream error:', String(e));
+    //
+    // …but an EXHAUSTED notification stream is NOT transient, and must not stay a
+    // silent permanent death (DEFECT B). The SDK's terminal message is a stable
+    // string; on it we escalate to a real reconnect, which routes through the
+    // EXISTING single-flight reconnect() and its 500ms→10s backoff rather than a
+    // parallel recovery path. Anti-churn is preserved by a cooldown, so escalations
+    // cannot chain into a hot loop, and by a cap — after which we go LOUD rather
+    // than quiet: stderr is loud to nobody who is watching, so we also tell the
+    // MODEL, downstream, that its notifications are dead.
+    t.onerror = (e) => {
+      const msg = String(e);
+      log('upstream error:', msg);
+      if (!/Maximum reconnection attempts \(\d+\) exceeded/.test(msg)) return;
+      const now = Date.now();
+      if (now - lastEscalation < ESCALATION_COOLDOWN_MS) {
+        log(`notification stream exhausted again within cooldown — not escalating (${Math.round((now - lastEscalation) / 1000)}s since last)`);
+        return;
+      }
+      lastEscalation = now;
+      escalations++;
+      if (escalations > MAX_ESCALATIONS) {
+        log(`NOTIFICATION STREAM DEAD — ${escalations - 1} reconnect escalations exhausted; server→client notifications are NOT arriving`);
+        notifyDownstream(
+          'error',
+          `ours proxy: the server→client notification stream could not be re-established after ${escalations - 1} attempts. Tool calls still work, but you will NOT receive new-mail or other server notifications until this session reconnects. Treat any "waiting for a message" as unreliable.`,
+        );
+        return;
+      }
+      log(`notification stream exhausted its retries — escalating to a full reconnect (${escalations}/${MAX_ESCALATIONS})`);
+      dropUpstream(t, 'notification stream exhausted');
+    };
     t.onclose = () => dropUpstream(t, 'closed');
   }
 
@@ -401,6 +622,22 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   async function openUpstream(): Promise<void> {
     if (opts.ensureDaemon) await opts.ensureDaemon().catch((e) => log('ensureDaemon:', String(e)));
     const t = new StreamableHTTPClientTransport(url, {
+      // DEFECT B. The standalone GET SSE IS reconnectable, but the SDK default
+      // maxRetries is 2 — i.e. two CONSECUTIVE failed reconnect attempts, at
+      // 1000ms and 1500ms, so it gives up ~2.5s in. (The counter resets to 0 on
+      // each fresh stream failure, so this is a consecutive-failure budget, not a
+      // per-process one.) Under the observed pressure — nine disconnects in forty
+      // minutes — that budget is walked to exhaustion, and on exhaustion the SDK
+      // calls onerror and stops: notifications die permanently while tool calls
+      // keep working. An agent in that state is deaf but not dead, with no signal
+      // to anyone. 5 retries with the same backoff buys ~15s of in-place recovery
+      // instead of ~2.5s, and escalation below handles the rest.
+      reconnectionOptions: {
+        initialReconnectionDelay: 1000,
+        maxReconnectionDelay: 30_000,
+        reconnectionDelayGrowFactor: 1.5,
+        maxRetries: 5,
+      },
       requestInit: {
         headers: {
           'x-ours-lease-token': leaseToken,
@@ -453,6 +690,10 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
         const queued = pendingToUp.splice(0);
         for (const m of queued) await up!.send(m).catch((e) => log('flush failed:', String(e)));
         log('upstream reconnected', boundIdentity ? `(re-bound "${boundIdentity}")` : '');
+        // A healthy session earns a fresh escalation budget — otherwise the cap
+        // would be a per-process total and a long-lived proxy would eventually go
+        // loud over unrelated blips spread across hours.
+        escalations = 0;
         reconnecting = false;
         return;
       } catch (e) {
@@ -474,6 +715,18 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   }
   process.on('SIGINT', () => void shutdown(0));
   process.on('SIGTERM', () => void shutdown(0));
+
+  // Dying silently is the failure mode being fixed everywhere else here, so do not
+  // let the proxy itself do it. Node's default for an unhandled rejection is to
+  // exit 1, which downstream sees only as "the connector went away", with no reason
+  // recorded anywhere. Log loudly and keep serving: a proxy still up with one
+  // failed operation is strictly better than one that vanished without a trace.
+  process.on('unhandledRejection', (reason) => {
+    log('UNHANDLED REJECTION (proxy stays up):', reason instanceof Error ? (reason.stack ?? reason.message) : String(reason));
+  });
+  process.on('uncaughtException', (err) => {
+    log('UNCAUGHT EXCEPTION (proxy stays up):', err?.stack ?? String(err));
+  });
 
   // Read the daemon's self-report (non-blocking: a missing/old daemon must not
   // break startup). If the package versions differ, set versionAdvisory — it
@@ -511,8 +764,21 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
       catch (e) { log('initial upstream connect failed, retrying:', String(e)); await sleep(delay); delay = Math.min(Math.floor(delay * 1.5), 10_000); }
     }
     upReady = true;
+    // Check the transport instead of asserting `up!` on every iteration. This loop
+    // awaits, and dropUpstream() can null `up` during that await — the next
+    // iteration would then evaluate `.send` on null and throw a SYNCHRONOUS
+    // TypeError. The trailing .catch() structurally cannot catch it: the throw
+    // happens on property access, before send() returns a promise. Inside this
+    // void-discarded async IIFE that becomes an unhandled rejection, and Node's
+    // default for that is to exit 1. (The identical line in reconnect() survives
+    // only because it sits inside a try/catch.) Unflushed frames are re-queued
+    // rather than dropped.
     const queued = pendingToUp.splice(0);
-    for (const m of queued) await up!.send(m).catch((err) => log('flush failed:', String(err)));
+    for (let i = 0; i < queued.length; i++) {
+      const t = currentUp();
+      if (!t) { pendingToUp.unshift(...queued.slice(i)); break; }
+      await t.send(queued[i]).catch((err: unknown) => log('flush failed:', String(err)));
+    }
     log(`upstream ready — stdio ⇄ ${url.href}`);
   })();
 

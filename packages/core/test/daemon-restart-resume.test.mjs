@@ -100,15 +100,39 @@ try {
     await waitForVersion(PORT);
 
     // 7. Give the connector's reconnect() loop time to fire and replay.
-    //    The proxy detects the dead upstream on the next POST attempt, drops, and
-    //    runs reconnect() which replays initialize + choose_identity (silent rebind).
-    //    We trigger the drop by calling a tool (which will fail once, then recover).
+    //    The proxy detects the dead upstream on the next POST attempt (the fresh
+    //    daemon rejects the stale mcp-session-id), drops, and runs reconnect(),
+    //    which replays initialize + choose_identity as SYNTHETIC frames — the
+    //    silent re-bind. We trigger that drop by calling a tool.
     await sleep(2000);
 
-    // 8. Without any explicit choose_identity from the test, call a per-container
-    //    tool and assert it succeeds — proving the silent replay re-bound.
+    // 8. THE FIRST CALL AFTER A RESTART NOW FAILS, AND THAT IS THE INTENDED
+    //    CONTRACT — not a regression.
+    //    This test used to make ONE call here and assert it succeeded. That only
+    //    worked because the proxy re-queued the FAILED REQUEST FRAME and replayed
+    //    it after reconnecting — i.e. the test was encoding the blind replay as
+    //    the contract. That replay is exactly the defect we removed: `send()` also
+    //    rejects when the POST was ACCEPTED and the tool already ran, so replaying
+    //    a request could execute it twice — and get_messages marks mail read and
+    //    delivers exactly once, so the second run consumes messages that reach
+    //    nobody. A hang silently converted into data loss.
+    //    Requests are therefore no longer replayed; they fail back and the caller
+    //    decides whether repeating is safe. Only the caller knows that.
+    let firstCallFailed = false;
+    try {
+      await call('get_messages');
+    } catch (e) {
+      firstCallFailed = /NOT retried/i.test(String(e?.message ?? e));
+    }
+    assert(firstCallFailed, '(3a) first call after restart FAILS BACK instead of being silently replayed — the caller is told, and told it was not retried');
+
+    // 9. …and the retry succeeds WITHOUT any explicit choose_identity from the
+    //    test, which is what proves the silent re-bind actually happened.
+    //    NOTE this separates two things the old single-call assertion conflated:
+    //    (3a) proves the USER'S REQUEST was not replayed; (3b) proves the
+    //    HANDSHAKE + BINDING were. Previously a pass could have meant either.
     const gm2 = await call('get_messages');
-    assert(isOk(gm2) && !/No identity bound/i.test(text(gm2)), '(3) get_messages succeeds on SECOND daemon WITHOUT explicit choose_identity — silent replay re-bound');
+    assert(isOk(gm2) && !/No identity bound/i.test(text(gm2)), '(3b) the RETRY succeeds on the SECOND daemon WITHOUT explicit choose_identity — silent replay re-bound');
 
     // 9. Also verify current_identity reflects Dora.
     const ci = await call('current_identity');
