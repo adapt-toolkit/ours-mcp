@@ -28,6 +28,10 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, '..', 'dist', 'cli.js');
@@ -269,6 +273,121 @@ console.log('proxy-request-failback\n');
     const spurious = px.frames.filter((f) => f.id === 5 && f.error);
     ok(spurious.length === 0, 'no spurious error was emitted after the answer arrived');
   } finally { px.kill(); await new Promise((r) => srv.close(r)); rmSync(dir, { recursive: true, force: true }); }
+}
+
+// ─── 4. THE ORDERLY-CLOSE HANG — a deterministic reproduction of Defect A ────
+//
+// This is the reproduction the whole investigation lacked. Before it, the hang was
+// n=1 with an unknown cause and every candidate correlation dead; it now arms in
+// about a second, in-process, with no timed wait and no network conditions.
+//
+// THE MECHANISM. When a server transport is closed WITH A REQUEST IN FLIGHT,
+// streamController.close() ends the SSE stream CLEANLY. The client's reader sees
+// `done` and BREAKS rather than throwing; a POST stream has isReconnectable=false
+// and (with no eventStore) no priming event, so needsReconnect is false and the
+// loop simply returns. NOTHING rejects the pending response handler.
+//   *** AN ORDERLY TEARDOWN OF THE STREAM IS NOT A TEARDOWN OF THE REQUEST. ***
+// A clean close is in one sense worse than a crash here: a crash would have thrown.
+//
+// WHY THIS DOES NOT CONTRADICT THE FIELD MEASUREMENT that abrupt daemon death
+// settles in-flight requests (84/84 observed by the reporting fleet): SIGTERM
+// ABORTS THE SOCKETS, so the client's fetch rejects and the request fails. SIGTERM
+// NEVER REACHES the orderly streamController.close() path this test exercises — it
+// aborts first. DIFFERENT TEARDOWN MODES, DIFFERENT OUTCOMES. Both results are
+// real; reading only one of them would make the other party look wrong.
+//
+// This case is the ONLY guard on the orderly mode: the abrupt path is structurally
+// incapable of exercising it.
+{
+  console.log('\norderly close mid-request: the SDK leaves the caller hanging (Defect A, reproduced)');
+  let serverTransport = null;
+  const srv = createServer(async (req, res) => {
+    if (req.method === 'POST') {
+      let raw = ''; for await (const c of req) raw += c;
+      const body = JSON.parse(raw);
+      if (req.headers['mcp-session-id'] && serverTransport) { await serverTransport.handleRequest(req, res, body); return; }
+      serverTransport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
+      const mcp = new McpServer({ name: 'hangprobe', version: '0' }, { capabilities: {} });
+      mcp.tool('hang', async () => new Promise(() => {})); // never answers
+      await mcp.connect(serverTransport);
+      await serverTransport.handleRequest(req, res, body);
+      return;
+    }
+    if (req.method === 'GET') { await serverTransport?.handleRequest(req, res); return; }
+    res.writeHead(405); res.end();
+  });
+  srv.requestTimeout = 0;
+  const port = await freePort();
+  await new Promise((r) => srv.listen(port, '127.0.0.1', r));
+  const ct = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
+  const client = new Client({ name: 'hangprobe-client', version: '0' }, { capabilities: {} });
+  try {
+    await client.connect(ct);
+    let settled = null;
+    // 120s timeout DELIBERATELY, so the SDK's own 60s DEFAULT_REQUEST_TIMEOUT_MSEC
+    // cannot be mistaken for close() having settled the promise.
+    client.callTool({ name: 'hang', arguments: {} }, undefined, { timeout: 120000 })
+      .then(() => { settled = 'RESOLVED'; })
+      .catch((e) => { settled = `REJECTED: ${String(e.message ?? e).slice(0, 80)}`; });
+    await sleep(800);
+    ok(settled === null, 'request is genuinely in flight before we close');
+    await serverTransport.close();      // the exact call the daemon shutdown makes
+    await sleep(3000);
+    // IF THIS ASSERTION EVER FAILS, THE MCP SDK CHANGED — OUR CODE DID NOT BREAK.
+    // A newer SDK that rejects pending handlers on a clean stream close would be a
+    // welcome upstream fix, and it would mean the proxy watchdog has quietly stopped
+    // being the only thing standing between this shape and an infinite wait.
+    // Re-read _handleSseStream's `done` path before assuming a regression here.
+    ok(settled === null,
+      `SDK STILL LEAVES THE PROMISE UNSETTLED after an orderly close (got: ${settled ?? 'unsettled'}) — if this FAILS, the SDK changed, our code did not break`);
+  } finally {
+    try { await client.close(); } catch { /* ignore */ }
+    srv.closeAllConnections?.(); await new Promise((r) => srv.close(r));
+  }
+}
+
+// ─── 4b. …and the proxy converts that exact shape into a prompt error ────────
+// The synthetic stream-kill case (1) and this one exercise the SAME guarantee
+// through DIFFERENT failure shapes. That is not duplication: the trigger for the
+// reported hang is still unknown, so covering the defect class matters more than
+// covering one path into it.
+{
+  console.log('\n…and the proxy fails that same orderly-close shape back promptly');
+  const dir = mkdtempSync(join(tmpdir(), 'ours-fb-oc-'));
+  let st = null;
+  const srv = createServer(async (req, res) => {
+    if (req.url === '/state-dir') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ stateDir: '/tmp/fake', version: '0.0.0-test', compat: 1 })); return; }
+    if (req.method === 'POST') {
+      let raw = ''; for await (const c of req) raw += c;
+      const body = JSON.parse(raw);
+      if (req.headers['mcp-session-id'] && st) { await st.handleRequest(req, res, body); return; }
+      st = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
+      const mcp = new McpServer({ name: 'hangd', version: '0' }, { capabilities: {} });
+      mcp.tool('get_messages', async () => new Promise(() => {}));
+      await mcp.connect(st);
+      await st.handleRequest(req, res, body);
+      return;
+    }
+    if (req.method === 'GET') { await st?.handleRequest(req, res); return; }
+    res.writeHead(405); res.end();
+  });
+  srv.requestTimeout = 0;
+  const port = await freePort();
+  await new Promise((r) => srv.listen(port, '127.0.0.1', r));
+  const px = startProxy(port, dir, { OURS_REQUEST_TIMEOUT_MS: '4000' });
+  try {
+    px.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
+    ok(Boolean(await waitFor(px.frames, (f) => f.id === 1 && f.result, 15000)), 'handshake completed');
+    px.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    await sleep(400);
+    const t0 = Date.now();
+    px.send({ jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'get_messages', arguments: {} } });
+    await sleep(1000);
+    await st.close();
+    const err = await waitFor(px.frames, (f) => f.id === 11 && f.error, 15000);
+    ok(Boolean(err), `caller got a response ${Date.now() - t0}ms after an orderly close that the SDK never settles`);
+    if (err) ok(err.error.code === -32001 || err.error.code === -32000, `MCP error code ${err.error.code}`);
+  } finally { px.kill(); srv.closeAllConnections?.(); await new Promise((r) => srv.close(r)); rmSync(dir, { recursive: true, force: true }); }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
