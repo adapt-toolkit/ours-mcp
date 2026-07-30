@@ -14,7 +14,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -110,6 +110,86 @@ try {
   // unknown reference keeps the stable "Unknown contact" error.
   const unk = await hub('rename_contact', { contact: 'Nobody', name: 'X' });
   ok(unk.isError && /Unknown contact: Nobody/.test(unk.text), 'P1: renaming an unknown contact keeps the stable "Unknown contact" error');
+
+  // --- Phase 3: register_contact — D1 regression, ordinals, the incident ---
+  const notifyLog = (name) => {
+    try { return readFileSync(join(dir, name, 'notifications.log'), 'utf8'); } catch { return ''; }
+  };
+
+  // SPEC test 3 (D1 regression — the test a future contributor is most likely
+  // to break by tightening the check): an invite whose assigned name is already
+  // taken SUCCEEDS, registers the newcomer as "<name> 1", warns, and the
+  // handshake completes. No transaction aborts anywhere.
+  const cat = await mkClient('cat');
+  const catCreate = (await cat('create_identity', { name: 'Cat', expose_local: false })).text;
+  const catCid = cidOf(catCreate, 'Cat');
+  const inv3 = blobOf((await hub('generate_invite', { name: 'Ann' })).text);
+  const catAdd = await cat('add_contact', { invite: inv3, name: 'Hub' });
+  ok(!catAdd.isError, 'SPEC3: add_contact against a taken assigned name does NOT refuse');
+  await sleep(4000);
+  const contacts3 = (await hub('list_contacts')).text;
+  ok(new RegExp(`Ann 1 — ${catCid}`).test(contacts3), 'SPEC3: the newcomer registered as "Ann 1" (lowest free ordinal)');
+  ok(new RegExp(`Ann — ${annCid}`).test(contacts3), 'SPEC3: the clean name stayed with the first arrival (D3)');
+  const hubLog3 = notifyLog('Hub');
+  ok(/contact_name_collision/.test(hubLog3) && hubLog3.includes(annCid) && hubLog3.includes(catCid),
+    'SPEC3: the collision warning fired, naming BOTH container ids');
+
+  // SPEC test 6 — ordinals: a third "Ann" becomes "Ann 2"; an existing literal
+  // "Q 1" contact is skipped, not clobbered.
+  const dog = await mkClient('dog');
+  const dogCid = cidOf((await dog('create_identity', { name: 'Dog', expose_local: false })).text, 'Dog');
+  const inv4 = blobOf((await hub('generate_invite', { name: 'Ann' })).text);
+  await dog('add_contact', { invite: inv4, name: 'Hub' });
+  await sleep(4000);
+  ok(new RegExp(`Ann 2 — ${dogCid}`).test((await hub('list_contacts')).text),
+    'SPEC6: with "Ann" and "Ann 1" present, the third collision becomes "Ann 2"');
+  // occupy "Q 1" literally, then collide on "Q" twice: the literal is skipped.
+  await hub('rename_contact', { contact: benCid, name: 'Q 1' });
+  await hub('rename_contact', { contact: annCid, name: 'Q' });
+  const emu = await mkClient('emu');
+  const emuCid = cidOf((await emu('create_identity', { name: 'Emu', expose_local: false })).text, 'Emu');
+  const inv5 = blobOf((await hub('generate_invite', { name: 'Q' })).text);
+  await emu('add_contact', { invite: inv5, name: 'Hub' });
+  await sleep(4000);
+  const contacts6 = (await hub('list_contacts')).text;
+  ok(new RegExp(`Q 2 — ${emuCid}`).test(contacts6), 'SPEC6: colliding with "Q" while a literal "Q 1" exists yields "Q 2"');
+  ok(new RegExp(`Q 1 — ${benCid}`).test(contacts6), 'SPEC6: the literal "Q 1" contact was skipped, not clobbered');
+
+  // SPEC test 4 — THE INCIDENT: a respawned role with a new container id and
+  // the same label writes a second entry via the sibling path, created by a
+  // remote party with no local action. The newcomer takes the suffix, the
+  // original keeps the bare name, the first message still lands, and the
+  // warning names both ids.
+  const rex1 = await mkClient('rex1');
+  const rex1Cid = cidOf((await rex1('create_identity', { name: 'Rex', expose_local: false })).text, 'Rex');
+  const s1 = await rex1('send_message', { contact: 'Ann', text: 'first Rex reporting' });
+  ok(!s1.isError, 'SPEC4 setup: first Rex reaches Ann via the sibling path');
+  await sleep(3000);
+  ok(/first Rex reporting/.test((await ann('get_messages')).text), 'SPEC4 setup: Ann received the first Rex message');
+  await hub('remove_identity', { name: 'Rex' });
+  const rex2 = await mkClient('rex2');
+  const rex2Cid = cidOf((await rex2('create_identity', { name: 'Rex', expose_local: false })).text, 'Rex');
+  ok(rex2Cid !== null && rex2Cid !== rex1Cid, 'SPEC4 setup: the respawned Rex has a NEW container id');
+  const s2 = await rex2('send_message', { contact: 'Ann', text: 'respawned Rex reporting' });
+  ok(!s2.isError, 'SPEC4: the respawned Rex message is not refused (D1)');
+  await sleep(3000);
+  ok(/respawned Rex reporting/.test((await ann('get_messages')).text), 'SPEC4: the respawned Rex message ARRIVED');
+  const annBook = (await ann('list_contacts')).text;
+  ok(new RegExp(`Rex — ${rex1Cid}`).test(annBook), 'SPEC4: the dead predecessor still holds the bare name "Rex" (D3)');
+  ok(new RegExp(`Rex 1 — ${rex2Cid}`).test(annBook), 'SPEC4: the live replacement registered as "Rex 1"');
+  const annLog = notifyLog('Ann');
+  ok(/contact_name_collision/.test(annLog) && annLog.includes(rex1Cid) && annLog.includes(rex2Cid),
+    'SPEC4: the collision warning on Ann names both container ids');
+
+  // SPEC test 5 — the D3 CONSEQUENCE (intended, not desired): a send to the
+  // bare name "Rex" deterministically resolves to the DEAD predecessor — the
+  // collision warning and rename_contact are the only mitigations until D4.
+  const s3 = await ann('send_message', { contact: 'Rex', text: 'who gets this?' });
+  ok(!s3.isError && !new RegExp(rex2Cid).test(s3.text),
+    'SPEC5: send to the bare name resolves to the dead predecessor, not the live replacement (D3 consequence)');
+  await sleep(2000);
+  ok(!/who gets this\?/.test((await rex2('get_messages')).text),
+    'SPEC5: the live replacement did NOT receive the bare-name send');
 } catch (err) {
   fail += 1;
   console.error('  ✗ SUITE ERROR:', err);

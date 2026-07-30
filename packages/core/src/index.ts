@@ -2158,6 +2158,19 @@ function wireHandlers(id: Identity): void {
         process.nextTick(() =>
           pushNotification(id.name, `[${id.name}] local contact "${name}" (${cid}) connected via the contact book.`),
         );
+      } else if (event === 'contact_name_collision') {
+        // register_contact took an ordinal suffix (D1/D2): surface the warning
+        // loudly — the operator may need to move the name with rename_contact
+        // (D3: the clean name stayed with the FIRST arrival, which after a role
+        // respawn is the dead predecessor).
+        const message = payload.Reduce('message').Visualize();
+        const desired = payload.Reduce('desired').Visualize();
+        const assigned = payload.Reduce('assigned').Visualize();
+        const existingCid = payload.Reduce('existing_container_id').Visualize();
+        const cid = payload.Reduce('container_id').Visualize();
+        appendNotifyLog(id, { event: 'contact_name_collision', desired, assigned, existing_container_id: existingCid, container_id: cid });
+        log(`[${id.name}] CONTACT NAME COLLISION — ${message}`);
+        process.nextTick(() => pushNotification(id.name, `[${id.name}] ⚠ ${message}`));
       } else if (event === 'sibling_contact_added') {
         const name = payload.Reduce('name').Visualize();
         const cid = payload.Reduce('container_id').Visualize();
