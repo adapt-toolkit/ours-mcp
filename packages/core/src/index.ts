@@ -4051,6 +4051,34 @@ function createMcpServer(getSessionId: () => string): McpServer {
   );
 
   server.tool(
+    'rename_contact',
+    'Rename a contact (addressed by current name or container id) — rewrites the ' +
+      'display name only; the container id, keys and the established encrypted ' +
+      'channel are untouched. Rejects a name another contact already holds. When ' +
+      'two contacts share a name (e.g. after a collision took an ordinal suffix), ' +
+      'address the one to rename by its container id. Requires a bound identity.',
+    {
+      contact: z.string().min(1).describe('Contact name or container id to rename.'),
+      name: z.string().min(1).describe('The new display name.'),
+    },
+    async ({ contact, name }) => {
+      const { id, err } = boundOr();
+      if (err) return err;
+      try {
+        const msg = await withScopeAsync(async (lt) => {
+          const data = await mutatingTx(id!, '::a2a_messaging::rename_contact', { contact, name }, lt);
+          const from = data.Reduce('renamed').Visualize();
+          const cid = data.Reduce('container_id').Visualize();
+          return `Renamed contact "${from}" to "${name}" (${cid}).`;
+        });
+        return textResult(msg);
+      } catch (e) {
+        return textResult(`rename_contact failed: ${String(e)}`, true);
+      }
+    },
+  );
+
+  server.tool(
     'list_incoming_messages',
     "List ALL messages in the bound identity's inbox (decrypted), each with its id " +
       'and status (unread/read). A read-only history view — it does not change any ' +
