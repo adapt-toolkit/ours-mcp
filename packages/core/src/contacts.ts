@@ -8,6 +8,8 @@ export interface ContactLineInput {
   rootTag?: string;
   /** queued-restore count when the contact's keys are degraded */
   degradedQueued?: number;
+  /** the shared name this contact held before the boot import sweep renamed it */
+  renamedFrom?: string;
 }
 
 // Names shared by 2+ contacts (a pre-uniqueness book, or state slipped past the
@@ -25,6 +27,7 @@ export function buildContactLines(items: ContactLineInput[]): string[] {
     (c) =>
       `• ${c.name} — ${c.container_id}${c.rootTag ?? ''}` +
       `${c.degradedQueued !== undefined ? ` — ⚠ keys pending restore (${c.degradedQueued} queued)` : ''}` +
-      `${(counts.get(c.name) ?? 0) > 1 ? ' — ⚠ DUPLICATE NAME: sends to this name abort; address by container id, repair with rename_contact' : ''}`,
+      `${(counts.get(c.name) ?? 0) > 1 ? ' — ⚠ DUPLICATE NAME: sends to this name abort; address by container id, repair with rename_contact' : ''}` +
+      `${c.renamedFrom !== undefined ? ` — ⚠ renamed on import (two contacts were named "${c.renamedFrom}"; do NOT assume the one keeping the bare name is the live one — verify by container id, settle with rename_contact)` : ''}`,
   );
 }

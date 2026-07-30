@@ -2920,6 +2920,17 @@ function renderContacts(v: AdaptValue): Array<{ name: string; container_id: stri
   return out;
 }
 
+// cid -> pre-sweep shared name, from ::a2a_messaging::list_import_renames.
+function renderImportRenames(v: AdaptValue): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (v.IsNil()) return out;
+  for (const key of v.GetKeys()) {
+    const n = v.Reduce(key);
+    if (!n.IsNil()) out[typeof key === 'string' ? key : key.Visualize()] = n.Visualize();
+  }
+  return out;
+}
+
 type ReplyRef = { wire_id: string; sentence?: number };
 type InboxMsg = {
   msg_id: number;
@@ -3604,11 +3615,12 @@ function createMcpServer(getSessionId: () => string): McpServer {
       const { id, err } = boundOr();
       if (err) return err;
       try {
-        const { contacts, pending, roots, degraded } = withScope((lt) => ({
+        const { contacts, pending, roots, degraded, renames } = withScope((lt) => ({
           contacts: renderContacts(readonlyTx(id!, '::a2a_messaging::list_contacts', lt)),
           pending: renderPending(readonlyTx(id!, '::actor::list_pending_introductions', lt)),
           roots: renderContactRoots(readonlyTx(id!, '::a2a_messaging::list_contact_roots', lt)),
           degraded: renderDegraded(readonlyTx(id!, '::a2a_messaging::list_degraded_contacts', lt)),
+          renames: renderImportRenames(readonlyTx(id!, '::a2a_messaging::list_import_renames', lt)),
         }));
         const degradedByCid = new Map(degraded.map((d) => [d.cid, d]));
         const lines: string[] = [];
@@ -3621,6 +3633,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
                   container_id: c.container_id,
                   rootTag: fmtContactRoot(roots[c.container_id]),
                   degradedQueued: degradedByCid.get(c.container_id)?.queued,
+                  renamedFrom: renames[c.container_id],
                 })),
               ).join('\n')}`,
         );

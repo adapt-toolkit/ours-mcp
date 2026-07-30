@@ -1762,7 +1762,9 @@ application actor loads libraries
         }
 
         return transaction::success [
-            _return_data ($imported -> TRUE, $contacts -> _count a2a_messaging::contacts|, $peers -> _count a2a_messaging::peer_ads|),
+            // $renamed counts the OUTSTANDING import-sweep renames (persisted
+            // marks included), so a restore log line surfaces books that healed.
+            _return_data ($imported -> TRUE, $contacts -> _count a2a_messaging::contacts|, $peers -> _count a2a_messaging::peer_ads|, $renamed -> _count a2a_messaging::import_renames|),
             _save_state NIL
         ].
     }
