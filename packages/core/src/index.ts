@@ -2964,11 +2964,30 @@ function renderFiles(v: AdaptValue): string {
   return `${lines.length} file(s):\n${lines.join('\n')}`;
 }
 
+// Machine-readable per-file record mirrored into the get_files result's
+// `structuredContent`. The ours proxy consumes this to probe, as the AGENT's OS
+// user, whether each `path` is actually readable — prose is for the model, this
+// is for the connector, so the two never drift via regex (issue #34).
+type ReceivedFileMeta = {
+  wire_id: string;
+  filename: string;
+  path: string;
+  mime: string;
+  size: number;
+  sha256: string;
+  sender: string;
+};
+
 // Pull the bytes from a get_files result, write each file under the identity's
-// files/ dir, and return a human summary with on-disk paths. Bytes never touch
-// the notify/log path — this is the sole egress, mirroring get_messages.
-async function writeIncomingFiles(id: Identity, v: AdaptValue): Promise<string> {
-  if (v.IsNil()) return 'No new files.';
+// files/ dir, and return a human summary with on-disk paths plus the structured
+// records above. Bytes never touch the notify/log path — this is the sole
+// egress, mirroring get_messages.
+async function writeIncomingFiles(
+  id: Identity,
+  v: AdaptValue,
+): Promise<{ text: string; files: ReceivedFileMeta[] }> {
+  const files: ReceivedFileMeta[] = [];
+  if (v.IsNil()) return { text: 'No new files.', files };
   const dir = filesDirFor(id);
   const lines: string[] = [];
   for (let i = 0; ; i++) {
@@ -2976,7 +2995,7 @@ async function writeIncomingFiles(id: Identity, v: AdaptValue): Promise<string> 
     if (f.IsNil()) break;
     if (lines.length === 0) await mkdir(dir, { recursive: true });
     const name = f.Reduce('filename').Visualize();
-    const mime = f.Reduce('mime').Visualize();
+    const mime = f.Reduce('mime').Visualize() || 'application/octet-stream';
     const sender = f.Reduce('sender_name').Visualize();
     const wire = f.Reduce('wire_id').Visualize();
     const bytes = Buffer.from(f.Reduce('data').GetBinary());
@@ -2995,16 +3014,22 @@ async function writeIncomingFiles(id: Identity, v: AdaptValue): Promise<string> 
         outcome = r.ok ? { kind: 'transcript', text: r.text } : { kind: 'failed', error: r.error };
       }
       lines.push(voiceDeliveryLine({ sender, wire, savedPath: outPath, sizeBytes: bytes.length }, outcome));
+      // Deliberately NOT added to files[]: the transcript IS the delivery, so the
+      // proxy must not turn a voice message into a "where do you want to save it?"
+      // prompt. save_file(wire_id) still fetches the audio if it's ever wanted.
       continue;
     }
-    lines.push(`  • ${name} (${mime || 'application/octet-stream'}, ${bytes.length} B, sha256 ${sha256}) from ${sender} → ${outPath} {${wire}}`);
+    files.push({ wire_id: wire, filename: name, path: outPath, mime, size: bytes.length, sha256, sender });
+    lines.push(`  • ${name} (${mime}, ${bytes.length} B, sha256 ${sha256}) from ${sender} → ${outPath} {${wire}}`);
   }
-  if (lines.length === 0) return 'No new files.';
-  return (
-    `${lines.length} new file(s) written to your identity's files dir — paths + metadata below ` +
-    `(bytes stay on disk, never in this result). If your OS user can read the path, use it directly; ` +
-    `otherwise use save_file({ wire_id, dest_path }) to stream a copy to a path you can write:\n${lines.join('\n')}`
-  );
+  if (lines.length === 0) return { text: 'No new files.', files };
+  return {
+    text:
+      `${lines.length} new file(s) written to your identity's files dir — paths + metadata below ` +
+      `(bytes stay on disk, never in this result). If your OS user can read the path, use it directly; ` +
+      `otherwise use save_file({ wire_id, dest_path }) to stream a copy to a path you can write:\n${lines.join('\n')}`,
+    files,
+  };
 }
 
 function renderPending(v: AdaptValue): Array<{ container_id: string; name: string; queued: number }> {
@@ -4130,7 +4155,8 @@ function createMcpServer(getSessionId: () => string): McpServer {
       'its PATH + metadata (filename, mime, size, sha256, sender, wire_id) — the BYTES are ' +
       'never returned into your context. Flips them to "processed" — the sole place file ' +
       'bytes leave the packet. If your OS user can read the returned path, use it directly; ' +
-      'if you run as a different OS user than the daemon owner and cannot read it, call ' +
+      'if you run as a different OS user than the daemon owner and cannot read it, the ours ' +
+      'connector says so in the result and asks you for a destination — then call ' +
       'save_file({ wire_id, dest_path }) to stream a copy to a path you can write. ' +
       'Requires a bound identity.',
     {},
@@ -4143,7 +4169,15 @@ function createMcpServer(getSessionId: () => string): McpServer {
           return await writeIncomingFiles(id!, data.Reduce('files'));
         });
         refreshUnread(id!);
-        return textResult(out);
+        // structuredContent carries the same records the prose lists. The proxy
+        // reads it to probe readability as the agent's OS user (issue #34); no
+        // outputSchema is declared, so this stays additive for every other client.
+        if (out.files.length === 0) return textResult(out.text);
+        return {
+          content: [{ type: 'text' as const, text: out.text }],
+          structuredContent: { files: out.files },
+          isError: false,
+        };
       } catch (e) {
         return textResult(`get_files failed: ${String(e)}`, true);
       }

@@ -58,17 +58,19 @@ async function mkDirect(lease) {
   const c = new Client({ name: 'direct', version: '0' }); await c.connect(t); return c;
 }
 // Agent client fronted by the REAL ours proxy (spawned as the agent's OS user).
-async function mkProxy(sessionId) {
+// `extraEnv` lets a case flip OURS_FILES_ALWAYS_PROMPT — the seam that exercises
+// the "daemon copy is unreadable" branch from a single OS user (see below).
+async function mkProxy(sessionId, extraEnv = {}) {
   const t = new StdioClientTransport({
     command: process.execPath, args: [CLI, 'proxy'],
-    env: { ...process.env, OURS_PORT: String(port), OURS_STATE_DIR: stateDir, OURS_TRANSPORT: 'http', CLAUDE_CODE_SESSION_ID: sessionId, OURS_BROKER_URL: 'ws://127.0.0.1:59997/nobroker' },
+    env: { ...process.env, OURS_PORT: String(port), OURS_STATE_DIR: stateDir, OURS_TRANSPORT: 'http', CLAUDE_CODE_SESSION_ID: sessionId, OURS_BROKER_URL: 'ws://127.0.0.1:59997/nobroker', ...extraEnv },
     stderr: 'ignore',
   });
   const c = new Client({ name: 'agent', version: '0' }); await c.connect(t); proxies.push(c); return c;
 }
 const partTypes = (content) => (content ?? []).map((p) => p.type);
 const txt = (r) => (r.content ?? []).map((p) => p.type === 'text' ? p.text : `[${p.type}]`).join('\n');
-const call = async (c, name, args = {}) => { const r = await c.callTool({ name, arguments: args }); return { isError: r.isError, text: txt(r), content: r.content ?? [] }; };
+const call = async (c, name, args = {}) => { const r = await c.callTool({ name, arguments: args }); return { isError: r.isError, text: txt(r), content: r.content ?? [], structured: r.structuredContent }; };
 
 const SECRET = Buffer.from('BEGIN OPENSSH PRIVATE KEY \x00\x01\x02 ' + 'k'.repeat(500) + ' END', 'utf8');
 
@@ -84,11 +86,16 @@ try {
   await call(setup, 'create_root_identity', { name: 'Host' });
   await call(setup, 'create_identity', { name: 'Alice' });
   await call(setup, 'create_identity', { name: 'Bob' });
+  await call(setup, 'create_identity', { name: 'Carol' });
   await call(setup, 'choose_identity', { name: 'Alice', force: true });
   ok(!(await call(setup, 'send_message', { contact: 'Bob', text: 'file incoming' })).isError, 'Alice connects to Bob (sibling)');
   const sent = await call(setup, 'send_file', { contact: 'Bob', data_base64: SECRET.toString('base64'), filename: 'id_ed25519' });
   const wire = sent.text.match(/wire_id ([A-Fa-f0-9]+)/)?.[1];
   ok(!sent.isError && !!wire, 'Alice send_file to Bob');
+  await call(setup, 'send_message', { contact: 'Carol', text: 'file incoming' });
+  const sentC = await call(setup, 'send_file', { contact: 'Carol', data_base64: SECRET.toString('base64'), filename: 'id_ed25519' });
+  const wireC = sentC.text.match(/wire_id ([A-Fa-f0-9]+)/)?.[1];
+  ok(!sentC.isError && !!wireC, 'Alice send_file to Carol');
   await sleep(400);
 
   // ── get_files returns a PATH + metadata, never bytes ─────────────────────
@@ -102,6 +109,13 @@ try {
   ok(existsSync(onDisk) && readFileSync(onDisk).equals(SECRET), 'get_files wrote the file to the per-identity folder (byte-exact)');
   ok(gf.text.includes(onDisk), 'get_files result carries the on-disk PATH');
   ok(/sha256 [a-f0-9]{64}/.test(gf.text) && new RegExp(`${SECRET.length} B`).test(gf.text), 'get_files result carries sha256 + size metadata');
+  // The proxy probed the path as THIS OS user, found it readable, and passed the
+  // daemon's result through untouched — annotating the structured record only.
+  const gfFiles = gf.structured?.files;
+  ok(Array.isArray(gfFiles) && gfFiles.length === 1 && gfFiles[0].path === onDisk && gfFiles[0].wire_id === wire,
+    'get_files carries structuredContent records (wire_id + path) for the proxy to probe');
+  ok(gfFiles?.[0]?.readable === true, 'proxy marked the readable path readable and did NOT rewrite the result');
+  ok(!/NOT readable by your OS user/.test(gf.text), 'readable case is a transparent passthrough (no destination prompt)');
 
   // ── save_file streams the bytes to an agent-chosen dest via the proxy ─────
   const dest = join(stateDir, 'agent-home', 'saved_key');
@@ -110,6 +124,41 @@ try {
   ok(!partTypes(sf.content).includes('resource'), 'save_file result carries NO bytes (no embedded resource)');
   ok(!/[A-Za-z0-9+/]{200,}={0,2}/.test(sf.text), 'save_file result carries no base64 blob of the file');
   ok(existsSync(dest) && readFileSync(dest).equals(SECRET), 'save_file wrote the file byte-exact at the agent-chosen dest');
+
+  // ── UNREADABLE daemon copy: proxy asks the agent for a destination ────────
+  // The proxy probes each get_files path with access(R_OK) as the AGENT's OS user.
+  // A genuine cross-user split can't be staged from one uid (the daemon must be
+  // able to WRITE where the agent cannot READ), so we drive the same branch via
+  // OURS_FILES_ALWAYS_PROMPT — the supported "always place files explicitly" mode,
+  // which forces the probe to report unreadable.
+  const carol = await mkProxy('sess-carol', { OURS_FILES_ALWAYS_PROMPT: '1' });
+  await call(carol, 'choose_identity', { name: 'Carol', force: true });
+  const gfC = await call(carol, 'get_files');
+  const carolOnDisk = join(stateDir, 'Carol', 'files', `${wireC}-id_ed25519`);
+  ok(!gfC.isError, 'Carol get_files succeeds');
+  ok(/NOT readable by your OS user/.test(gfC.text), 'unreadable daemon copy is reported to the agent');
+  ok(/ASK WHERE TO SAVE/.test(gfC.text) && /save_file\(\{ wire_id, dest_path \}\)/.test(gfC.text),
+    'proxy instructs the agent to ask the user for a destination and call save_file');
+  ok(gfC.text.includes(`wire_id ${wireC}`) && gfC.text.includes('id_ed25519') && /sha256 [a-f0-9]{64}/.test(gfC.text)
+    && new RegExp(`${SECRET.length} B`).test(gfC.text) && gfC.text.includes('from Alice'),
+    'the prompt carries the metadata the agent needs to describe the file (name, size, sha256, sender, wire_id)');
+  ok(/IGNORE the on-disk paths/.test(gfC.text), 'the prompt tells the agent to ignore the unusable paths');
+  // The instruction is PREPENDED, never substituted: the daemon's own text can carry
+  // payload the proxy cannot reconstruct (a voice message is delivered as a TRANSCRIPT,
+  // not as a path), so replacing it would drop real content from a mixed batch.
+  ok(gfC.content.length === 2 && gfC.content[0].type === 'text' && /NOT readable by your OS user/.test(gfC.content[0].text),
+    'the instruction is a NEW leading text part, not a replacement');
+  ok(gfC.content[1]?.text?.includes(carolOnDisk),
+    "the daemon's original listing is preserved intact after the instruction");
+  ok(!partTypes(gfC.content).includes('resource') && !/[A-Za-z0-9+/]{200,}={0,2}/.test(gfC.text),
+    'the prompt carries no bytes / no base64 blob');
+  ok(gfC.structured?.files?.[0]?.readable === false, 'structured record is marked unreadable');
+  // …the agent answers with a path, and save_file completes the delivery.
+  const carolDest = join(stateDir, 'agent-home', 'carol-chosen', 'key.pem');
+  const sfC = await call(carol, 'save_file', { wire_id: wireC, dest_path: carolDest });
+  ok(!sfC.isError, 'save_file at the agent-chosen destination succeeds');
+  ok(existsSync(carolDest) && readFileSync(carolDest).equals(SECRET),
+    'the file lands byte-exact at the path the agent chose (dirs created as needed)');
 
   // ── the DAEMON does not write dest directly (old-proxy / direct-call path) ─
   // Calling save_file straight at the daemon (no proxy) must NOT create dest — it
