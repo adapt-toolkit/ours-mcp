@@ -80,7 +80,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { resolve, join, dirname, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer as createHttpServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
@@ -377,6 +377,25 @@ function tightenIdentityPerms(): void {
       try { fs.chmodSync(f, 0o600); } catch (err) { log(`[${name}] chmod 0600 ${f} failed:`, String(err)); }
     }
   }
+}
+
+// A wire_id is a hex content hash; keep it to that charset so it can never be a
+// path component that escapes the identity's files dir (SCOPING, issue #34).
+const isWireId = (s: string): boolean => /^[A-Za-z0-9]+$/.test(s) && s.length > 0 && s.length <= 128;
+
+// Resolve a received file STRICTLY within the BOUND identity's OWN files folder
+// (STATE_DIR/<identity>/files/<wire_id>-<safe_name>). Returns the absolute path
+// or null when no such file exists for THIS identity. This is the security
+// boundary for save_file: identity A can never name identity B's wire_id and get
+// B's file, because we only ever scan A's own folder (issue #34).
+function findIdentityFile(id: Identity, wireId: string): string | null {
+  if (!isWireId(wireId)) return null;
+  const dir = filesDirFor(id);
+  let entries: string[];
+  try { entries = fs.readdirSync(dir); } catch { return null; }
+  const prefix = `${wireId}-`;
+  const match = entries.find((name) => name.startsWith(prefix));
+  return match ? join(dir, match) : null;
 }
 
 function listPersistedNames(): string[] {
@@ -2945,11 +2964,30 @@ function renderFiles(v: AdaptValue): string {
   return `${lines.length} file(s):\n${lines.join('\n')}`;
 }
 
+// Machine-readable per-file record mirrored into the get_files result's
+// `structuredContent`. The ours proxy consumes this to probe, as the AGENT's OS
+// user, whether each `path` is actually readable — prose is for the model, this
+// is for the connector, so the two never drift via regex (issue #34).
+type ReceivedFileMeta = {
+  wire_id: string;
+  filename: string;
+  path: string;
+  mime: string;
+  size: number;
+  sha256: string;
+  sender: string;
+};
+
 // Pull the bytes from a get_files result, write each file under the identity's
-// files/ dir, and return a human summary with on-disk paths. Bytes never touch
-// the notify/log path — this is the sole egress, mirroring get_messages.
-async function writeIncomingFiles(id: Identity, v: AdaptValue): Promise<string> {
-  if (v.IsNil()) return 'No new files.';
+// files/ dir, and return a human summary with on-disk paths plus the structured
+// records above. Bytes never touch the notify/log path — this is the sole
+// egress, mirroring get_messages.
+async function writeIncomingFiles(
+  id: Identity,
+  v: AdaptValue,
+): Promise<{ text: string; files: ReceivedFileMeta[] }> {
+  const files: ReceivedFileMeta[] = [];
+  if (v.IsNil()) return { text: 'No new files.', files };
   const dir = filesDirFor(id);
   const lines: string[] = [];
   for (let i = 0; ; i++) {
@@ -2957,10 +2995,11 @@ async function writeIncomingFiles(id: Identity, v: AdaptValue): Promise<string> 
     if (f.IsNil()) break;
     if (lines.length === 0) await mkdir(dir, { recursive: true });
     const name = f.Reduce('filename').Visualize();
-    const mime = f.Reduce('mime').Visualize();
+    const mime = f.Reduce('mime').Visualize() || 'application/octet-stream';
     const sender = f.Reduce('sender_name').Visualize();
     const wire = f.Reduce('wire_id').Visualize();
     const bytes = Buffer.from(f.Reduce('data').GetBinary());
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
     const outPath = join(dir, `${wire}-${sanitizeFilename(name)}`);
     await writeFile(outPath, bytes);
     if (isVoiceMessage(mime, name)) {
@@ -2975,12 +3014,22 @@ async function writeIncomingFiles(id: Identity, v: AdaptValue): Promise<string> 
         outcome = r.ok ? { kind: 'transcript', text: r.text } : { kind: 'failed', error: r.error };
       }
       lines.push(voiceDeliveryLine({ sender, wire, savedPath: outPath, sizeBytes: bytes.length }, outcome));
+      // Deliberately NOT added to files[]: the transcript IS the delivery, so the
+      // proxy must not turn a voice message into a "where do you want to save it?"
+      // prompt. save_file(wire_id) still fetches the audio if it's ever wanted.
       continue;
     }
-    lines.push(`  • ${name} (${mime || 'application/octet-stream'}, ${bytes.length} B) from ${sender} → ${outPath} {${wire}}`);
+    files.push({ wire_id: wire, filename: name, path: outPath, mime, size: bytes.length, sha256, sender });
+    lines.push(`  • ${name} (${mime}, ${bytes.length} B, sha256 ${sha256}) from ${sender} → ${outPath} {${wire}}`);
   }
-  if (lines.length === 0) return 'No new files.';
-  return `${lines.length} new file(s):\n${lines.join('\n')}`;
+  if (lines.length === 0) return { text: 'No new files.', files };
+  return {
+    text:
+      `${lines.length} new file(s) written to your identity's files dir — paths + metadata below ` +
+      `(bytes stay on disk, never in this result). If your OS user can read the path, use it directly; ` +
+      `otherwise use save_file({ wire_id, dest_path }) to stream a copy to a path you can write:\n${lines.join('\n')}`,
+    files,
+  };
 }
 
 function renderPending(v: AdaptValue): Array<{ container_id: string; name: string; queued: number }> {
@@ -4102,8 +4151,14 @@ function createMcpServer(getSessionId: () => string): McpServer {
   server.tool(
     'get_files',
     'Retrieve received files that have not been pulled yet: writes each to disk under ' +
-      'the identity state dir and returns its path + metadata. Flips them to "processed" — ' +
-      'the sole place file bytes leave the packet. Requires a bound identity.',
+      "the identity's files dir (STATE_DIR/<identity>/files/<wire_id>-<name>) and returns " +
+      'its PATH + metadata (filename, mime, size, sha256, sender, wire_id) — the BYTES are ' +
+      'never returned into your context. Flips them to "processed" — the sole place file ' +
+      'bytes leave the packet. If your OS user can read the returned path, use it directly; ' +
+      'if you run as a different OS user than the daemon owner and cannot read it, the ours ' +
+      'connector says so in the result and asks you for a destination — then call ' +
+      'save_file({ wire_id, dest_path }) to stream a copy to a path you can write. ' +
+      'Requires a bound identity.',
     {},
     async () => {
       const { id, err } = boundOr();
@@ -4114,10 +4169,51 @@ function createMcpServer(getSessionId: () => string): McpServer {
           return await writeIncomingFiles(id!, data.Reduce('files'));
         });
         refreshUnread(id!);
-        return textResult(out);
+        // structuredContent carries the same records the prose lists. The proxy
+        // reads it to probe readability as the agent's OS user (issue #34); no
+        // outputSchema is declared, so this stays additive for every other client.
+        if (out.files.length === 0) return textResult(out.text);
+        return {
+          content: [{ type: 'text' as const, text: out.text }],
+          structuredContent: { files: out.files },
+          isError: false,
+        };
       } catch (e) {
         return textResult(`get_files failed: ${String(e)}`, true);
       }
+    },
+  );
+
+  server.tool(
+    'save_file',
+    'Stream a received file (already pulled to disk by get_files) to a path YOUR OS user ' +
+      'can write, WITHOUT the bytes ever entering your context. Use this when you run as a ' +
+      'different OS user than the daemon owner and cannot read the get_files path directly. ' +
+      'The ours connector streams the bytes daemon→proxy→disk (the proxy runs as your OS ' +
+      'user and does the write); the file is resolved strictly within the bound identity\'s ' +
+      'own files folder, so you can only save files delivered to YOU. Run get_files first so ' +
+      'the file exists on disk. Requires a bound identity.',
+    {
+      wire_id: z.string().min(1).describe('wire_id of the received file (from get_files).'),
+      dest_path: z.string().min(1).describe('Destination path on your local filesystem to write the copy to.'),
+    },
+    async ({ wire_id }) => {
+      const { id, err } = boundOr();
+      if (err) return err;
+      // Reaching THIS daemon-side handler means the ours proxy did not intercept and
+      // fulfil the transfer — i.e. the connector is too old to stream+write the bytes as
+      // your OS user. We deliberately do NOT write daemon-side: the daemon runs as its
+      // owner, so a cross-user dest would be wrong-owner or EACCES. Fail clearly and point
+      // at the fallback. A current proxy performs save_file locally and never forwards here.
+      const exists = findIdentityFile(id!, wire_id) !== null;
+      return textResult(
+        `save_file could not be completed by your ours connector: it reached the daemon directly, ` +
+          `which means the connector is too old to stream the bytes and write them as your OS user. ` +
+          `Update the ours connector to use save_file, or fall back to get_files and copy the returned ` +
+          `path yourself (\`cp\`).` +
+          (exists ? '' : ` (Also note: no file with wire_id ${wire_id} is currently on disk for this identity — run get_files first.)`),
+        true,
+      );
     },
   );
 
@@ -4468,6 +4564,48 @@ async function main() {
           return;
         }
         await serveNotifications(req, res, name, url.searchParams.get('since'));
+        return;
+      }
+    }
+    // ----- save_file byte stream (issue #34) --------------------------------
+    // The ours proxy (running as the AGENT's OS user) fetches a received file's
+    // raw bytes here and writes them to a path the agent can reach — so a
+    // cross-user recipient never needs to traverse the daemon owner's private
+    // state dir. The file is resolved STRICTLY within the BOUND identity's own
+    // files folder (the identity is taken from the session's lease token, NOT
+    // from the URL), so identity A can never stream identity B's file. Token
+    // gated like the rest of the messaging surface; bytes are streamed as a raw
+    // chunked body (never base64-in-JSON), so a large file cannot blow up the
+    // agent's model context.
+    {
+      const m = /^\/files\/([^/]+)$/.exec(url.pathname);
+      if (req.method === 'GET' && m) {
+        if (!requireAuth(req, res)) return;
+        const wireId = decodeURIComponent(m[1]);
+        const leaseTok = req.headers['x-ours-lease-token'];
+        const lease = typeof leaseTok === 'string' && leaseTok ? leaseByToken(leaseTok) : undefined;
+        const id = lease ? identities.get(lease.identity) : undefined;
+        if (!id) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'no identity bound to this session' }));
+          return;
+        }
+        const filePath = findIdentityFile(id, wireId); // scoped to id's own folder
+        if (!filePath) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'no such file for the bound identity (run get_files first, or it belongs to another identity)' }));
+          return;
+        }
+        try {
+          const stat = fs.statSync(filePath);
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(stat.size) });
+          const stream = fs.createReadStream(filePath);
+          stream.on('error', () => { try { res.destroy(); } catch { /* ignore */ } });
+          stream.pipe(res);
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `failed to read file: ${String(e)}` }));
+        }
         return;
       }
     }

@@ -63,9 +63,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { formatVersionAdvisory } from './version-advisory';
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, chmodSync, createWriteStream, accessSync, constants as fsConstants } from 'node:fs';
+import { join, dirname, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -74,6 +76,98 @@ const VERSION = typeof __OURS_VERSION__ !== 'undefined' ? __OURS_VERSION__ : '0.
 // Tools whose successful call binds an identity to this session. We watch for
 // them so we can re-assert the binding after an upstream reconnect.
 const BIND_TOOLS = new Set(['choose_identity', 'create_identity', 'create_root_identity']);
+
+// save_file (issue #34) is the ONE tool the proxy does not forward transparently.
+// The daemon runs as its owner and cannot write a cross-user recipient's chosen
+// path; THIS process runs as the agent's OS user and can. So we intercept the
+// call, fetch the file's raw bytes from the daemon's token-gated /files/<wire_id>
+// stream (scoped daemon-side to the bound identity's own folder), write them to
+// dest_path here, and synthesize the tool result. The bytes transit
+// daemon→proxy→disk and never enter the JSON-RPC result / model context.
+const SAVE_FILE_TOOL = 'save_file';
+
+// get_files (issue #34) is forwarded transparently, but its RESULT is inspected on
+// the way back. The daemon writes each received file into its OWNER's 0700 state
+// dir and reports the path; whether that path is actually readable is a question
+// only THIS process can answer, because it runs as the agent's OS user. So we
+// probe each path with access(R_OK) and, for anything unreadable, rewrite the
+// result into an explicit instruction: tell the user what arrived and ask where
+// to put it, then call save_file({ wire_id, dest_path }). Without this the agent
+// only discovers the cross-user split by trying to read the path and eating an
+// EACCES it has to attribute correctly.
+const GET_FILES_TOOL = 'get_files';
+
+// Force the ask-for-a-destination path even when the daemon's copy IS readable.
+// For agents that must place received files explicitly (sandboxes, shared-uid
+// containers) rather than reach into the daemon's state dir — and the seam the
+// test suite uses to exercise the unreadable branch as a single OS user.
+const FILES_ALWAYS_PROMPT = ['1', 'true', 'yes', 'on'].includes(
+  (process.env.OURS_FILES_ALWAYS_PROMPT ?? '').trim().toLowerCase(),
+);
+
+type ReceivedFileMeta = {
+  wire_id: string;
+  filename: string;
+  path: string;
+  mime: string;
+  size: number;
+  sha256: string;
+  sender: string;
+};
+
+// access(2) resolves against the REAL uid/gid and needs +x on every parent, so a
+// daemon-owned 0700 state dir correctly reports unreadable here. No setuid in
+// play, so real == effective and this is exactly what the agent would hit.
+const canRead = (p: string): boolean => {
+  try { accessSync(p, fsConstants.R_OK); return true; } catch { return false; }
+};
+
+const describeFile = (f: ReceivedFileMeta): string =>
+  `  • ${f.filename} — ${f.mime || 'application/octet-stream'}, ${f.size} B, ` +
+  `sha256 ${f.sha256} — from ${f.sender} — wire_id ${f.wire_id}`;
+
+// Annotate a get_files result in place when some of its files are not readable by
+// this OS user. Returns true if the result was annotated. No structuredContent
+// (an older daemon) means no probe and no annotation — pure passthrough.
+//
+// The instruction is PREPENDED, never substituted for the daemon's own text. That
+// text can carry payload the proxy cannot reconstruct — a voice message is
+// delivered as a TRANSCRIPT, not as a path — so replacing it wholesale would drop
+// real message content whenever an unreadable file shares a batch with one.
+export function annotateGetFilesResult(result: unknown, readable: (p: string) => boolean): boolean {
+  const r = result as
+    | { content?: Array<{ type: string; text?: string }>; structuredContent?: { files?: unknown }; isError?: boolean }
+    | undefined;
+  if (!r || r.isError) return false;
+  const raw = r.structuredContent?.files;
+  if (!Array.isArray(raw)) return false;
+  const files = raw.filter(
+    (f): f is ReceivedFileMeta =>
+      !!f && typeof f === 'object' && typeof (f as ReceivedFileMeta).path === 'string' && typeof (f as ReceivedFileMeta).wire_id === 'string',
+  );
+  if (files.length === 0) return false;
+
+  const blocked = files.filter((f) => !readable(f.path));
+  // Annotate the structured records either way so a structured consumer sees the
+  // same truth the prose does.
+  for (const f of files) (f as ReceivedFileMeta & { readable: boolean }).readable = !blocked.includes(f);
+  if (blocked.length === 0) return false;
+
+  const lines: string[] = [
+    `${blocked.length} of ${files.length} received file(s) are NOT readable by your OS user: the ours ` +
+      `daemon runs as a different OS user and keeps its files dir private. Nothing was lost — the bytes ` +
+      `are safely on disk. IGNORE the on-disk paths reported below for these files; you cannot open them.`,
+    '',
+    `TELL THE USER what arrived (details below) and ASK WHERE TO SAVE each file on this filesystem. ` +
+      `Then call save_file({ wire_id, dest_path }) with the path they choose: the ours connector streams ` +
+      `the bytes daemon→proxy→disk and writes them as YOUR OS user. The bytes never enter this conversation.`,
+    '',
+    'Awaiting a destination:',
+    ...blocked.map(describeFile),
+  ];
+  r.content = [{ type: 'text', text: lines.join('\n') }, ...(r.content ?? [])];
+  return true;
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -140,6 +234,7 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   let protocolVersion: string | undefined; // negotiated version, mirrored onto the upstream transport
   let boundIdentity: string | null = null; // identity this session bound; re-asserted on reconnect
   const pendingBind = new Map<string | number, string>(); // in-flight bind request id -> identity name
+  const pendingGetFiles = new Set<string | number>(); // in-flight get_files request ids awaiting a readability probe
   let versionAdvisory: string | null = null; // non-blocking version-skew notice set by runCompatHandshake
 
   // ---- session-keyed restore (A2A-1c) ---------------------------------------
@@ -360,6 +455,15 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
           if (params && BIND_TOOLS.has(params.name ?? '') && typeof params.arguments?.name === 'string') {
             pendingBind.set(msg.id as string | number, params.arguments.name);
           }
+          // Forwarded normally, but remember the id so the RESULT can be probed for
+          // readability on the way back (see GET_FILES_TOOL / annotateGetFilesResult).
+          if (params?.name === GET_FILES_TOOL) pendingGetFiles.add(msg.id as string | number);
+          // Fulfil save_file locally (see SAVE_FILE_TOOL) — do NOT forward upstream.
+          if (params?.name === SAVE_FILE_TOOL) {
+            const args = (msg.params as { arguments?: Record<string, unknown> } | undefined)?.arguments ?? {};
+            void handleSaveFile(msg.id as string | number, args);
+            continue; // handled locally; the daemon never sees this tools/call
+          }
         }
         // Track it for the fail-back. Only frames that actually go upstream are
         // registered — a locally-absorbed re-initialize `continue`s above and never
@@ -427,6 +531,41 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
       if (id === undefined) continue;
       const e = inFlight.get(id);
       if (e) e.transport = t;
+    }
+  }
+
+  // Fulfil a save_file tools/call locally: pull the file's raw bytes from the
+  // daemon's token-gated stream (scoped daemon-side to the bound identity's own
+  // folder) and write them to dest_path as THIS process's OS user (the agent's).
+  // The bytes go daemon→proxy→disk and never appear in the JSON-RPC result. On
+  // any failure we reply with a clear, actionable error so the agent can fall
+  // back to the get_files path — we never hard-break.
+  async function handleSaveFile(id: string | number, args: Record<string, unknown>): Promise<void> {
+    const wireId = String(args.wire_id ?? '').trim();
+    const destPath = String(args.dest_path ?? '').trim();
+    const reply = (text: string, isError = false) =>
+      down
+        .send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], isError } } as unknown as JSONRPCMessage)
+        .catch((e) => log('save_file reply failed:', String(e)));
+    if (!wireId || !destPath) { await reply('save_file: both `wire_id` and `dest_path` are required.', true); return; }
+    if (!/^[A-Za-z0-9]+$/.test(wireId)) { await reply('save_file: invalid wire_id.', true); return; }
+    try {
+      const fetchUrl = new URL(url.href);
+      fetchUrl.pathname = `/files/${encodeURIComponent(wireId)}`;
+      fetchUrl.search = '';
+      const headers: Record<string, string> = { 'x-ours-lease-token': leaseToken };
+      if (opts.apiToken) headers['x-ours-api-token'] = opts.apiToken;
+      const resp = await fetch(fetchUrl, { headers });
+      if (resp.status === 401 || resp.status === 403) { await reply('save_file: ours daemon authentication failed; the monitor may be disarmed.', true); return; }
+      if (resp.status === 404) { await reply(`save_file: no file with wire_id ${wireId} is available to the bound identity. Run get_files first; it may already be saved, or it belongs to another identity.`, true); return; }
+      if (!resp.ok || !resp.body) { await reply(`save_file: ours daemon returned HTTP ${resp.status}. Your ours daemon may be too old to support save_file — update it, or use get_files and copy the returned path yourself.`, true); return; }
+      const abs = resolvePath(destPath);
+      mkdirSync(dirname(abs), { recursive: true });
+      await pipeline(Readable.fromWeb(resp.body as unknown as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(abs));
+      const size = statSync(abs).size;
+      await reply(`Saved file (wire_id ${wireId}) to ${abs} (${size} bytes). The bytes were streamed daemon→proxy→disk and never entered this result.`);
+    } catch (e) {
+      await reply(`save_file failed: ${String(e)}`, true);
     }
   }
 
@@ -554,6 +693,14 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
             }
             continue;
           } // our synthetic frame
+          if (pendingGetFiles.has(id)) {
+            pendingGetFiles.delete(id);
+            const rewrote = annotateGetFilesResult(
+              (msg as { result?: unknown }).result,
+              FILES_ALWAYS_PROMPT ? () => false : canRead,
+            );
+            if (rewrote) log('get_files: daemon copy unreadable by this OS user — asked the agent for a destination');
+          }
           if (pendingBind.has(id)) {
             const name = pendingBind.get(id)!;
             pendingBind.delete(id);
