@@ -79,6 +79,7 @@ jobs:
       hermes-version: ${{ steps.bump.outputs.hermes-version }}
       codex-version: ${{ steps.bump.outputs.codex-version }}
       install-version: ${{ steps.bump.outputs.install-version }}
+      opencode-version: ${{ steps.bump.outputs.opencode-version }}
     steps:
       - name: Generate app token
         id: app-token
@@ -153,6 +154,23 @@ jobs:
           const pkg = require(`${process.cwd()}/packages/installer/package.json`);
           if (pkg.bin['ours-install'] !== 'install.mjs') throw new Error('@ours.network/install must expose the ours-install bin');
           NODE
+      - name: Verify OpenCode plugin release artifact
+        run: |
+          npm pack --workspace @ours.network/opencode --dry-run --json > /tmp/ours-opencode-pack.json
+          node - <<'NODE'
+          const pack = require('/tmp/ours-opencode-pack.json')[0];
+          const files = new Set(pack.files.map((entry) => entry.path));
+          for (const path of [
+            'plugin/ours-monitor.mjs', 'plugin/ours-monitor.impl.mjs',
+            'skills/ours/SKILL.md', 'skills/writing-agent-bios/SKILL.md',
+            'config/opencode.mcp.example.jsonc',
+            'bin/ours-opencode-install.mjs', 'install.sh', 'README.md',
+          ]) {
+            if (!files.has(path)) throw new Error(`@ours.network/opencode package is missing ${path}`);
+          }
+          const pkg = require(`${process.cwd()}/packages/opencode/package.json`);
+          if (pkg.bin['ours-opencode-install'] !== 'bin/ours-opencode-install.mjs') throw new Error('@ours.network/opencode must expose the ours-opencode-install bin');
+          NODE
       - name: Compile MUFL packet
         run: scripts/compile-mufl.sh
       - run: npm run build
@@ -161,7 +179,7 @@ jobs:
       # reach this job (branch-gated), and if one somehow did, the guard refuses to publish.
       - name: Fail-closed stable guard (branch=main, clean version, @latest)
         run: |
-          for p in packages/core packages/claude-code packages/hermes packages/codex packages/installer; do
+          for p in packages/core packages/claude-code packages/hermes packages/codex packages/installer packages/opencode; do
             bash .github/workflows/scripts/publish-guard.sh stable "$p/package.json" latest
           done
       # Publish order = dependency order: core first, then the plugins that
@@ -189,6 +207,10 @@ jobs:
         run: npm publish --workspace @ours.network/install --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish @ours.network/opencode
+        run: npm publish --workspace @ours.network/opencode --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Summary
         run: |
           {
@@ -198,6 +220,7 @@ jobs:
             echo "- @ours.network/hermes@${{ needs.version-bump.outputs.hermes-version }}"
             echo "- @ours.network/codex@${{ needs.version-bump.outputs.codex-version }}"
             echo "- @ours.network/install@${{ needs.version-bump.outputs.install-version }}"
+            echo "- @ours.network/opencode@${{ needs.version-bump.outputs.opencode-version }}"
             echo "- plugin manifests (.claude-plugin/plugin.json) at v${{ needs.version-bump.outputs.unified-version }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -260,6 +283,10 @@ jobs:
         run: bash .github/workflows/scripts/publish-nightly.sh @ours.network/install
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish @ours.network/opencode (nightly)
+        run: bash .github/workflows/scripts/publish-nightly.sh @ours.network/opencode
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       # Post-publish safety proof: nightly tag advanced, @latest UNCHANGED.
       # npm's registry/CDN can lag a few seconds behind a publish, so poll the
       # nightly tag with backoff before asserting. The @latest check needs no
@@ -267,7 +294,7 @@ jobs:
       - name: Verify dist-tags (nightly moved, @latest untouched)
         run: |
           v="${{ steps.nightly.outputs.unified-version }}"
-          for n in @ours.network/mcp @ours.network/claude-code @ours.network/hermes @ours.network/codex @ours.network/install; do
+          for n in @ours.network/mcp @ours.network/claude-code @ours.network/hermes @ours.network/codex @ours.network/install @ours.network/opencode; do
             nightly_tag=""
             for attempt in 1 2 3 4 5 6 7 8; do
               nightly_tag="$(npm view "$n" dist-tags.nightly --registry=https://registry.npmjs.org 2>/dev/null || echo '')"
@@ -290,5 +317,6 @@ jobs:
             echo "- @ours.network/hermes@${{ steps.nightly.outputs.hermes-version }}"
             echo "- @ours.network/codex@${{ steps.nightly.outputs.codex-version }}"
             echo "- @ours.network/install@${{ steps.nightly.outputs.install-version }}"
+            echo "- @ours.network/opencode@${{ steps.nightly.outputs.opencode-version }}"
             echo "- @latest is unchanged."
           } >> "$GITHUB_STEP_SUMMARY"
