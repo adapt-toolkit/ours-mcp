@@ -3,8 +3,8 @@
 // bootstrap, and the `ours-install` command once the stack is on the machine).
 //
 // ONE installer for the WHOLE stack — ours core (the daemon) + the harness plugins (Claude Code /
-// Codex / Hermes) + ours-fleet + the Telegram connector — for someone who ALREADY has Claude,
-// Codex, and/or Hermes.
+// Codex / Hermes / OpenCode) + ours-fleet + the Telegram connector — for someone who ALREADY has
+// Claude, Codex, Hermes, and/or OpenCode.
 // Its whole job: install the stack cleanly, then hand back ONE copy-paste prompt the user drops
 // into their agent to finish all real configuration conversationally. No tokens, no port editing,
 // no config files. See packages/installer/README.md and the UX spec for the full contract.
@@ -151,6 +151,20 @@ function detectHermes() {
   return { name: 'hermes', label: 'Hermes', status, detail };
 }
 
+// OpenCode follows the HERMES shape, not the Claude/Codex one: `ours-opencode-install` never calls
+// an `opencode` binary — it copies the skills + the ours-monitor plugin under ~/.config/opencode and
+// merges the ours MCP server into opencode.json(c) — so "is it drivable?" is again the wrong
+// question. Presence == the config dir (~/.config/opencode, override with OPENCODE_DIR) exists. The
+// alias-safe CLI probe still runs to enrich detection; either signal makes it installable.
+function detectOpenCode() {
+  const dir = process.env.OPENCODE_DIR || join(homedir(), '.config', 'opencode');
+  const dirPresent = existsSync(dir);
+  const cli = detectHarness('opencode');
+  const status = dirPresent || cli.status === 'ok' ? 'ok' : 'absent';
+  const detail = dirPresent ? `config dir ${dir} present` : cli.detail;
+  return { name: 'opencode', label: 'OpenCode', status, detail };
+}
+
 // Set by main() so the top-level catch can route a Ctrl+C (InstallCancelled) through the same
 // clean-exit path as the SIGINT handler.
 let cancelHandler = null;
@@ -168,8 +182,8 @@ const USAGE = `ours-install — the unified ours.network stack installer.
   ours-install [--dry-run] [--help] [--version]
 
 Guided ~3-minute setup for the whole stack: ours core (the daemon), the harness
-plugins (Claude Code + Codex + Hermes), ours-fleet, and the Telegram connector — then one
-copy-paste hand-off prompt. You approve each step; re-run any time to add a piece
+plugins (Claude Code + Codex + Hermes + OpenCode), ours-fleet, and the Telegram connector — then
+one copy-paste hand-off prompt. You approve each step; re-run any time to add a piece
 or update.
 
   --dry-run    walk the whole flow and print what it WOULD do — install/change nothing
@@ -241,10 +255,12 @@ async function main() {
     { name: 'claude', label: 'Claude Code' },
     { name: 'codex', label: 'Codex' },
   ];
-  // Claude Code + Codex are driven CLIs (alias-safe --version probe); Hermes is config-dir based
-  // (see detectHermes) so it gets its own detector, appended after them.
+  // Claude Code + Codex are driven CLIs (alias-safe --version probe); Hermes and OpenCode are
+  // config-dir based (see detectHermes / detectOpenCode) so they get their own detectors, appended
+  // after them.
   const harnesses = harnessSpecs.map((h) => ({ ...h, ...detectHarness(h.name) }));
   harnesses.push(detectHermes());
+  harnesses.push(detectOpenCode());
   for (const h of harnesses) {
     if (h.status === 'ok') line(ok(`'${h.name}'  → real program (its plugin can be installed)`));
     else if (h.status === 'alias') line(warn(`'${h.name}'  → ${h.detail}  (I won't call it — see the note below; you can still install it by hand)`));
@@ -255,7 +271,7 @@ async function main() {
   const anyHarness = harnesses.some((h) => h.status !== 'absent');
   if (!anyHarness) {
     line('');
-    line(warn('No Claude Code, Codex, or Hermes found on this machine.'));
+    line(warn('No Claude Code, Codex, Hermes, or OpenCode found on this machine.'));
     line(info('Install one of them first, then re-run ours-install to wire it up.'));
     finish(ttyFd); return;
   }
@@ -469,20 +485,45 @@ async function main() {
     } else { failHermes(); record({ key: 'hermes', label: 'Hermes plugin', state: 'failed', note: 'npm/ours-hermes-install step failed' }); }
     return true;
   }
+  // OpenCode: same shape as Hermes — `npm i -g @ours.network/opencode@<channel>` then
+  // `ours-opencode-install`, which copies the ours + writing-agent-bios skills and the ours-monitor
+  // plugin under ~/.config/opencode and merges the ours MCP server into opencode.json(c). No
+  // marketplace/plugin-add, no alias-safety gate — nothing here calls the `opencode` binary.
+  // --skip-daemon for the same reason as Hermes: the unified installer already owns the daemon.
+  async function installOpenCode() {
+    const go = yes('  Install the ours plugin into OpenCode?', true);
+    if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'opencode', label: 'OpenCode plugin', state: 'skipped' }); return false; }
+    const npmOk = await actSpin(`installing ${spec('opencode')}…`, `npm i -g ${spec('opencode')} (provides ours-opencode-install)`, () => runAsync(NPM, ['i', '-g', spec('opencode')]));
+    const inst = npmOk.ok
+      ? await act('ours-opencode-install --skip-daemon (writes ~/.config/opencode: ours MCP server + skills + ours-monitor plugin)', async () => run('ours-opencode-install', ['--skip-daemon'], { capture: true }))
+      : npmOk;
+    if (inst.ok) {
+      line(ok('OpenCode plugin installed — the ours MCP server, skills, and the ours-monitor plugin are registered in ~/.config/opencode. No problems.'));
+      line(info('(restart opencode to load the ours tools.)'));
+      line(info('Wake-on-mail is a tool, not a background service: once an identity is bound, ask your'));
+      line(info('agent to "wake me on new mail" and it calls ours_monitor_start — it then reacts to new'));
+      line(info('mail on its own without blocking the session.'));
+      record({ key: 'opencode', label: 'OpenCode plugin', state: 'installed', note: 'restart opencode' });
+    } else { failOpenCode(); record({ key: 'opencode', label: 'OpenCode plugin', state: 'failed', note: 'npm/ours-opencode-install step failed' }); }
+    return true;
+  }
 
   // ============================================================================================
-  // STEP 2 / 4 — harness plugins (Claude Code + Codex + Hermes). The installer drives the plugin
-  // CLIs for Claude/Codex; Hermes installs via npm + ours-hermes-install (no CLI driving).
+  // STEP 2 / 4 — harness plugins (Claude Code + Codex + Hermes + OpenCode). The installer drives
+  // the plugin CLIs for Claude/Codex; Hermes and OpenCode install via npm + their front-door
+  // command (no CLI driving).
   // ============================================================================================
   line(heading('2/4 — harness plugins'));
-  line(info('These teach Claude Code, Codex, and Hermes the ours skills, so you can just talk to your'));
-  line(info("agent to message people and set things up. I'll install them for you — no commands to type."));
+  line(info('These teach Claude Code, Codex, Hermes, and OpenCode the ours skills, so you can just talk'));
+  line(info("to your agent to message people and set things up. I'll install them for you — no commands"));
+  line(info('to type.'));
   for (const h of harnesses) {
     if (h.status === 'absent') continue; // nothing to offer; pre-flight already noted it
     line('');
     const acted = h.name === 'claude' ? await installClaude(h)
       : h.name === 'codex' ? await installCodex(h)
-        : await installHermes(h);
+        : h.name === 'opencode' ? await installOpenCode(h)
+          : await installHermes(h);
     cont(acted);
   }
 
@@ -524,8 +565,9 @@ async function main() {
     // Only claim the skill is present where the fleet plugin actually installed.
     if (init.ok && fleetIn.length) line(ok(`ours-fleet ready — ${fleetIn.join(' + ')} now know the fleet skill. No problems.`));
     else if (init.ok) line(info('ours-fleet CLI is installed; add the fleet plugin to your harness with the commands above.'));
-    // Fleet plugins target Claude Code + Codex only (Hermes has none) — so "no fleet-capable harness
-    // to install into" means every claude/codex is absent, NOT every harness (Hermes doesn't count).
+    // Fleet plugins target Claude Code + Codex only (Hermes and OpenCode have none) — so "no
+    // fleet-capable harness to install into" means every claude/codex is absent, NOT every harness
+    // (Hermes and OpenCode don't count).
     const fleetCapableAbsent = harnesses.filter((h) => h.name === 'claude' || h.name === 'codex').every((h) => h.status === 'absent');
     const fleetOk = init.ok && (fleetIn.length > 0 || fleetCapableAbsent);
     record({ key: 'fleet', label: 'ours-fleet', state: fleetOk ? 'installed' : 'failed', version: globalVersion('@ours.network/fleet'), note: fleetIn.length ? fleetIn.join(' + ') : (init.ok ? 'CLI only — add plugin manually' : 'ours-fleet init failed') });
@@ -609,6 +651,13 @@ function failHermes() {
   line(info('Install it by hand — run these two, then run /reload-mcp in Hermes:'));
   line('    ' + c.cyan('npm i -g @ours.network/hermes'));
   line('    ' + c.cyan('ours-hermes-install'));
+  line(info('Your daemon and other steps are intact. Continuing.'));
+}
+function failOpenCode() {
+  line(warn('Couldn\'t install the OpenCode plugin automatically (network or npm).'));
+  line(info('Install it by hand — run these two, then restart opencode:'));
+  line('    ' + c.cyan('npm i -g @ours.network/opencode'));
+  line('    ' + c.cyan('ours-opencode-install'));
   line(info('Your daemon and other steps are intact. Continuing.'));
 }
 // --- fleet HARNESS PLUGIN never-dead-end messaging ---------------------------------------------

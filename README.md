@@ -23,7 +23,7 @@ to learn:
 ## Install
 
 **One command.** The guided installer sets up the daemon and wires whichever harnesses you
-pick — **Claude Code · Codex · Hermes**:
+pick — **Claude Code · Codex · Hermes · OpenCode**:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-network/main/install.sh | bash
@@ -35,8 +35,9 @@ curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-network/main/ins
 npm i -g @ours.network/mcp@latest    # the daemon
 ours-mcp start                        # start it (ours-mcp status to confirm)
 
-npm i -g @ours.network/hermes@latest && ours-hermes-install   # Hermes
-npm i -g @ours.network/codex@latest  && ours-codex-install    # Codex
+npm i -g @ours.network/hermes@latest   && ours-hermes-install     # Hermes
+npm i -g @ours.network/codex@latest    && ours-codex-install      # Codex
+npm i -g @ours.network/opencode@latest && ours-opencode-install   # OpenCode
 ```
 
 For **Claude Code**, install the plugin from its in-app marketplace:

@@ -30,14 +30,14 @@ export function canonHarnesses(raw) {
 // The installer normally installs everything at @latest (stable). Setting
 // OURS_CHANNEL=nightly (or OURS_INSTALL_CHANNEL) makes it install the NIGHTLY tag
 // for the packages that HAVE a nightly (mcp, tg-connector, and the harness-plugin
-// launchers claude-code/codex/hermes — all lockstep-published to the `nightly` tag),
-// but keep @ours.network/fleet at @latest ALWAYS: ours-fleet lives in its own repo
-// and publishes NO nightly tag, so `@nightly` there would 404 the whole install.
+// launchers claude-code/codex/hermes/opencode — all lockstep-published to the
+// `nightly` tag), but keep @ours.network/fleet at @latest ALWAYS: ours-fleet lives in
+// its own repo and publishes NO nightly tag, so `@nightly` there would 404 the whole install.
 export const DEFAULT_CHANNEL = 'latest';
 
 // Packages that follow the selected channel (nightly ⇒ @nightly). Short keys map to
 // the @ours.network/<key> npm name. NOTE fleet is deliberately ABSENT — it is pinned.
-const CHANNEL_TRACKING_PKGS = new Set(['mcp', 'tg-connector', 'claude-code', 'codex', 'hermes']);
+const CHANNEL_TRACKING_PKGS = new Set(['mcp', 'tg-connector', 'claude-code', 'codex', 'hermes', 'opencode']);
 // Packages ALWAYS pinned to @latest regardless of channel (no nightly tag exists).
 const STABLE_ONLY_PKGS = new Set(['fleet']);
 

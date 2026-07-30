@@ -23,6 +23,7 @@ const INSTALL_SH = join(PKG, 'install.sh');
 //   opts.noHarness   : omit claude+codex bins entirely (nothing detected)
 //   opts.rootExists  : name → `ours-mcp create-root` reports it already exists (quiet no-op)
 //   opts.hermesPresent : create <HOME>/.hermes so Hermes is detected (config-dir based, handled in runInstall)
+//   opts.opencodePresent : create <HOME>/.config/opencode so OpenCode is detected (same shape as Hermes)
 function fakeBins(dir, opts = {}) {
   const daemonInstalled = opts.daemon !== 'absent';
   const port = opts.daemonPort || 3050;
@@ -59,6 +60,8 @@ function fakeBins(dir, opts = {}) {
   write('ours-tg-connector', `exit 0\n`);
   // Hermes plugin front-door: logs its argv (so we can assert --skip-daemon) and succeeds.
   write('ours-hermes-install', `exit 0\n`);
+  // OpenCode plugin front-door: same contract as the Hermes one.
+  write('ours-opencode-install', `exit 0\n`);
 }
 
 // Run install.mjs non-interactively with fakes on PATH. Returns { out, calls, tmp }.
@@ -71,6 +74,8 @@ function runInstall(opts = {}, extraEnv = {}) {
   fakeBins(bin, opts);
   // Hermes is detected by its config dir (HOME/.hermes, since HOME=tmp) existing — create it on demand.
   if (opts.hermesPresent) mkdirSync(join(tmp, '.hermes'), { recursive: true });
+  // OpenCode is detected the same way, via HOME/.config/opencode.
+  if (opts.opencodePresent) mkdirSync(join(tmp, '.config', 'opencode'), { recursive: true });
   // For the "no harness" case we must guarantee the host's real claude/codex can't leak in via the
   // inherited PATH — so use a restricted PATH (fake bin + coreutils) with node/bash symlinked in.
   let path = `${bin}:${process.env.PATH}`;
@@ -177,6 +182,31 @@ test('hermes present (~/.hermes) → offered and installed via npm + ours-hermes
   rmSync(tmp, { recursive: true, force: true });
 });
 
+test('opencode present (~/.config/opencode) → offered and installed via npm + ours-opencode-install --skip-daemon, no regression', () => {
+  const { out, calls, tmp } = runInstall({ daemon: 'installed', opencodePresent: true });
+  // Detected as a harness alongside Claude Code + Codex (config-dir based, not a driven CLI).
+  assert.match(out, /'opencode'/, 'opencode reported in the machine check');
+  // Its plugin is the npm package + the front-door, run with --skip-daemon because the unified
+  // installer already owns the daemon (Step 1) — ours-opencode-install must not re-ensure/restart it.
+  assert.match(calls, /npm i -g @ours\.network\/opencode@latest/, 'opencode plugin package installed');
+  assert.match(calls, /ours-opencode-install --skip-daemon/, 'ran the front-door with --skip-daemon');
+  assert.match(out, /OpenCode plugin installed/, 'reports the OpenCode plugin installed');
+  assert.match(out, /restart opencode/, 'tells the user to restart opencode to load the tools');
+  assert.match(out, /ours_monitor_start/, 'explains that wake-on-mail is a tool the agent calls');
+  // No regression: Claude + Codex still install in the same run.
+  assert.match(calls, /claude plugin install ours@ours\.network/, 'claude still installs');
+  assert.match(calls, /codex plugin add ours@ours-codex-marketplace/, 'codex still installs');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('opencode absent → never offered, never installed', () => {
+  const { out, calls, tmp } = runInstall({ daemon: 'installed' });
+  assert.doesNotMatch(calls, /@ours\.network\/opencode/, 'no opencode package without the harness');
+  assert.doesNotMatch(calls, /ours-opencode-install/, 'front-door never run without the harness');
+  assert.doesNotMatch(out, /Install the ours plugin into OpenCode\?/, 'not offered when absent');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
 test('never dead-end: an undrivable codex prints a manual path and the flow continues', () => {
   const { out, calls, tmp } = runInstall({ daemon: 'installed', codex: 'unsafe' });
   // We must NOT try to drive an unsafe codex…
@@ -192,7 +222,7 @@ test('never dead-end: an undrivable codex prints a manual path and the flow cont
 
 test('no harness at all: explains + exits cleanly, installs nothing', () => {
   const { out, calls, tmp } = runInstall({ daemon: 'installed', noHarness: true });
-  assert.match(out, /No Claude Code, Codex, or Hermes found/, 'says no harness is present');
+  assert.match(out, /No Claude Code, Codex, Hermes, or OpenCode found/, 'says no harness is present');
   assert.match(out, /Install one of them first/, 'tells the user what to do');
   assert.doesNotMatch(calls, /plugin/, 'no plugin work without a harness');
   assert.doesNotMatch(calls, /ours-fleet init/, 'bails before the later steps');

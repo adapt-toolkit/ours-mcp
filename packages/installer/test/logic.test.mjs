@@ -27,6 +27,7 @@ test('pkgTag: nightly channel tags mcp/tg/plugins @nightly but fleet ALWAYS @lat
   assert.equal(pkgTag('claude-code', 'nightly'), 'nightly');
   assert.equal(pkgTag('codex', 'nightly'), 'nightly');
   assert.equal(pkgTag('hermes', 'nightly'), 'nightly');
+  assert.equal(pkgTag('opencode', 'nightly'), 'nightly');
   // fleet is pinned — it has no nightly tag.
   assert.equal(pkgTag('fleet', 'nightly'), 'latest', 'fleet stays stable even in nightly');
   // Latest channel → everything latest.
