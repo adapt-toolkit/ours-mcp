@@ -481,12 +481,18 @@ async function publishToBook(id: Identity): Promise<void> {
   log(`[${id.name}] published to the local contact book`);
 }
 
-function unpublishFromBook(name: string): void {
+// Remove an identity's book entry, matching on CONTAINER ID, never on name:
+// the book is keyed by name, so a same-named replacement that published after
+// this identity owns the name key — deleting by name would collaterally remove
+// the REPLACEMENT's entry while the retiree's own (divergent) entry survived.
+// The container id is the identity, the name is a label (SPEC P3a).
+function unpublishFromBook(id: { name: string; cid: string }): void {
   const entries = readBook();
-  if (!(name in entries)) return;
-  delete entries[name];
+  const hit = Object.entries(entries).find(([, e]) => e.container_id === id.cid);
+  if (!hit) return;
+  delete entries[hit[0]];
   writeBook(entries);
-  log(`[${name}] removed from the local contact book`);
+  log(`[${id.name}] removed from the local contact book (entry "${hit[0]}")`);
 }
 
 // Pin the registrar's address document into an identity (idempotent for the
@@ -988,7 +994,7 @@ function deleteIdentityCompletely(id: Identity): string | null {
   }
   identities.delete(id.name);
   try {
-    unpublishFromBook(id.name);
+    unpublishFromBook(id);
   } catch (err) {
     log(`failed to unpublish "${id.name}" from the contact book:`, String(err));
   }
@@ -3696,7 +3702,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
           await publishToBook(id!);
           done.push('published in the local contact book');
         } else if (expose === false) {
-          unpublishFromBook(id!.name);
+          unpublishFromBook(id!);
           done.push('removed from the local contact book');
         }
         return textResult(`Updated "${id!.name}": ${done.join('; ')}.`);
@@ -4060,9 +4066,12 @@ function createMcpServer(getSessionId: () => string): McpServer {
       'contacts, so you can no longer message them and inbound messages from them are ' +
       'rejected. This is a contacts-layer forget, NOT a key wipe: the per-peer channel ' +
       'key material persists, so re-adding the same peer reuses the existing encrypted ' +
-      'channel rather than re-handshaking. Note: if the removed peer is still published ' +
-      'in the host-local contact book, a later send_message to it will reconnect through ' +
-      'the book. Requires a bound identity.',
+      'channel rather than re-handshaking. Removal is NOT retirement: a later ' +
+      'send_message to the removed peer auto-reconnects — for ANY live identity on this ' +
+      'host under the same root, via the sibling path (this fires first and does not ' +
+      'need a contact-book entry, published or not); otherwise through the host-local ' +
+      'contact book if the peer is still published there. To stop reaching a peer for ' +
+      'good, address sends by container id and do not send to it. Requires a bound identity.',
     { contact: z.string().min(1).describe('Contact name or container id to remove.') },
     async ({ contact }) => {
       const { id, err } = boundOr();
