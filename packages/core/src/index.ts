@@ -114,6 +114,7 @@ import {
   type StartupProgressReporter,
 } from './startup-progress.js';
 import { armSseKeepalive } from './sse-keepalive.js';
+import { buildContactLines } from './contacts.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -3601,10 +3602,14 @@ function createMcpServer(getSessionId: () => string): McpServer {
         lines.push(
           contacts.length === 0
             ? 'No contacts yet.'
-            : `Contacts (${contacts.length}):\n${contacts
-                .map((c) => `• ${c.name} — ${c.container_id}${fmtContactRoot(roots[c.container_id])}` +
-                  `${degradedByCid.has(c.container_id) ? ` — ⚠ keys pending restore (${degradedByCid.get(c.container_id)!.queued} queued)` : ''}`)
-                .join('\n')}`,
+            : `Contacts (${contacts.length}):\n${buildContactLines(
+                contacts.map((c) => ({
+                  name: c.name,
+                  container_id: c.container_id,
+                  rootTag: fmtContactRoot(roots[c.container_id]),
+                  degradedQueued: degradedByCid.get(c.container_id)?.queued,
+                })),
+              ).join('\n')}`,
         );
         if (pending.length > 0) {
           lines.push(
