@@ -983,7 +983,8 @@ application actor loads libraries
         entry_sig = (_read_or_abort entry_sig_blob) safe crypto_signature.
         abort "Contact-book entry failed registrar verification." when key_storage::check_signature_new_container (_value_id entry) entry_sig (registrar_ad? $identity $key_list) != TRUE.
 
-        a2a_messaging::contacts target_id -> ($name -> name, $container_id -> target_id).
+        reg = a2a_messaging::register_contact target_id name.
+        registered_name = reg $name.
         a2a_messaging::peer_ads target_id -> target_ad.
 
         my_self_name = a2a_messaging::my_name.
@@ -1002,7 +1003,8 @@ application actor loads libraries
             {
                 sc a2a_messaging::monitor_copy_actions "out" target_id sent_date text? -- ( -> a) { actions (_count actions|) -> a. }
             }
-            actions (_count actions|) -> _return_data ($connected -> name, $container_id -> target_id).
+            sc (reg $actions) -- ( -> a) { actions (_count actions|) -> a. }
+            actions (_count actions|) -> _return_data ($connected -> registered_name, $container_id -> target_id).
             actions (_count actions|) -> _save_state NIL.
             return transaction::success actions.
         }).
@@ -1014,22 +1016,23 @@ application actor loads libraries
 
         pid = resolve_pending ref.
         entry = (pending_introductions pid)?.
-        a2a_messaging::contacts pid -> ($name -> entry $name, $container_id -> pid).
+        reg = a2a_messaging::register_contact pid (entry $name).
         a2a_messaging::peer_ads pid -> entry $ad.
 
         queued = entry $messages.
         flushed is int = 0.
         sc queued -- ( -> m)
         {
-            deposit_message pid (entry $name) (m $text) (m $date) "" no_reply.
+            deposit_message pid (reg $name) (m $text) (m $date) "" no_reply.
             flushed -> flushed + 1.
         }
         delete pending_introductions pid.
 
-        return transaction::success [
-            _return_data ($approved -> entry $name, $container_id -> pid, $flushed -> flushed),
-            _save_state NIL
-        ].
+        actions is transaction::action::type[] = [].
+        sc (reg $actions) -- ( -> a) { actions (_count actions|) -> a. }
+        actions (_count actions|) -> _return_data ($approved -> (reg $name), $container_id -> pid, $flushed -> flushed).
+        actions (_count actions|) -> _save_state NIL.
+        return transaction::success actions.
     }
 
     trn reject_introduction _:($contact -> ref: str)
@@ -1216,10 +1219,13 @@ application actor loads libraries
         cert_blob is bin+ = NIL.
         if a2a_messaging::delegation_cert != NIL { cert_blob -> (_write a2a_messaging::delegation_cert?). }
 
-        a2a_messaging::contacts target_id -> ($name -> name, $container_id -> target_id).
+        reg = a2a_messaging::register_contact target_id name.
+        registered_name = reg $name.
         a2a_messaging::peer_ads target_id -> target_ad.
         // Record the target's root linkage: a sibling shares my root by
         // definition (the receiving side verifies the converse independently).
+        // role_id stays the sibling's OWN role label (`name` as passed in), not
+        // the possibly-suffixed local display name.
         if a2a_messaging::delegation_cert != NIL && a2a_messaging::root_profile != NIL
         {
             a2a_messaging::contact_roots target_id -> ($root_cid -> a2a_messaging::delegation_cert? $c $root_cid, $root_name -> a2a_messaging::root_profile? $p $name, $role_id -> name).
@@ -1245,7 +1251,8 @@ application actor loads libraries
             {
                 sc a2a_messaging::monitor_copy_actions "out" target_id sent_date text? -- ( -> a) { actions (_count actions|) -> a. }
             }
-            actions (_count actions|) -> _return_data ($connected -> name, $container_id -> target_id).
+            sc (reg $actions) -- ( -> a) { actions (_count actions|) -> a. }
+            actions (_count actions|) -> _return_data ($connected -> registered_name, $container_id -> target_id).
             actions (_count actions|) -> _save_state NIL.
             return transaction::success actions.
         }).
@@ -1755,7 +1762,9 @@ application actor loads libraries
         }
 
         return transaction::success [
-            _return_data ($imported -> TRUE, $contacts -> _count a2a_messaging::contacts|, $peers -> _count a2a_messaging::peer_ads|),
+            // $renamed counts the OUTSTANDING import-sweep renames (persisted
+            // marks included), so a restore log line surfaces books that healed.
+            _return_data ($imported -> TRUE, $contacts -> _count a2a_messaging::contacts|, $peers -> _count a2a_messaging::peer_ads|, $renamed -> _count a2a_messaging::import_renames|),
             _save_state NIL
         ].
     }
@@ -1851,23 +1860,20 @@ application actor loads libraries
 
         if local_auto_accept
         {
-            a2a_messaging::contacts sender_id -> ($name -> joiner_name, $container_id -> sender_id).
+            reg = a2a_messaging::register_contact sender_id joiner_name.
+            registered_name = reg $name.
             a2a_messaging::peer_ads sender_id -> joiner_ad.
+            actions is transaction::action::type[] = [].
+            sc (reg $actions) -- ( -> a) { actions (_count actions|) -> a. }
+            actions (_count actions|) -> _notify_agent ($event -> $local_contact_added, $name -> registered_name, $container_id -> sender_id).
             if text != NIL
             {
-                mid = deposit_message sender_id joiner_name text? now "" no_reply.
-                actions is transaction::action::type[] = [
-                    _notify_agent ($event -> $local_contact_added, $name -> joiner_name, $container_id -> sender_id),
-                    _notify_agent ($event -> $message_received, $sender_name -> joiner_name, $msg_id -> mid, $date -> now)
-                ].
+                mid = deposit_message sender_id registered_name text? now "" no_reply.
+                actions (_count actions|) -> _notify_agent ($event -> $message_received, $sender_name -> registered_name, $msg_id -> mid, $date -> now).
                 sc a2a_messaging::monitor_copy_actions "in" sender_id now text? -- ( -> a) { actions (_count actions|) -> a. }
-                actions (_count actions|) -> _save_state NIL.
-                return transaction::success actions.
             }
-            return transaction::success [
-                _notify_agent ($event -> $local_contact_added, $name -> joiner_name, $container_id -> sender_id),
-                _save_state NIL
-            ].
+            actions (_count actions|) -> _save_state NIL.
+            return transaction::success actions.
         }
 
         // Pending-approval policy: park the introduction (with its optional
@@ -1960,23 +1966,25 @@ application actor loads libraries
             return transaction::success [ _save_state NIL ].
         }
 
-        a2a_messaging::contacts sender_id -> ($name -> joiner_name, $container_id -> sender_id).
+        // THE incident site: a respawned role with fresh keys and the SAME label
+        // writes a second entry, created by a remote party with no local action.
+        // register_contact suffixes the newcomer and warns with both container
+        // ids; the first message still lands (D1: never refuse — refusing here
+        // would discard legitimate mail carried in the same transaction).
+        reg = a2a_messaging::register_contact sender_id joiner_name.
+        registered_name = reg $name.
         a2a_messaging::peer_ads sender_id -> joiner_ad.
         a2a_messaging::contact_roots sender_id -> link?.
+        actions is transaction::action::type[] = [].
+        sc (reg $actions) -- ( -> a) { actions (_count actions|) -> a. }
+        actions (_count actions|) -> _notify_agent ($event -> $sibling_contact_added, $name -> registered_name, $container_id -> sender_id).
         if text != NIL
         {
-            mid = deposit_message sender_id joiner_name text? now "" no_reply.
-            actions is transaction::action::type[] = [
-                _notify_agent ($event -> $sibling_contact_added, $name -> joiner_name, $container_id -> sender_id),
-                _notify_agent ($event -> $message_received, $sender_name -> joiner_name, $msg_id -> mid, $date -> now)
-            ].
+            mid = deposit_message sender_id registered_name text? now "" no_reply.
+            actions (_count actions|) -> _notify_agent ($event -> $message_received, $sender_name -> registered_name, $msg_id -> mid, $date -> now).
             sc a2a_messaging::monitor_copy_actions "in" sender_id now text? -- ( -> a) { actions (_count actions|) -> a. }
-            actions (_count actions|) -> _save_state NIL.
-            return transaction::success actions.
         }
-        return transaction::success [
-            _notify_agent ($event -> $sibling_contact_added, $name -> joiner_name, $container_id -> sender_id),
-            _save_state NIL
-        ].
+        actions (_count actions|) -> _save_state NIL.
+        return transaction::success actions.
     }
 }

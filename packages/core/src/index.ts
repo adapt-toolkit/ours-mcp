@@ -114,6 +114,7 @@ import {
   type StartupProgressReporter,
 } from './startup-progress.js';
 import { armSseKeepalive } from './sse-keepalive.js';
+import { buildContactLines } from './contacts.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -480,12 +481,18 @@ async function publishToBook(id: Identity): Promise<void> {
   log(`[${id.name}] published to the local contact book`);
 }
 
-function unpublishFromBook(name: string): void {
+// Remove an identity's book entry, matching on CONTAINER ID, never on name:
+// the book is keyed by name, so a same-named replacement that published after
+// this identity owns the name key — deleting by name would collaterally remove
+// the REPLACEMENT's entry while the retiree's own (divergent) entry survived.
+// The container id is the identity, the name is a label (SPEC P3a).
+function unpublishFromBook(id: { name: string; cid: string }): void {
   const entries = readBook();
-  if (!(name in entries)) return;
-  delete entries[name];
+  const hit = Object.entries(entries).find(([, e]) => e.container_id === id.cid);
+  if (!hit) return;
+  delete entries[hit[0]];
   writeBook(entries);
-  log(`[${name}] removed from the local contact book`);
+  log(`[${id.name}] removed from the local contact book (entry "${hit[0]}")`);
 }
 
 // Pin the registrar's address document into an identity (idempotent for the
@@ -987,7 +994,7 @@ function deleteIdentityCompletely(id: Identity): string | null {
   }
   identities.delete(id.name);
   try {
-    unpublishFromBook(id.name);
+    unpublishFromBook(id);
   } catch (err) {
     log(`failed to unpublish "${id.name}" from the contact book:`, String(err));
   }
@@ -2157,6 +2164,19 @@ function wireHandlers(id: Identity): void {
         process.nextTick(() =>
           pushNotification(id.name, `[${id.name}] local contact "${name}" (${cid}) connected via the contact book.`),
         );
+      } else if (event === 'contact_name_collision') {
+        // register_contact took an ordinal suffix (D1/D2): surface the warning
+        // loudly — the operator may need to move the name with rename_contact
+        // (D3: the clean name stayed with the FIRST arrival, which after a role
+        // respawn is the dead predecessor).
+        const message = payload.Reduce('message').Visualize();
+        const desired = payload.Reduce('desired').Visualize();
+        const assigned = payload.Reduce('assigned').Visualize();
+        const existingCid = payload.Reduce('existing_container_id').Visualize();
+        const cid = payload.Reduce('container_id').Visualize();
+        appendNotifyLog(id, { event: 'contact_name_collision', desired, assigned, existing_container_id: existingCid, container_id: cid });
+        log(`[${id.name}] CONTACT NAME COLLISION — ${message}`);
+        process.nextTick(() => pushNotification(id.name, `[${id.name}] ⚠ ${message}`));
       } else if (event === 'sibling_contact_added') {
         const name = payload.Reduce('name').Visualize();
         const cid = payload.Reduce('container_id').Visualize();
@@ -2906,6 +2926,17 @@ function renderContacts(v: AdaptValue): Array<{ name: string; container_id: stri
   return out;
 }
 
+// cid -> pre-sweep shared name, from ::a2a_messaging::list_import_renames.
+function renderImportRenames(v: AdaptValue): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (v.IsNil()) return out;
+  for (const key of v.GetKeys()) {
+    const n = v.Reduce(key);
+    if (!n.IsNil()) out[typeof key === 'string' ? key : key.Visualize()] = n.Visualize();
+  }
+  return out;
+}
+
 type ReplyRef = { wire_id: string; sentence?: number };
 type InboxMsg = {
   msg_id: number;
@@ -3590,21 +3621,27 @@ function createMcpServer(getSessionId: () => string): McpServer {
       const { id, err } = boundOr();
       if (err) return err;
       try {
-        const { contacts, pending, roots, degraded } = withScope((lt) => ({
+        const { contacts, pending, roots, degraded, renames } = withScope((lt) => ({
           contacts: renderContacts(readonlyTx(id!, '::a2a_messaging::list_contacts', lt)),
           pending: renderPending(readonlyTx(id!, '::actor::list_pending_introductions', lt)),
           roots: renderContactRoots(readonlyTx(id!, '::a2a_messaging::list_contact_roots', lt)),
           degraded: renderDegraded(readonlyTx(id!, '::a2a_messaging::list_degraded_contacts', lt)),
+          renames: renderImportRenames(readonlyTx(id!, '::a2a_messaging::list_import_renames', lt)),
         }));
         const degradedByCid = new Map(degraded.map((d) => [d.cid, d]));
         const lines: string[] = [];
         lines.push(
           contacts.length === 0
             ? 'No contacts yet.'
-            : `Contacts (${contacts.length}):\n${contacts
-                .map((c) => `• ${c.name} — ${c.container_id}${fmtContactRoot(roots[c.container_id])}` +
-                  `${degradedByCid.has(c.container_id) ? ` — ⚠ keys pending restore (${degradedByCid.get(c.container_id)!.queued} queued)` : ''}`)
-                .join('\n')}`,
+            : `Contacts (${contacts.length}):\n${buildContactLines(
+                contacts.map((c) => ({
+                  name: c.name,
+                  container_id: c.container_id,
+                  rootTag: fmtContactRoot(roots[c.container_id]),
+                  degradedQueued: degradedByCid.get(c.container_id)?.queued,
+                  renamedFrom: renames[c.container_id],
+                })),
+              ).join('\n')}`,
         );
         if (pending.length > 0) {
           lines.push(
@@ -3665,7 +3702,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
           await publishToBook(id!);
           done.push('published in the local contact book');
         } else if (expose === false) {
-          unpublishFromBook(id!.name);
+          unpublishFromBook(id!);
           done.push('removed from the local contact book');
         }
         return textResult(`Updated "${id!.name}": ${done.join('; ')}.`);
@@ -4029,9 +4066,12 @@ function createMcpServer(getSessionId: () => string): McpServer {
       'contacts, so you can no longer message them and inbound messages from them are ' +
       'rejected. This is a contacts-layer forget, NOT a key wipe: the per-peer channel ' +
       'key material persists, so re-adding the same peer reuses the existing encrypted ' +
-      'channel rather than re-handshaking. Note: if the removed peer is still published ' +
-      'in the host-local contact book, a later send_message to it will reconnect through ' +
-      'the book. Requires a bound identity.',
+      'channel rather than re-handshaking. Removal is NOT retirement: a later ' +
+      'send_message to the removed peer auto-reconnects — for ANY live identity on this ' +
+      'host under the same root, via the sibling path (this fires first and does not ' +
+      'need a contact-book entry, published or not); otherwise through the host-local ' +
+      'contact book if the peer is still published there. To stop reaching a peer for ' +
+      'good, address sends by container id and do not send to it. Requires a bound identity.',
     { contact: z.string().min(1).describe('Contact name or container id to remove.') },
     async ({ contact }) => {
       const { id, err } = boundOr();
@@ -4046,6 +4086,34 @@ function createMcpServer(getSessionId: () => string): McpServer {
         return textResult(msg);
       } catch (e) {
         return textResult(`remove_contact failed: ${String(e)}`, true);
+      }
+    },
+  );
+
+  server.tool(
+    'rename_contact',
+    'Rename a contact (addressed by current name or container id) — rewrites the ' +
+      'display name only; the container id, keys and the established encrypted ' +
+      'channel are untouched. Rejects a name another contact already holds. When ' +
+      'two contacts share a name (e.g. after a collision took an ordinal suffix), ' +
+      'address the one to rename by its container id. Requires a bound identity.',
+    {
+      contact: z.string().min(1).describe('Contact name or container id to rename.'),
+      name: z.string().min(1).describe('The new display name.'),
+    },
+    async ({ contact, name }) => {
+      const { id, err } = boundOr();
+      if (err) return err;
+      try {
+        const msg = await withScopeAsync(async (lt) => {
+          const data = await mutatingTx(id!, '::a2a_messaging::rename_contact', { contact, name }, lt);
+          const from = data.Reduce('renamed').Visualize();
+          const cid = data.Reduce('container_id').Visualize();
+          return `Renamed contact "${from}" to "${name}" (${cid}).`;
+        });
+        return textResult(msg);
+      } catch (e) {
+        return textResult(`rename_contact failed: ${String(e)}`, true);
       }
     },
   );

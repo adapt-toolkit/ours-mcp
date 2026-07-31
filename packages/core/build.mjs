@@ -122,6 +122,14 @@ await build({
   outfile: resolve(dist, 'sse-keepalive.js'),
 });
 
+// Pure contact-list rendering (duplicate-name markers). Standalone for the unit
+// test (test/contact-lines.test.mjs) — same pattern as files.js / inbox.js.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/contacts.ts')],
+  outfile: resolve(dist, 'contacts.js'),
+});
+
 // Ship ONLY the compiled MUFL packet (*.muflo) — never the .mu/.mm/.mufl source.
 // The MCP server loads the .muflo at runtime from dist/mufl_code/ by hash.
 const muflSrc = resolve(root, 'mufl_code');
