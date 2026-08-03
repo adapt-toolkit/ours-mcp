@@ -9,9 +9,18 @@ The server **is** the node: on startup it boots a single ADAPT packet (a MUFL
 messenger), restores prior state from the state dir, connects to the broker, and
 exposes the messaging tools — each a thin wrapper over one MUFL user transaction:
 
-- `generate_invite` — invite to share out-of-band (optionally named)
+- `generate_invite` — invite to share out-of-band (optionally named; `mode`
+  `"one_time"` default or `"public"` for a reusable open-posting invite)
+- `list_invites` / `revoke_invite` — outstanding invites; revocation is the only
+  way to close a public invite (idempotent)
 - `add_contact` — add a contact from an invite blob (TOFU)
 - `list_contacts`
+- `remove_contact` — contacts-layer forget + one best-effort authenticated
+  "remove me" notice to the peer (fire-and-forget; remote removal NOT guaranteed)
+- `create_temporary_identity` / `close_temporary_identity` — session-scoped
+  identity owned by exactly one session lease: on close/session end, contacts get
+  one best-effort remove-me notice, then ALL local state is deleted (stale ones —
+  owner process dead — are swept automatically; permanent identities never are)
 - `send_message` — end-to-end encrypted; optional `reply_to_wire_id` (+ `reply_to_sentence`) to reply to a specific message
 - `get_messages` — return unread messages (bodies, each with its `wire_id` + any `reply_to`) + mark read; delivered exactly once
 - `mark_processed` / `defer_messages` — remove handled messages, or re-queue read ones for another session

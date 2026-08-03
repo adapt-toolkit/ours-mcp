@@ -381,7 +381,15 @@ application actor loads libraries
             {
                 return monitor_copy_actions "out" ((arg $target_id) safe global_id) ((arg $text) safe str) ((arg $date) safe time).
             },
-            $on_contact_removed -> fn (_: any) -> transaction::action::type[] { return []. },
+            // core 0.13 fires this for BOTH removal directions — our own
+            // remove_contact AND an inbound authenticated removal notice from the
+            // peer (apply_peer_removal_actions). The payload carries only the cid;
+            // the daemon disambiguates direction (it knows which removals it
+            // initiated). Content-free by construction.
+            $on_contact_removed -> fn (arg: any) -> transaction::action::type[]
+            {
+                return [ _notify_agent ($event -> $contact_removed, $cid -> ((arg $container_id) safe global_id)) ].
+            },
             // NEW (core 3.1): received a file. Reject unknown senders (no byte queuing —
             // D3), else deposit + a CONTENT-FREE notify (metadata only; bytes pulled later
             // by get_files). Arg names/order are fixed by the core contract.
@@ -551,7 +559,13 @@ application actor loads libraries
                 a2a_capabilities::cap_receipts_emit,
                 // Peers may hand this MCP a scoped notify address; subsequent
                 // ordinary send_message calls emit a fire-and-forget wake.
-                a2a_capabilities::cap_notifications
+                a2a_capabilities::cap_notifications,
+                // core 0.13 bilateral contact removal: "I understand the removal
+                // notice and will drop you when you remove me." Advertising it is
+                // ALSO what opens the fail-closed send gate (contact_removal_gate
+                // checks self_advertises first), so without this the daemon could
+                // never emit a remove-me notice. Receive side is unconditional.
+                a2a_capabilities::cap_contact_removal
             ],
             $handlers   -> cap_handlers,
             $on_unknown -> fn (_: any) -> transaction::action::type[] { return []. }
