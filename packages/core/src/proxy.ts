@@ -113,6 +113,8 @@ type ReceivedFileMeta = {
   size: number;
   sha256: string;
   sender: string;
+  kind?: 'file' | 'voice_message';
+  transcription?: { status?: string };
 };
 
 // access(2) resolves against the REAL uid/gid and needs +x on every parent, so a
@@ -147,10 +149,14 @@ export function annotateGetFilesResult(result: unknown, readable: (p: string) =>
   );
   if (files.length === 0) return false;
 
-  const blocked = files.filter((f) => !readable(f.path));
+  // Voice delivery remains transcript-first for compatibility. Its structured
+  // record still exposes the audio path/readability, but an unreadable daemon
+  // copy must not turn a successfully delivered transcript/fallback into an
+  // unsolicited destination prompt.
+  const blocked = files.filter((f) => f.kind !== 'voice_message' && !readable(f.path));
   // Annotate the structured records either way so a structured consumer sees the
   // same truth the prose does.
-  for (const f of files) (f as ReceivedFileMeta & { readable: boolean }).readable = !blocked.includes(f);
+  for (const f of files) (f as ReceivedFileMeta & { readable: boolean }).readable = readable(f.path);
   if (blocked.length === 0) return false;
 
   const lines: string[] = [

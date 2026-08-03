@@ -86,7 +86,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib';
 import * as fs from 'node:fs';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, mkdir, open, rename, unlink, lstat } from 'node:fs/promises';
 
 import { adapt_wrapper } from '@adapt-toolkit/sdk/executables';
 import { PacketWrapperConfigurator } from '@adapt-toolkit/sdk/wrappers';
@@ -108,7 +108,10 @@ import {
 import { OURS_COMPAT_VERSION } from './protocol';
 import { mimeFromExt, sanitizeFilename } from './files.js';
 import { e2eWireIdsFromEvents, buildMessagesPayload } from './inbox.js';
-import { isVoiceMessage, sttStatus, transcribeVoice, voiceDeliveryLine, type VoiceOutcome } from './transcribe.js';
+import {
+  isVoiceMessage, sttStatus, transcribeVoice, voiceDeliveryLine, structuredVoiceOutcome,
+  type VoiceOutcome, type StructuredVoiceOutcome,
+} from './transcribe.js';
 import {
   createStartupProgressReporter,
   type StartupProgressReporter,
@@ -383,6 +386,8 @@ function tightenIdentityPerms(): void {
 // A wire_id is a hex content hash; keep it to that charset so it can never be a
 // path component that escapes the identity's files dir (SCOPING, issue #34).
 const isWireId = (s: string): boolean => /^[A-Za-z0-9]+$/.test(s) && s.length > 0 && s.length <= 128;
+const isSelectableWireId = (s: string): boolean => /^[A-Fa-f0-9]{64}$/.test(s);
+const FILE_SELECTION_CAP = 32;
 
 // Resolve a received file STRICTLY within the BOUND identity's OWN files folder
 // (STATE_DIR/<identity>/files/<wire_id>-<safe_name>). Returns the absolute path
@@ -1885,7 +1890,10 @@ function refreshUnread(id: Identity): void {
       const inbox = renderInbox(readonlyTx(id, '::actor::list_incoming_messages', lt));
       const unread = inbox.filter((m) => m.status === 'unread');
       const filesAv = readonlyTx(id, '::actor::list_incoming_files', lt);
-      const unreadFiles: Array<{ file_id: string; from: string; filename: string; mime: string; wire_id: string }> = [];
+      const unreadFiles: Array<{
+        file_id: string; sender_id: string; from: string; filename: string; mime: string;
+        bytes: string; date: string; wire_id: string;
+      }> = [];
       if (!filesAv.IsNil()) {
         for (let i = 0; ; i++) {
           const f = filesAv.Reduce(i);
@@ -1893,9 +1901,12 @@ function refreshUnread(id: Identity): void {
           if (f.Reduce('status').Visualize() !== 'unread') continue;
           unreadFiles.push({
             file_id: f.Reduce('file_id').Visualize(),
+            sender_id: f.Reduce('sender_id').Visualize(),
             from: f.Reduce('sender_name').Visualize(),
             filename: f.Reduce('filename').Visualize(),
             mime: f.Reduce('mime').Visualize(),
+            bytes: f.Reduce('size').Visualize(),
+            date: f.Reduce('date').Visualize(),
             wire_id: f.Reduce('wire_id').Visualize(),
           });
         }
@@ -1942,7 +1953,16 @@ function unreadSummary(): { identities: Array<Record<string, unknown>> } {
       if (!raw || typeof raw !== 'object') return [];
       const f = raw as Record<string, unknown>;
       if (typeof f.from !== 'string' || typeof f.filename !== 'string' || typeof f.mime !== 'string' || typeof f.wire_id !== 'string') return [];
-      return [{ from: f.from, filename: f.filename, mime: f.mime, wire_id: f.wire_id }];
+      return [{
+        from: f.from,
+        filename: f.filename,
+        mime: f.mime,
+        wire_id: f.wire_id,
+        ...(typeof f.sender_id === 'string' ? { sender_id: f.sender_id } : {}),
+        ...(['string', 'number'].includes(typeof f.file_id) ? { file_id: f.file_id } : {}),
+        ...(['string', 'number'].includes(typeof f.bytes) ? { bytes: f.bytes } : {}),
+        ...(typeof f.date === 'string' ? { date: f.date } : {}),
+      }];
     }) : [];
     out.push({ name: entry.name, count, recent, files, unread_files: unreadFiles });
   }
@@ -2142,15 +2162,24 @@ function wireHandlers(id: Identity): void {
         // COUNT, not the content). The bytes stay in the packet until get_files pulls
         // them. Mirrors message_received.
         const sender = payload.Reduce('sender_name').Visualize();
+        const senderId = payload.Reduce('sender_id').Visualize();
         const fileId = payload.Reduce('file_id').Visualize();
+        const wireId = payload.Reduce('wire_id').Visualize();
         const filename = payload.Reduce('filename').Visualize();
         const mime = payload.Reduce('mime').Visualize();
         const bytes = payload.Reduce('bytes').Visualize();
         const date = payload.Reduce('date').Visualize();
-        appendNotifyLog(id, { event: 'file_received', from: sender, file_id: fileId, filename, mime, bytes, date });
+        appendNotifyLog(id, {
+          event: 'file_received', from: sender, sender_id: senderId, file_id: fileId,
+          wire_id: wireId, filename, mime, bytes, date,
+        });
         refreshUnread(id);
         process.nextTick(() =>
-          pushNotification(id.name, `[${id.name}] new file ${filename} (${bytes} B) from ${sender} (#${fileId})`),
+          pushNotification(
+            id.name,
+            `[${id.name}] new file ${filename} (${bytes} B) from ${sender} ` +
+              `(sender_id ${senderId}, file_id ${fileId}, wire_id ${wireId})`,
+          ),
         );
       } else if (event === 'contact_accepted') {
         const name = payload.Reduce('name').Visualize();
@@ -2975,23 +3004,68 @@ function renderInbox(v: AdaptValue): InboxMsg[] {
   return out;
 }
 
-// Render received-file metadata (no bytes) for list_incoming_files, mirroring
-// renderInbox's array-iteration idiom (v.Reduce(i) until IsNil).
-function renderFiles(v: AdaptValue): string {
-  if (v.IsNil()) return 'No files received.';
-  const lines: string[] = [];
+type FileReplyRef = { wire_id: string; sentence?: number };
+type IncomingFileMeta = {
+  file_id: number;
+  wire_id: string;
+  from: { id: string; name: string };
+  filename: string;
+  mime: string;
+  size: number;
+  size_source: 'received_payload';
+  status: string;
+  date: string;
+  sha256: null;
+  reply_to: FileReplyRef | null;
+  kind: 'file' | 'voice_message';
+};
+
+// Render the metadata-only core projection used for preauthorization. The
+// authenticated CID and untrusted display label stay separate; no data field is
+// present in the AdaptValue returned by ::actor::list_incoming_files.
+function renderFileMetadata(v: AdaptValue): IncomingFileMeta[] {
+  const files: IncomingFileMeta[] = [];
+  if (v.IsNil()) return files;
   for (let i = 0; ; i++) {
     const f = v.Reduce(i);
     if (f.IsNil()) break;
-    const name = f.Reduce('filename').Visualize();
-    const mime = f.Reduce('mime').Visualize();
-    const sender = f.Reduce('sender_name').Visualize();
-    const status = f.Reduce('status').Visualize();
-    const wire = f.Reduce('wire_id').Visualize();
-    const voiceTag = isVoiceMessage(mime, name) ? '🎤 voice message · ' : '';
-    lines.push(`  • ${voiceTag}${name} (${mime || 'application/octet-stream'}) from ${sender} [${status}] {${wire}}`);
+    const filename = f.Reduce('filename').Visualize();
+    const mime = f.Reduce('mime').Visualize() || 'application/octet-stream';
+    const reply = f.Reduce('reply_to');
+    let reply_to: FileReplyRef | null = null;
+    if (!reply.IsNil()) {
+      reply_to = { wire_id: reply.Reduce('wire_id').Visualize() };
+      const sentence = parseInt(reply.Reduce('sentence').Visualize(), 10);
+      if (Number.isSafeInteger(sentence) && sentence > 0) reply_to.sentence = sentence;
+    }
+    files.push({
+      file_id: parseInt(f.Reduce('file_id').Visualize(), 10),
+      wire_id: f.Reduce('wire_id').Visualize(),
+      from: { id: f.Reduce('sender_id').Visualize(), name: f.Reduce('sender_name').Visualize() },
+      filename,
+      mime,
+      size: parseInt(f.Reduce('size').Visualize(), 10),
+      size_source: 'received_payload',
+      status: f.Reduce('status').Visualize(),
+      date: f.Reduce('date').Visualize(),
+      sha256: null,
+      reply_to,
+      kind: isVoiceMessage(mime, filename) ? 'voice_message' : 'file',
+    });
   }
-  if (lines.length === 0) return 'No files received.';
+  return files;
+}
+
+function renderFiles(files: IncomingFileMeta[]): string {
+  if (files.length === 0) return 'No files received.';
+  const lines: string[] = [];
+  for (const file of files) {
+    const voiceTag = file.kind === 'voice_message' ? '🎤 voice message · ' : '';
+    lines.push(
+      `  • ${voiceTag}${file.filename} (${file.mime}, ${file.size} B) from ${file.from.name} ` +
+      `[${file.status}] {${file.wire_id}} sender_id=${file.from.id}`,
+    );
+  }
   return `${lines.length} file(s):\n${lines.join('\n')}`;
 }
 
@@ -3000,14 +3074,46 @@ function renderFiles(v: AdaptValue): string {
 // user, whether each `path` is actually readable — prose is for the model, this
 // is for the connector, so the two never drift via regex (issue #34).
 type ReceivedFileMeta = {
+  file_id: number;
   wire_id: string;
+  from: { id: string; name: string };
   filename: string;
   path: string;
   mime: string;
   size: number;
   sha256: string;
+  status: 'processed';
+  date: string;
+  kind: 'file' | 'voice_message';
+  transcription?: StructuredVoiceOutcome;
+  // Compatibility alias retained for the proxy and older structured consumers.
   sender: string;
 };
+
+async function writeReceivedFileSafely(dir: string, outPath: string, bytes: Buffer): Promise<void> {
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const dirStat = await lstat(dir);
+  if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) throw new Error('received-files directory is not a safe directory');
+  const tmp = join(dir, `.${basename(outPath)}.${randomUUID()}.tmp`);
+  const handle = await open(tmp, 'wx', 0o600);
+  try {
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } catch (error) {
+    await handle.close().catch(() => {});
+    await unlink(tmp).catch(() => {});
+    throw error;
+  }
+  await handle.close();
+  try {
+    // Atomic rename replaces an existing entry itself (including a symlink),
+    // never follows it to an attacker-chosen target.
+    await rename(tmp, outPath);
+  } catch (error) {
+    await unlink(tmp).catch(() => {});
+    throw error;
+  }
+}
 
 // Pull the bytes from a get_files result, write each file under the identity's
 // files/ dir, and return a human summary with on-disk paths plus the structured
@@ -3024,15 +3130,31 @@ async function writeIncomingFiles(
   for (let i = 0; ; i++) {
     const f = v.Reduce(i);
     if (f.IsNil()) break;
-    if (lines.length === 0) await mkdir(dir, { recursive: true });
     const name = f.Reduce('filename').Visualize();
     const mime = f.Reduce('mime').Visualize() || 'application/octet-stream';
     const sender = f.Reduce('sender_name').Visualize();
+    const senderId = f.Reduce('sender_id').Visualize();
+    const fileId = parseInt(f.Reduce('file_id').Visualize(), 10);
+    const date = f.Reduce('date').Visualize();
     const wire = f.Reduce('wire_id').Visualize();
     const bytes = Buffer.from(f.Reduce('data').GetBinary());
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     const outPath = join(dir, `${wire}-${sanitizeFilename(name)}`);
-    await writeFile(outPath, bytes);
+    await writeReceivedFileSafely(dir, outPath, bytes);
+    const base: ReceivedFileMeta = {
+      file_id: fileId,
+      wire_id: wire,
+      from: { id: senderId, name: sender },
+      filename: name,
+      path: outPath,
+      mime,
+      size: bytes.length,
+      sha256,
+      status: 'processed',
+      date,
+      kind: isVoiceMessage(mime, name) ? 'voice_message' : 'file',
+      sender,
+    };
     if (isVoiceMessage(mime, name)) {
       // Voice messages reach the agent as TEXT, deterministically (the agent
       // never processes audio; the original file is saved above either way).
@@ -3044,13 +3166,12 @@ async function writeIncomingFiles(
         const r = await transcribeVoice(bytes, name, mime, CONFIG.stt!);
         outcome = r.ok ? { kind: 'transcript', text: r.text } : { kind: 'failed', error: r.error };
       }
+      base.transcription = structuredVoiceOutcome(st, outcome, { audioPath: outPath, wireId: wire });
       lines.push(voiceDeliveryLine({ sender, wire, savedPath: outPath, sizeBytes: bytes.length }, outcome));
-      // Deliberately NOT added to files[]: the transcript IS the delivery, so the
-      // proxy must not turn a voice message into a "where do you want to save it?"
-      // prompt. save_file(wire_id) still fetches the audio if it's ever wanted.
+      files.push(base);
       continue;
     }
-    files.push({ wire_id: wire, filename: name, path: outPath, mime, size: bytes.length, sha256, sender });
+    files.push(base);
     lines.push(`  • ${name} (${mime}, ${bytes.length} B, sha256 ${sha256}) from ${sender} → ${outPath} {${wire}}`);
   }
   if (lines.length === 0) return { text: 'No new files.', files };
@@ -4201,15 +4322,22 @@ function createMcpServer(getSessionId: () => string): McpServer {
 
   server.tool(
     'list_incoming_files',
-    'List received files (metadata only — does not retrieve bytes or change status). ' +
-      'Use get_files to pull the bytes to disk. Requires a bound identity.',
+    'List received files as structured metadata only — authenticated sender CID in ' +
+      '`from.id`, untrusted display label in `from.name`, stable file_id/wire_id, filename, ' +
+      'MIME, received size/date, status, and voice kind. Does not return/write bytes or ' +
+      'change status. Authorize by from.id, then pass approved wire_ids to get_files. ' +
+      'Requires a bound identity.',
     {},
     async () => {
       const { id, err } = boundOr();
       if (err) return err;
       try {
-        const out = withScope((lt) => renderFiles(readonlyTx(id!, '::actor::list_incoming_files', lt)));
-        return textResult(out);
+        const files = withScope((lt) => renderFileMetadata(readonlyTx(id!, '::actor::list_incoming_files', lt)));
+        return {
+          content: [{ type: 'text' as const, text: renderFiles(files) }],
+          structuredContent: { count: files.length, files },
+          isError: false,
+        };
       } catch (e) {
         return textResult(`list_incoming_files failed: ${String(e)}`, true);
       }
@@ -4218,36 +4346,77 @@ function createMcpServer(getSessionId: () => string): McpServer {
 
   server.tool(
     'get_files',
-    'Retrieve received files that have not been pulled yet: writes each to disk under ' +
+    'Retrieve selected unread files by stable wire_id, or (when wire_ids is omitted) all ' +
+      'unread files for backward compatibility. Writes only retrieved files to disk under ' +
       "the identity's files dir (STATE_DIR/<identity>/files/<wire_id>-<name>) and returns " +
-      'its PATH + metadata (filename, mime, size, sha256, sender, wire_id) — the BYTES are ' +
+      'structured status, authenticated sender CID, IDs, path, filename/MIME, actual size, ' +
+      'sha256, and voice transcription outcome — the BYTES are ' +
       'never returned into your context. Flips them to "processed" — the sole place file ' +
       'bytes leave the packet. If your OS user can read the returned path, use it directly; ' +
       'if you run as a different OS user than the daemon owner and cannot read it, the ours ' +
       'connector says so in the result and asks you for a destination — then call ' +
       'save_file({ wire_id, dest_path }) to stream a copy to a path you can write. ' +
       'Requires a bound identity.',
-    {},
-    async () => {
+    {
+      wire_ids: z.array(z.string()).optional().describe(
+        `Optional 1-${FILE_SELECTION_CAP} unique 64-hex wire_ids from list_incoming_files. ` +
+        'Omit for legacy bulk retrieval of every unread file.',
+      ),
+    },
+    async ({ wire_ids }) => {
       const { id, err } = boundOr();
       if (err) return err;
+      const selectionError = (category: string, message: string) => ({
+        content: [{ type: 'text' as const, text: `get_files failed: ${message}` }],
+        structuredContent: {
+          files: [],
+          selection: {
+            mode: 'selected',
+            requested_wire_ids: wire_ids ?? [],
+            items: (wire_ids ?? []).map((wire_id) => ({ wire_id, status: 'error', error_category: category })),
+          },
+          error: { category, message },
+        },
+        isError: true,
+      });
+      if (wire_ids !== undefined) {
+        if (wire_ids.length < 1 || wire_ids.length > FILE_SELECTION_CAP) {
+          return selectionError('invalid_selection', `wire_ids must contain 1-${FILE_SELECTION_CAP} items.`);
+        }
+        if (wire_ids.some((wire) => !isSelectableWireId(wire))) {
+          return selectionError('malformed_id', 'every selected wire_id must be exactly 64 hexadecimal characters.');
+        }
+        if (new Set(wire_ids).size !== wire_ids.length) {
+          return selectionError('duplicate_id', 'wire_ids must not contain duplicates.');
+        }
+      }
       try {
         const out = await withScopeAsync(async (lt) => {
-          const data = await mutatingTx(id!, '::actor::get_files', {}, lt);
+          const data = await mutatingTx(id!, '::actor::get_files', wire_ids === undefined ? {} : { wire_ids }, lt);
           return await writeIncomingFiles(id!, data.Reduce('files'));
         });
         refreshUnread(id!);
         // structuredContent carries the same records the prose lists. The proxy
         // reads it to probe readability as the agent's OS user (issue #34); no
         // outputSchema is declared, so this stays additive for every other client.
-        if (out.files.length === 0) return textResult(out.text);
         return {
           content: [{ type: 'text' as const, text: out.text }],
-          structuredContent: { files: out.files },
+          structuredContent: {
+            files: out.files,
+            selection: {
+              mode: wire_ids === undefined ? 'all_unread' : 'selected',
+              requested_wire_ids: wire_ids ?? null,
+              items: out.files.map((file) => ({ wire_id: file.wire_id, status: file.status })),
+            },
+          },
           isError: false,
         };
       } catch (e) {
-        return textResult(`get_files failed: ${String(e)}`, true);
+        const message = String(e);
+        if (wire_ids !== undefined && /unknown, stale, or no longer unread/i.test(message)) {
+          return selectionError('unknown_or_stale_id', 'one or more selected wire_ids is unknown, stale, or no longer unread; no files were retrieved.');
+        }
+        return textResult(`get_files failed: ${message}`, true);
       }
     },
   );

@@ -129,6 +129,9 @@ application actor loads libraries
         // probe that keeps metadata only — a real consumer must hand the bytes back, so
         // $data carries the bytes in packet state; they leave only via get_files.
         metadef file_t: ($file_id -> int, $sender_id -> global_id, $sender_name -> str, $filename -> str, $mime -> str, $data -> bin, $date -> time, $status -> str, $wire_id -> str, $reply_to -> a2a_protocol::reply_ref_t+).
+        // Read-only preauthorization view. Deliberately excludes $data: callers can
+        // authenticate sender_id and select a stable wire_id before byte egress.
+        metadef file_metadata_t: ($file_id -> int, $sender_id -> global_id, $sender_name -> str, $filename -> str, $mime -> str, $size -> int, $date -> time, $status -> str, $wire_id -> str, $reply_to -> a2a_protocol::reply_ref_t+).
         // The pre-lifecycle inbox shape (no per-message id/status). import_state
         // migrates blobs in this shape forward — see below.
         metadef legacy_message_t: ($sender_id -> global_id, $sender_name -> str, $text -> str, $date -> time).
@@ -402,7 +405,7 @@ application actor loads libraries
 
                 fid = deposit_file sender_id sender_name fname mime data file_date wire_id reply_to.
                 return [
-                    _notify_agent ($event -> $file_received, $sender_name -> sender_name, $file_id -> fid, $filename -> fname, $mime -> mime, $bytes -> _binlen data, $date -> file_date),
+                    _notify_agent ($event -> $file_received, $sender_id -> sender_id, $sender_name -> sender_name, $file_id -> fid, $wire_id -> wire_id, $filename -> fname, $mime -> mime, $bytes -> _binlen data, $date -> file_date),
                     _save_state NIL
                 ].
             },
@@ -648,22 +651,47 @@ application actor loads libraries
 
     trn readonly list_incoming_files _
     {
-        return files.
+        metadata is file_metadata_t[] = [].
+        sc files -- ( -> f)
+        {
+            metadata (_count metadata|) -> (
+                $file_id     -> f $file_id,
+                $sender_id   -> f $sender_id,
+                $sender_name -> f $sender_name,
+                $filename    -> f $filename,
+                $mime        -> f $mime,
+                $size        -> _binlen (f $data),
+                $date        -> f $date,
+                $status      -> f $status,
+                $wire_id     -> f $wire_id,
+                $reply_to    -> f $reply_to
+            ).
+        }
+        return metadata.
     }
 
-    // Hand the agent every file it has not retrieved (status "unread"), returning
-    // the BYTES, and flip those to "processed" — the ONLY place file bytes leave the
-    // packet (mirrors get_messages). Same crash window: a "processed" file has left;
-    // recover with defer_files before gc deletes it.
-    trn get_files _
+    // With no $wire_ids, hand the agent every unread file (legacy bulk behavior).
+    // With $wire_ids, atomically require and return exactly those unread files; an
+    // unknown/stale/duplicate id aborts before state changes, and every unselected
+    // file remains unread with its bytes still inside the packet.
+    trn get_files _:($wire_ids -> ids: str[]+)
     {
         current_transaction_info::validate_origin_or_abort (transaction::envelope::origin::user,).
+
+        selective is bool = ids != NIL.
+        wanted is (str ->> bool) = (,).
+        if selective
+        {
+            sc ids? -- ( -> wire_id) { wanted wire_id -> TRUE. }
+            abort "Duplicate file wire_id in selection." when (_count wanted|) != (_count ids?|).
+        }
 
         fresh is file_t[] = [].
         new_files is file_t[] = [].
         sc files -- ( -> f)
         {
-            if (f $status) == "unread"
+            selected = selective == FALSE || wanted (f $wire_id) != NIL.
+            if (f $status) == "unread" && selected
             {
                 processed_f is file_t = (
                     $file_id     -> f $file_id,
@@ -677,7 +705,7 @@ application actor loads libraries
                     $wire_id     -> f $wire_id,
                     $reply_to    -> f $reply_to
                 ).
-                fresh (_count fresh|) -> f.
+                fresh (_count fresh|) -> processed_f.
                 new_files (_count new_files|) -> processed_f.
             }
             else
@@ -685,6 +713,7 @@ application actor loads libraries
                 new_files (_count new_files|) -> f.
             }
         }
+        abort "Selected file wire_id is unknown, stale, or no longer unread." when selective && (_count fresh|) != (_count ids?|).
         files -> new_files.
 
         return transaction::success [
