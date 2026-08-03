@@ -274,14 +274,17 @@ tools, a separate store. To caption a file, also `send_message`.
   bytes instead of a path, `send_file({ contact, data_base64, filename })`. `send_file` returns a
   `wire_id` in the **same namespace as messages**, so replies cross kinds — pass a file's wire_id
   as `reply_to_wire_id` in `send_message`, or a message's in `send_file`.
-- "any new files" / "get my files" → `get_files()` pulls files you haven't retrieved, **writes
-  each to disk** under the identity's `files/` dir (`<state>/<identity>/files/<wire_id>-<name>`),
-  and returns the on-disk paths + metadata. Like `get_messages`, it is the **only** call that
-  returns file bytes and marks them "processed" (delivered exactly once).
-- "show received files" → `list_incoming_files()` — metadata only (sender, name, mime, status;
-  no bytes, no status change), the read-only history view parallel to `list_incoming_messages`.
-- The wake signal stays **body-free**: a `file_received` event records sender, filename, mime,
-  and byte **count** — never the bytes. Files from unknown (non-contact) senders are rejected.
+- "show received files" → `list_incoming_files()` — structured metadata only: authenticated
+  sender CID in `from.id`, untrusted display label in `from.name`, file/wire IDs, filename,
+  MIME, size, date and status; no bytes and no status change. Authorize by CID, not name.
+- "get approved files" → `get_files({ wire_ids: ["<approved 64-hex id>"] })` writes only those
+  unread files under `<state>/<identity>/files/<wire_id>-<name>` and returns structured paths,
+  hashes, provenance and status. Invalid/duplicate/unknown/stale IDs fail closed. Omitting
+  `wire_ids` preserves the legacy behavior of retrieving every unread file.
+- Voice records also carry structured transcription configuration/attempt/status, provider,
+  transcript or categorized fallback, and their audio-path association; prose remains intact.
+- The wake signal stays **body-free** but carries authenticated sender CID, file/wire IDs,
+  filename, MIME, byte count and date — never the bytes. Unknown senders are rejected.
 
 ### Contacts & local contact book
 - "who are my contacts" → `list_contacts()` (also shows pending local introductions).
