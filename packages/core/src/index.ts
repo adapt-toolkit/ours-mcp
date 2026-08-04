@@ -275,6 +275,30 @@ type Pending = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+// A TEMPORARY identity is owned by exactly one running session lease and has a
+// session-scoped LOCAL lifetime: when the owning session ends (explicit close,
+// lease release, or its client pid dying), the identity sends each contact one
+// best-effort remove-me notice and is then deleted locally in full. The owner is
+// the connector lease token that created it; pid liveness is the staleness
+// signal (same OS-authoritative check the lease machinery uses). This is the
+// MINIMUM ownership metadata: enough for "a different session cannot delete it",
+// nothing more. Persisted content-free in <dir>/temp.json — the owner token is
+// stored only as a SHA-256 (the raw token is a session identifier; the marker
+// needs equality, not the value).
+interface TempMeta {
+  owner: { tokenHash: string; pid: number };
+  createdAt: number;
+  // Set once teardown starts; late callers join the same promise (idempotent
+  // close) and resolveBound refuses new work for the identity.
+  closing?: Promise<TempCloseResult>;
+}
+interface TempCloseResult {
+  attempted: number;   // contacts in the teardown snapshot
+  notified: number;    // remove-me notices QUEUED (delivery/remote removal unverified)
+  failed: number;      // contacts where no notice could be queued (peer unsupporting/degraded, or tx error)
+  deleteError: string | null; // non-null when local deletion itself failed
+}
+
 interface Identity {
   name: string; // display name == identity name == dir name
   cid: string; // container id
@@ -287,6 +311,10 @@ interface Identity {
   // transactions are rejected (after one save retry) so we never transmit
   // ciphertext/receipts for ratchet state a restart would roll back.
   persistFailed?: boolean;
+  // Present iff this is a temporary (session-scoped) identity. Absence — not a
+  // name pattern, not any other heuristic — is what marks an identity permanent
+  // and thus never swept.
+  temp?: TempMeta;
 }
 
 let wrapper: AdaptWrapper;
@@ -315,6 +343,13 @@ interface Lease {
 const leases = new Map<string, Lease>();            // identity name -> Lease
 const tombstones = new Set<string>();               // tokens fenced out by a force takeover
 const sessionHeaders = new Map<string, { token?: string; pid?: number }>(); // sid -> last seen headers
+
+// Identities with an outbound remove_contact in flight. The core fires the
+// on_contact_removed hook for BOTH directions with only the cid, so the notify
+// handler uses this to tell "we removed them" from "they removed us". A
+// network-driven inbound removal landing during our own outbound tx can be
+// mislabeled — that affects only the direction tag on a log line, never state.
+const outboundRemovalInFlight = new Set<string>();  // identity names
 
 // Loopback guarantees the connector and daemon share a host, so the pid is a
 // local pid and this check is exact. EPERM means "alive but not ours" (still alive).
@@ -367,6 +402,32 @@ const unreadPath = (dir: string) => join(dir, 'unread.json');
 // (STATE_DIR/<identity>/files/<wire_id>-<safe_name>). The wake signal stays
 // content-free; bytes land here only on the explicit get_files egress.
 const filesDirFor = (id: Identity) => join(id.dir, 'files');
+// Temporary-identity ownership marker (content-free: lease token + client pid +
+// creation time — no key material). Written FIRST, before the packet exists, so
+// a crash mid-provision leaves a dir the boot sweep can recognize and reclaim.
+const tempMetaPath = (dir: string) => join(dir, 'temp.json');
+const hashLeaseToken = (token: string): string => createHash('sha256').update(token).digest('hex');
+function writeTempMetaFile(dir: string, meta: { owner: { tokenHash: string; pid: number }; createdAt: number }): void {
+  fs.writeFileSync(
+    tempMetaPath(dir),
+    JSON.stringify({ v: 1, owner: { token_sha256: meta.owner.tokenHash, pid: meta.owner.pid }, created_at: meta.createdAt }),
+    { mode: 0o600 },
+  );
+}
+function readTempMetaFile(dir: string): { owner: { tokenHash: string; pid: number }; createdAt: number } | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(tempMetaPath(dir), 'utf8')) as {
+      v?: number; owner?: { token_sha256?: unknown; pid?: unknown }; created_at?: unknown;
+    };
+    if (raw.v !== 1 || typeof raw.owner?.token_sha256 !== 'string' || typeof raw.owner?.pid !== 'number') return null;
+    return {
+      owner: { tokenHash: raw.owner.token_sha256, pid: raw.owner.pid },
+      createdAt: typeof raw.created_at === 'number' ? raw.created_at : 0,
+    };
+  } catch {
+    return null; // absent or unreadable marker == NOT temporary (fail toward permanence)
+  }
+}
 
 // Tighten on-disk permissions (finding D): identity dirs 0700, and their secret-
 // bearing files (state_data.bin carries sealed session pickles + inbox plaintext,
@@ -614,6 +675,9 @@ async function establishRoot(id: Identity): Promise<{ adopted: string[]; failed:
   const failed: string[] = [];
   for (const other of identities.values()) {
     if (other.name === id.name) continue;
+    // A temporary identity is session-scoped and deliberately flat: adopting it
+    // as a role would outlive it into the root's cluster state.
+    if (other.temp) continue;
     try {
       await delegateRole(id, other);
       adopted.push(other.name);
@@ -767,6 +831,7 @@ async function sendViaSibling(id: Identity, target: Identity, text: string): Pro
       text,
     }, lt);
   });
+  scheduleCapabilityReconcile(id);
   return (
     `"${target.name}" was not a contact yet — connected as an intra-root sibling ` +
     `(delegation-cert auto-accept) and delivered the message.`
@@ -810,6 +875,7 @@ async function sendViaLocalBook(id: Identity, contact: string, text: string): Pr
       text,
     }, lt);
   });
+  scheduleCapabilityReconcile(id);
   return (
     `"${entry.name}" was not a contact yet — connected via the local contact book and ` +
     `sent the message with the introduction. If "${entry.name}" requires approval for ` +
@@ -1019,6 +1085,100 @@ function deleteIdentityCompletely(id: Identity): string | null {
     return `deleting ${id.dir} failed: ${String(err)}`;
   }
   return null;
+}
+
+// Tear down a TEMPORARY identity: stop accepting new work (resolveBound refuses
+// once temp.closing is set), snapshot its contacts, queue ONE best-effort
+// fire-and-forget core remove-me per contact, then delete every piece of local
+// state (packet, keys, inbox, files, book entry, lease, dir). Remote deletion is
+// explicitly unverified — a failed or unreachable contact NEVER blocks local
+// cleanup. Idempotent: concurrent/late callers join the same promise.
+function closeTemporaryIdentity(id: Identity, cause: string): Promise<TempCloseResult> {
+  const t = id.temp;
+  if (!t) return Promise.reject(new Error(`identity "${id.name}" is not temporary`));
+  if (t.closing) return t.closing;
+  t.closing = (async (): Promise<TempCloseResult> => {
+    log(`[${id.name}] closing temporary identity (${cause})`);
+    let contacts: Array<{ name: string; container_id: string }> = [];
+    try {
+      contacts = withScope((lt) => renderContacts(readonlyTx(id, '::a2a_messaging::list_contacts', lt)));
+    } catch (err) {
+      // No snapshot ⇒ no notices, but the local cleanup still proceeds.
+      log(`[${id.name}] contact snapshot failed during close (continuing with local cleanup):`, String(err));
+    }
+    let notified = 0;
+    let failed = 0;
+    outboundRemovalInFlight.add(id.name);
+    try {
+      for (const c of contacts) {
+        try {
+          const queued = await withScopeAsync(async (lt) => {
+            const data = await mutatingTx(id, '::a2a_messaging::remove_contact', { contact: c.container_id }, lt);
+            const nv = data.Reduce('notified');
+            return nv.IsNil() ? false : nv.GetBoolean();
+          });
+          if (queued) notified++; else failed++;
+        } catch (err) {
+          failed++;
+          log(`[${id.name}] remove-me to ${c.container_id} failed (continuing):`, String(err));
+        }
+      }
+    } finally {
+      outboundRemovalInFlight.delete(id.name);
+    }
+    const deleteError = deleteIdentityCompletely(id);
+    if (deleteError) {
+      log(`[${id.name}] temporary identity close: LOCAL DELETE FAILED — ${deleteError}`);
+    } else {
+      log(
+        `[${id.name}] temporary identity closed: ${contacts.length} contact(s), ` +
+        `${notified} remove-me notice(s) queued, ${failed} not sent (delivery unverified by design)`,
+      );
+    }
+    return { attempted: contacts.length, notified, failed, deleteError };
+  })();
+  return t.closing;
+}
+
+// Reaper half for temporary identities: an owner whose client pid is gone is a
+// STALE lease — reclaim via the normal teardown (best-effort notices included).
+// Permanent identities have no temp marker and are structurally unsweepable.
+function sweepStaleTempIdentities(): void {
+  for (const id of [...identities.values()]) {
+    const t = id.temp;
+    if (!t || t.closing) continue;
+    if (pidAlive(t.owner.pid)) continue;
+    // Belt: if ANY live session currently holds the lease (e.g. the owner
+    // re-attached under the same token with a new pid and resolveBound refreshed
+    // the lease pid), keep it — sweeping under a live holder is the one wrong move.
+    const lease = leases.get(id.name);
+    if (lease && pidAlive(lease.pid)) continue;
+    void closeTemporaryIdentity(id, `stale lease — owner pid ${t.owner.pid} is dead`).catch((err) =>
+      log(`[${id.name}] stale-temp reclaim failed:`, String(err)),
+    );
+  }
+}
+
+// Boot-time orphan sweep: a STATE_DIR entry carrying a temp marker that did NOT
+// come up as a live identity (crashed mid-provision — possibly before the key
+// existed — or failed to restore) is deleted once its owner pid is dead. No
+// notices are possible without a live packet; remove-me is best-effort by
+// contract. Dirs without the marker are untouched, whatever their state.
+function sweepOrphanTempDirs(): void {
+  if (!fs.existsSync(STATE_DIR)) return;
+  for (const d of fs.readdirSync(STATE_DIR, { withFileTypes: true })) {
+    if (!d.isDirectory() || identities.has(d.name)) continue;
+    const dir = join(STATE_DIR, d.name);
+    const meta = readTempMetaFile(dir);
+    if (!meta || pidAlive(meta.owner.pid)) continue;
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      reservedNames.delete(d.name);
+      log(`[${d.name}] removed orphaned temporary-identity dir (owner pid ${meta.owner.pid} dead, no live packet)`);
+    } catch (err) {
+      log(`[${d.name}] failed to remove orphaned temporary-identity dir:`, String(err));
+    }
+  }
 }
 
 // ===== control-protocol-to-MUFL: dispatch host executor (STAGED) =============
@@ -1685,6 +1845,26 @@ async function capabilityReconcileSweep(id: Identity): Promise<void> {
   }
 }
 
+// New-contact cadence point for the ACK-ledgered capability reconcile. A fresh
+// contact has no advertise ACK, so the next reconcile_advertise sends the caps
+// snapshot to exactly it — but the periodic cadence is the GC tick (default 1h),
+// which a short-lived (e.g. temporary) identity may never reach, leaving both
+// sides without the positive caps evidence surfaces like the core 0.13
+// contact-removal gate require. Two shots: one after the channel settles, one
+// catch-up for slow legs; the per-contact ACK ledger makes repeats no-ops.
+const capReconcileScheduled = new Set<string>();
+function scheduleCapabilityReconcile(id: Identity): void {
+  if (capReconcileScheduled.has(id.name)) return;
+  capReconcileScheduled.add(id.name);
+  for (const ms of [2_000, 15_000]) {
+    setTimeout(() => {
+      if (ms === 15_000) capReconcileScheduled.delete(id.name);
+      const cur = identities.get(id.name);
+      if (cur) void capabilityReconcileSweep(cur);
+    }, ms);
+  }
+}
+
 // Boot/GC SESSION-RECOVERY sweep (core 0.11 self-heal, DAEMON CONTRACT). Since the
 // persist-primary change, the Olm account + LIVE sessions normally SURVIVE a restart
 // (validated import of $e2e_sessions — see commit_e2e_restore); this sweep is the
@@ -2184,12 +2364,14 @@ function wireHandlers(id: Identity): void {
       } else if (event === 'contact_accepted') {
         const name = payload.Reduce('name').Visualize();
         const cid = payload.Reduce('container_id').Visualize();
+        scheduleCapabilityReconcile(id);
         process.nextTick(() =>
           pushNotification(id.name, `[${id.name}] contact "${name}" (${cid}) accepted your invite.`),
         );
       } else if (event === 'local_contact_added') {
         const name = payload.Reduce('name').Visualize();
         const cid = payload.Reduce('container_id').Visualize();
+        scheduleCapabilityReconcile(id);
         process.nextTick(() =>
           pushNotification(id.name, `[${id.name}] local contact "${name}" (${cid}) connected via the contact book.`),
         );
@@ -2210,6 +2392,7 @@ function wireHandlers(id: Identity): void {
         const name = payload.Reduce('name').Visualize();
         const cid = payload.Reduce('container_id').Visualize();
         appendNotifyLog(id, { event: 'sibling_contact_added', from: name });
+        scheduleCapabilityReconcile(id);
         process.nextTick(() =>
           pushNotification(id.name, `[${id.name}] sibling "${name}" (${cid}) connected (intra-root auto-accept).`),
         );
@@ -2371,6 +2554,30 @@ function wireHandlers(id: Identity): void {
         process.nextTick(() =>
           pushNotification(id.name, `[${id.name}] a message from a migrated contact was rejected as an unsafe downgrade (dropped).`),
         );
+      } else if (event === 'contact_removed') {
+        // core 0.13 on_contact_removed hook — fires for our own removals AND for
+        // an inbound authenticated peer removal notice. Content-free (cid only).
+        const cid = String(payload.Reduce('cid').Visualize());
+        const outbound = outboundRemovalInFlight.has(id.name);
+        appendNotifyLog(id, { event: 'contact_removed', cid, by: outbound ? 'local' : 'peer' });
+        if (!outbound) {
+          log(`[${id.name}] contact ${cid} removed you (authenticated peer removal notice) — dropped from contacts`);
+          process.nextTick(() =>
+            pushNotification(id.name, `[${id.name}] contact ${cid.slice(0, 12)}… removed you as a contact (the removal was applied locally too).`),
+          );
+        }
+      } else if (event === 'monitoring_disabled') {
+        // core 0.13: the bound control plane was unbound — either an ordinary CP
+        // disable or, with cause=control_plane_removed_contact, the CP removed us
+        // as a contact and the binding was cleared atomically with the removal.
+        const cid = String(payload.Reduce('cid').Visualize());
+        const causeAv = payload.Reduce('cause');
+        const cause = causeAv.IsNil() ? '' : String(causeAv.Visualize());
+        appendNotifyLog(id, { event: 'monitoring_disabled', cid, ...(cause ? { cause } : {}) });
+        log(`[${id.name}] monitoring disabled (cid=${cid}${cause ? ` cause=${cause}` : ''})`);
+        process.nextTick(() =>
+          pushNotification(id.name, `[${id.name}] the monitoring/control-plane binding was disabled${cause === 'control_plane_removed_contact' ? ' — the control plane removed you as a contact' : ''}.`),
+        );
       } else if (event === 'control_request') {
         // Daemon-internal: the proxy's request queue is drained and executed
         // here, never surfaced to agent sessions.
@@ -2524,7 +2731,8 @@ if (reservedNames.size > 0) {
 // unless the caller opted out.
 async function provisionIdentity(
   name: string,
-  opts: { exposeLocal: boolean; localAutoAccept: boolean } = { exposeLocal: true, localAutoAccept: true },
+  opts: { exposeLocal: boolean; localAutoAccept: boolean; temp?: { tokenHash: string; pid: number } } =
+    { exposeLocal: true, localAutoAccept: true },
 ): Promise<Identity> {
   // Ship-review round-2 major: the single provisioning choke point — every create
   // path (create_identity, create_root_identity, host_provision_child) lands here.
@@ -2540,8 +2748,16 @@ async function provisionIdentity(
   try {
     const dir = identityDir(name);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    let tempMeta: TempMeta | undefined;
+    if (opts.temp) {
+      // Marker BEFORE the packet: a crash anywhere past this point leaves a dir
+      // the boot orphan sweep can attribute and reclaim.
+      tempMeta = { owner: { tokenHash: opts.temp.tokenHash, pid: opts.temp.pid }, createdAt: Date.now() };
+      writeTempMetaFile(dir, tempMeta);
+    }
     const seed = randomBytes(24).toString('hex'); // ephemeral entropy, not persisted
     const id = await createPacket(name, seed, dir);
+    if (tempMeta) id.temp = tempMeta;
     fs.writeFileSync(keyPath(dir), exportSigningSecret(id), { mode: 0o600 });
     await withScopeAsync(async (lt) => {
       await mutatingTx(id, '::a2a_messaging::set_my_name', { name }, lt);
@@ -2784,6 +3000,10 @@ async function bootWrapper(): Promise<void> {
           // Migration for identities created before the contact book existed.
           await pinRegistrar(id);
         }
+        // Re-attach the temporary marker (ownership survives a daemon restart; a
+        // still-alive owner keeps its identity, a dead one is swept below).
+        const tempMeta = readTempMetaFile(id.dir);
+        if (tempMeta) id.temp = tempMeta;
       } catch (err) {
         log(`failed to restore "${name}":`, String(err));
       }
@@ -2896,6 +3116,13 @@ async function bootWrapper(): Promise<void> {
   }
   // Replace any stale snapshot from a previous server run: nothing is bound yet.
   persistBindings();
+  // Temporary-identity boot reclaim, AFTER the restore loop so a live packet can
+  // send its best-effort remove-me notices: (1) dirs whose provisioning/restore
+  // never produced a live identity, (2) restored temp identities whose owning
+  // client pid did not survive. An owner still alive keeps its identity across
+  // the daemon restart and re-attaches via choose_identity.
+  sweepOrphanTempDirs();
+  sweepStaleTempIdentities();
 }
 
 // ----- binding resolution -----------------------------------------------------
@@ -2918,6 +3145,12 @@ function resolveBound(sid: string): Bound {
     leases.delete(lease.identity);
     persistBindings();
     return { error: `The bound identity "${lease.identity}" no longer exists. Choose another with choose_identity.` };
+  }
+  if (id.temp?.closing) {
+    return {
+      error: `The temporary identity "${id.name}" is closing and no longer accepts work. ` +
+        'Its contacts are being notified and its local state deleted.',
+    };
   }
   // Implicit re-attach: keep routing + pid pointed at whoever currently holds the token.
   lease.sid = sid;
@@ -3391,6 +3624,142 @@ function createMcpServer(getSessionId: () => string): McpServer {
   );
 
   server.tool(
+    'create_temporary_identity',
+    'Create a TEMPORARY identity owned by this session and bind it. Temporary ' +
+      'means session-scoped LOCAL lifetime: when this session ends (explicit ' +
+      'close_temporary_identity, releasing the connection, or the client process ' +
+      'dying), each contact is sent one best-effort "remove me from your contacts" ' +
+      'notice and then ALL local state — keys, profile, contacts, messages, files — ' +
+      'is deleted; the identity disappears from listings. The remove-me notice is ' +
+      'fire-and-forget: remote contact deletion is NOT guaranteed (an offline or ' +
+      'pre-0.13 peer keeps its entry). Ownership is exclusive: no other session can ' +
+      'bind or delete it while this session lives. The identity is flat (never ' +
+      'delegated under the host root) and, unlike create_identity, NOT published to ' +
+      'the local contact book unless expose_local=true. Omit name for a ' +
+      'collision-resistant random one.',
+    {
+      name: z.string().min(1).optional().describe('Optional public display name. Omitted: a random public-safe name like "tmp-1a2b3c4d5e" is generated.'),
+      bio: z.string().default('').describe('Optional free-text bio for the identity profile.'),
+      expose_local: z.boolean().default(false).describe('Publish in the host-local contact book (default false for a temporary identity).'),
+      local_auto_accept: z.boolean().default(true).describe('Auto-accept local contact-book introductions (only relevant with expose_local).'),
+    },
+    async ({ name, bio, expose_local, local_auto_accept }) => {
+      const sid = getSessionId();
+      const hdr = sessionHeaders.get(sid);
+      const token = hdr?.token;
+      const pid = hdr?.pid;
+      if (!token || !pid) {
+        return textResult(
+          'create_temporary_identity failed: this client is not connected through the ours ' +
+            'connector (no lease token / client pid headers), so there is no session lease to own ' +
+            'the identity. Launch ours via the connector (`ours-mcp proxy`).',
+          true,
+        );
+      }
+      let chosen = name;
+      if (chosen !== undefined) {
+        const bad = validateName(chosen);
+        if (bad) return textResult(`create_temporary_identity failed: ${bad}`, true);
+        if (identities.has(chosen) || reservedNames.has(chosen)) {
+          return textResult(`create_temporary_identity failed: an identity named "${chosen}" already exists.`, true);
+        }
+      } else {
+        // 40 bits of entropy; retry the astronomically unlikely collision.
+        for (let i = 0; i < 5 && chosen === undefined; i++) {
+          const cand = `tmp-${randomBytes(5).toString('hex')}`;
+          if (!identities.has(cand) && !reservedNames.has(cand)) chosen = cand;
+        }
+        if (chosen === undefined) {
+          return textResult('create_temporary_identity failed: could not pick a free random name after 5 attempts — retry.', true);
+        }
+      }
+      try {
+        const id = await provisionIdentity(chosen, {
+          exposeLocal: expose_local,
+          localAutoAccept: local_auto_accept,
+          temp: { tokenHash: hashLeaseToken(token), pid },
+        });
+        if (bio) await withScopeAsync(async (lt) => { await mutatingTx(id, '::a2a_messaging::set_my_bio', { bio }, lt); });
+        bindSession(sid, chosen);
+        const exposure = expose_local
+          ? ` Published to the local contact book${local_auto_accept ? '' : ' (introductions require approval)'}.`
+          : '';
+        return textResult(
+          `Created TEMPORARY identity "${chosen}" (${id.cid}) and bound it to this session ` +
+            `(owner: this session's lease, client pid ${pid}).${exposure}\n\n` +
+            'Lifetime: session-scoped and local. Close it explicitly with close_temporary_identity ' +
+            'when done; if the session ends or dies first, the daemon reclaims it automatically. ' +
+            'On close, contacts get one best-effort remove-me notice (remote deletion NOT ' +
+            'guaranteed) and all local state is deleted permanently.',
+        );
+      } catch (err) {
+        return textResult(`create_temporary_identity failed: ${String(err)}`, true);
+      }
+    },
+  );
+
+  server.tool(
+    'close_temporary_identity',
+    'Close a temporary identity NOW: it stops accepting work, each contact is sent ' +
+      'one best-effort fire-and-forget remove-me notice (delivery and remote ' +
+      'removal are NOT guaranteed and not retried), then all of its local state — ' +
+      'keys, profile, contacts, messages, files — is deleted permanently and it ' +
+      'disappears from listings. Idempotent: closing an already-closing or ' +
+      'already-gone identity is not an error. Only the owning session may close a ' +
+      'temporary identity whose owner is still alive; a STALE one (owner process ' +
+      'dead) may be closed by anyone to reclaim it. Defaults to the identity bound ' +
+      'to this session.',
+    { name: z.string().min(1).optional().describe('Temporary identity to close. Defaults to the one bound to this session.') },
+    async ({ name }) => {
+      const sid = getSessionId();
+      const token = sessionHeaders.get(sid)?.token;
+      let id: Identity | undefined;
+      if (name !== undefined) {
+        id = identities.get(name);
+        if (!id) {
+          return textResult(`close_temporary_identity: no identity named "${name}" — nothing to close (already cleaned up?).`);
+        }
+      } else {
+        const lease = token ? leaseByToken(token) : undefined;
+        id = lease ? identities.get(lease.identity) : undefined;
+        if (!id) {
+          return textResult('close_temporary_identity failed: no identity is bound to this session and no name was given.', true);
+        }
+      }
+      if (!id.temp) {
+        return textResult(
+          `close_temporary_identity failed: "${id.name}" is a permanent identity. ` +
+            'Use remove_identity if you really mean to delete it.',
+          true,
+        );
+      }
+      const owner = id.temp.owner;
+      const isOwner = token !== undefined && owner.tokenHash === hashLeaseToken(token);
+      if (!isOwner && !id.temp.closing && pidAlive(owner.pid)) {
+        return textResult(
+          `close_temporary_identity failed: "${id.name}" is owned by another LIVE session ` +
+            `(owner pid ${owner.pid}) — one session cannot delete another's temporary identity.`,
+          true,
+        );
+      }
+      try {
+        const res = await closeTemporaryIdentity(id, isOwner ? 'explicit close by owner' : 'stale reclaim via close_temporary_identity');
+        const remote =
+          res.attempted === 0
+            ? 'It had no contacts, so no remove-me notices were needed.'
+            : `Remove-me notices: ${res.notified}/${res.attempted} queued, ${res.failed} not sent ` +
+              '(best effort — delivery and remote contact deletion are not guaranteed).';
+        if (res.deleteError) {
+          return textResult(`Temporary identity "${id.name}" closed with an error: ${res.deleteError}. ${remote}`, true);
+        }
+        return textResult(`Temporary identity "${id.name}" closed and all local state deleted. ${remote}`);
+      } catch (err) {
+        return textResult(`close_temporary_identity failed: ${String(err)}`, true);
+      }
+    },
+  );
+
+  server.tool(
     'create_root_identity',
     'Create THE root identity for this host — the identity that represents the ' +
       'person behind all roles (see the identity hierarchy: one root, many roles). ' +
@@ -3519,6 +3888,38 @@ function createMcpServer(getSessionId: () => string): McpServer {
           true,
         );
       }
+      // Temporary identities are owned by exactly one session lease — bind/use
+      // FAILS CLOSED on ownership mismatch, and force never overrides a live owner.
+      const target = identities.get(name)!;
+      if (target.temp) {
+        if (target.temp.closing) {
+          return textResult(`choose_identity failed: temporary identity "${name}" is closing — its state is being deleted.`, true);
+        }
+        const owner = target.temp.owner;
+        if (owner.tokenHash !== hashLeaseToken(token)) {
+          if (pidAlive(owner.pid)) {
+            return textResult(
+              `choose_identity failed: "${name}" is a TEMPORARY identity owned by another live session ` +
+                `(owner pid ${owner.pid}). Ownership is exclusive and cannot be overridden — not even with force. ` +
+                'Create your own with create_temporary_identity.',
+              true,
+            );
+          }
+          return textResult(
+            `choose_identity failed: temporary identity "${name}" is STALE — its owning session (pid ${owner.pid}) is gone ` +
+              'and it is pending automatic cleanup. It cannot be adopted by another session; ' +
+              'use close_temporary_identity to reclaim (clean it up) now.',
+            true,
+          );
+        }
+        // The owner re-binding (e.g. after a daemon restart): refresh the pid the
+        // staleness check keys on if the client pid changed under the same token.
+        const hdrPid = sessionHeaders.get(sid)?.pid;
+        if (hdrPid && hdrPid !== owner.pid) {
+          owner.pid = hdrPid;
+          try { writeTempMetaFile(target.dir, target.temp); } catch (err) { log(`[${name}] temp marker refresh failed:`, String(err)); }
+        }
+      }
       const existing = leases.get(name);
       if (existing && existing.token !== token) {
         if (!pidAlive(existing.pid)) {
@@ -3554,7 +3955,10 @@ function createMcpServer(getSessionId: () => string): McpServer {
     'list_identities',
     'List all identities hosted by this node (name + container id) as a hierarchy — ' +
       'the root identity first with its roles indented under it — marking which one ' +
-      'is bound to this session and which are in use elsewhere.',
+      'is bound to this session and which are in use elsewhere. Temporary ' +
+      '(session-scoped) identities are tagged with their lease state: owned by this ' +
+      'session, owned by another live session, stale (owner gone, pending cleanup), ' +
+      'or closing.',
     {},
     async () => {
       if (identities.size === 0) {
@@ -3570,6 +3974,16 @@ function createMcpServer(getSessionId: () => string): McpServer {
         if (!pidAlive(lease.pid)) return '';
         return '  (in use by another session)';
       };
+      // Lease/ownership state for a temporary identity — no secret material,
+      // only whose session it is and whether that session is still alive.
+      const tempTag = (id: Identity) => {
+        if (!id.temp) return '';
+        if (id.temp.closing) return ' [temporary — closing]';
+        if (myToken !== undefined && id.temp.owner.tokenHash === hashLeaseToken(myToken)) return ' [temporary — owned by THIS session]';
+        return pidAlive(id.temp.owner.pid)
+          ? ` [temporary — owned by another live session (pid ${id.temp.owner.pid})]`
+          : ' [temporary — STALE, owner gone, pending cleanup]';
+      };
       const root = rootName ? identities.get(rootName) : undefined;
       const lines: string[] = [];
       if (root) {
@@ -3577,16 +3991,16 @@ function createMcpServer(getSessionId: () => string): McpServer {
         for (const id of identities.values()) {
           if (id.name === root.name) continue;
           if (describeIdentity(id).roleId !== '') {
-            lines.push(`  └ ${id.name} — ${id.cid} (role)${sessionTag(id.name)}`);
+            lines.push(`  └ ${id.name} — ${id.cid} (role)${tempTag(id)}${sessionTag(id.name)}`);
           }
         }
         for (const id of identities.values()) {
           if (id.name === root.name || describeIdentity(id).roleId !== '') continue;
-          lines.push(`• ${id.name} — ${id.cid} (flat, no delegation)${sessionTag(id.name)}`);
+          lines.push(`• ${id.name} — ${id.cid} (flat, no delegation)${tempTag(id)}${sessionTag(id.name)}`);
         }
       } else {
         for (const id of identities.values()) {
-          lines.push(`• ${id.name} — ${id.cid}${sessionTag(id.name)}`);
+          lines.push(`• ${id.name} — ${id.cid}${tempTag(id)}${sessionTag(id.name)}`);
         }
         lines.push('(no root identity yet — create_root_identity establishes the hierarchy)');
       }
@@ -3610,9 +4024,14 @@ function createMcpServer(getSessionId: () => string): McpServer {
             : info.roleId !== ''
               ? ` — role "${info.roleId}" under root "${info.rootName}"`
               : '';
+        const temp = b.id.temp
+          ? '\nTEMPORARY identity owned by this session — session-scoped local lifetime: closed ' +
+            '(best-effort remove-me to each contact, then full local deletion) when this session ' +
+            'ends or on close_temporary_identity.'
+          : '';
         const bio = info.bio ? `\nBio: ${info.bio}` : '';
         const persona = info.persona ? `\nPersona: ${info.persona}` : '';
-        return textResult(`Bound to "${b.id.name}" (${b.id.cid})${place}.${bio}${persona}`);
+        return textResult(`Bound to "${b.id.name}" (${b.id.cid})${place}.${temp}${bio}${persona}`);
       } catch {
         return textResult(`Bound to "${b.id.name}" (${b.id.cid}).`);
       }
@@ -3627,6 +4046,29 @@ function createMcpServer(getSessionId: () => string): McpServer {
     async ({ name }) => {
       const id = identities.get(name);
       if (!id) return textResult(`remove_identity failed: no identity named "${name}".`, true);
+      if (id.temp) {
+        // A temporary identity is deleted through its lifecycle path (ownership
+        // check + best-effort remove-me notices), never as a bare delete.
+        const token = sessionHeaders.get(getSessionId())?.token;
+        const owner = id.temp.owner;
+        if ((token === undefined || owner.tokenHash !== hashLeaseToken(token)) && !id.temp.closing && pidAlive(owner.pid)) {
+          return textResult(
+            `remove_identity failed: "${name}" is a TEMPORARY identity owned by another LIVE session ` +
+              `(owner pid ${owner.pid}) — one session cannot delete another's temporary identity.`,
+            true,
+          );
+        }
+        try {
+          const res = await closeTemporaryIdentity(id, 'remove_identity');
+          const remote = res.attempted === 0
+            ? ''
+            : ` Remove-me notices: ${res.notified}/${res.attempted} queued, ${res.failed} not sent (best effort).`;
+          if (res.deleteError) return textResult(`Temporary identity "${name}" closed with an error: ${res.deleteError}.${remote}`, true);
+          return textResult(`Removed temporary identity "${name}" and its state.${remote}`);
+        } catch (err) {
+          return textResult(`remove_identity failed: ${String(err)}`, true);
+        }
+      }
       if (name === rootName) {
         const roles = [...identities.values()].filter(
           (i) => i.name !== name && describeIdentity(i).rootCid === id.cid,
@@ -3670,26 +4112,120 @@ function createMcpServer(getSessionId: () => string): McpServer {
     'Generate an invite to share out-of-band with another agent. The invite ' +
       'carries your identity and display name. If you pass a name, whoever redeems ' +
       'the invite is registered under it; without a name, the redeemer is registered ' +
-      'under the name they announce when accepting. Requires a bound identity.',
-    { name: z.string().min(1).optional().describe('Optional name to register the peer who redeems this invite, e.g. "Bob". Omit to register them under their own name on acceptance.') },
-    async ({ name }) => {
+      'under the name they announce when accepting. mode selects the invite kind: ' +
+      '"one_time" (the default when omitted — consumed by the first redemption) or ' +
+      '"public" (reusable, meant for open posting; every redeemer gets an independent ' +
+      'channel; close it with revoke_invite — it has no expiry and is never consumed). ' +
+      'A public invite cannot pre-assign a contact name, and does not survive a daemon ' +
+      'restart (it must be re-generated and re-posted). Requires a bound identity.',
+    {
+      name: z.string().min(1).optional().describe('Optional name to register the peer who redeems this invite, e.g. "Bob". Omit to register them under their own name on acceptance. Not allowed with mode "public".'),
+      mode: z.enum(['one_time', 'public']).optional().describe('Invite kind. Omitted means "one_time" (single redemption, unchanged legacy behavior). "public" mints a reusable invite for open posting.'),
+    },
+    async ({ name, mode }) => {
       const { id, err } = boundOr();
       if (err) return err;
-      try {
-        const targ: Record<string, string> = {};
-        if (name) targ.name = name;
-        const blob = await withScopeAsync(async (lt) => {
-          const data = await mutatingTx(id!, '::a2a_messaging::generate_invite', targ, lt);
-          return encodeWireBin(Buffer.from(data.Reduce('invite').GetBinary()));
-        });
-        const heading = name
-          ? `Invite for "${name}" created.`
-          : 'Invite created — the contact will be registered under the name the recipient announces when accepting.';
+      if (mode === 'public' && name) {
         return textResult(
-          `${heading} Share this blob out-of-band (they paste it into add_contact):\n\n${blob}`,
+          'generate_invite failed: a public invite cannot pre-assign a contact name — every redeemer would be registered under it. Omit `name` for a public invite.',
+          true,
+        );
+      }
+      try {
+        const res = await withScopeAsync(async (lt) => {
+          const targ: Record<string, string> = {};
+          if (name) targ.name = name;
+          if (mode) targ.mode = mode;
+          const data = await mutatingTx(id!, '::a2a_messaging::generate_invite', targ, lt);
+          return {
+            blob: encodeWireBin(Buffer.from(data.Reduce('invite').GetBinary())),
+            inviteId: data.Reduce('invite_id').Visualize(),
+            mode: data.Reduce('mode').Visualize(),
+          };
+        });
+        const heading =
+          res.mode === 'public'
+            ? `Reusable public invite created (invite_id ${res.inviteId}). Anyone holding the blob can redeem it, each as an independent contact, until you revoke_invite it. It will NOT survive a daemon restart — re-generate and re-post after one.`
+            : name
+              ? `One-time invite for "${name}" created (invite_id ${res.inviteId}).`
+              : `One-time invite created (invite_id ${res.inviteId}) — the contact will be registered under the name the recipient announces when accepting.`;
+        return textResult(
+          `${heading} Share this blob out-of-band (they paste it into add_contact):\n\n${res.blob}`,
         );
       } catch (e) {
         return textResult(`generate_invite failed: ${String(e)}`, true);
+      }
+    },
+  );
+
+  server.tool(
+    'list_invites',
+    'List the outstanding invites the bound identity has minted and not yet seen ' +
+      'redeemed or revoked: invite_id, kind (one_time | public), assigned peer name ' +
+      'if any, and creation time. Carries no key material. Use revoke_invite to ' +
+      'close one — essential for public invites, which are never consumed.',
+    {},
+    async () => {
+      const { id, err } = boundOr();
+      if (err) return err;
+      try {
+        const rows = withScope((lt) => {
+          const v = readonlyTx(id!, '::a2a_messaging::list_invites', lt);
+          const out: Array<{ invite_id: string; mode: string; assigned: string; created: string }> = [];
+          if (v.IsNil()) return out;
+          for (const key of v.GetKeys()) {
+            const rec = v.Reduce(key);
+            if (rec.IsNil()) continue;
+            const assigned = rec.Reduce('assigned').Visualize();
+            const created = rec.Reduce('created').Visualize();
+            out.push({
+              invite_id: typeof key === 'string' ? key : (key as AdaptValue).Visualize(),
+              mode: rec.Reduce('mode').Visualize(),
+              assigned: assigned === '%%NIL' ? '' : assigned,
+              created: created === '%%NIL' ? '' : created,
+            });
+          }
+          return out;
+        });
+        if (rows.length === 0) return textResult('No outstanding invites.');
+        const lines = rows.map((r) =>
+          `• ${r.invite_id} — ${r.mode}${r.assigned ? `, assigned name "${r.assigned}"` : ''}${r.created ? `, created ${r.created}` : ''}`,
+        );
+        return textResult(`Outstanding invites (${rows.length}):\n${lines.join('\n')}`);
+      } catch (e) {
+        return textResult(`list_invites failed: ${String(e)}`, true);
+      }
+    },
+  );
+
+  server.tool(
+    'revoke_invite',
+    'Revoke an outstanding invite by invite_id (from generate_invite or ' +
+      'list_invites). The only way to close a public invite, which has no expiry ' +
+      'and is never consumed by redemption. Idempotent: revoking an unknown or ' +
+      'already-consumed id reports revoked=false rather than failing. Note: ' +
+      'revoking does NOT remove contacts already admitted through the invite — ' +
+      'to keep a specific peer out, revoke_invite first, then remove_contact.',
+    { invite_id: z.string().min(1).describe('The invite_id to revoke.') },
+    async ({ invite_id }) => {
+      const { id, err } = boundOr();
+      if (err) return err;
+      try {
+        const res = await withScopeAsync(async (lt) => {
+          const data = await mutatingTx(id!, '::a2a_messaging::revoke_invite', { invite_id }, lt);
+          const wp = data.Reduce('was_public');
+          return {
+            revoked: data.Reduce('revoked').GetBoolean(),
+            wasPublic: wp.IsNil() ? false : wp.GetBoolean(),
+          };
+        });
+        if (!res.revoked) {
+          return textResult(`Invite ${invite_id} was not found (already consumed, revoked, or never existed) — nothing to revoke.`);
+        }
+        const kind = res.wasPublic ? 'public' : 'one_time';
+        return textResult(`Invite ${invite_id} (${kind}) revoked. Existing contacts admitted through it are unaffected.`);
+      } catch (e) {
+        return textResult(`revoke_invite failed: ${String(e)}`, true);
       }
     },
   );
@@ -3724,6 +4260,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
           const inviterName = data.Reduce('inviter_name').Visualize();
           const nil = (s: string) => !s || s === '%%NIL';
           const display = !nil(pending) ? pending : (!nil(inviterName) ? inviterName : cid);
+          scheduleCapabilityReconcile(id!);
           return `Added contact "${display}" (${cid}).`;
         });
         return textResult(msg);
@@ -3945,6 +4482,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
             return `Approved "${name}" (${cid}) — now a contact. ${flushed} queued message(s) moved to the inbox (read them with get_messages).`;
           });
           refreshUnread(id!);
+          scheduleCapabilityReconcile(id!);
           return textResult(msg);
         }
         const msg = await withScopeAsync(async (lt) => {
@@ -4185,7 +4723,12 @@ function createMcpServer(getSessionId: () => string): McpServer {
     'remove_contact',
     'Forget a contact (by name or container id) — drops it from the bound identity\'s ' +
       'contacts, so you can no longer message them and inbound messages from them are ' +
-      'rejected. This is a contacts-layer forget, NOT a key wipe: the per-peer channel ' +
+      'rejected. Also sends the peer one best-effort authenticated "remove me from ' +
+      'your contacts" notice so a supporting peer drops you too — fire-and-forget: ' +
+      'queued once, never retried or acknowledged, so remote removal is NOT ' +
+      'guaranteed (an offline peer or a dropped packet leaves the removal local-only, ' +
+      'and a pre-0.13 or degraded peer is sent nothing at all). This is a ' +
+      'contacts-layer forget, NOT a key wipe: the per-peer channel ' +
       'key material persists, so re-adding the same peer reuses the existing encrypted ' +
       'channel rather than re-handshaking. Removal is NOT retirement: a later ' +
       'send_message to the removed peer auto-reconnects — for ANY live identity on this ' +
@@ -4198,15 +4741,27 @@ function createMcpServer(getSessionId: () => string): McpServer {
       const { id, err } = boundOr();
       if (err) return err;
       try {
+        outboundRemovalInFlight.add(id!.name);
         const msg = await withScopeAsync(async (lt) => {
           const data = await mutatingTx(id!, '::a2a_messaging::remove_contact', { contact }, lt);
           const name = data.Reduce('removed').Visualize();
           const cid = data.Reduce('container_id').Visualize();
-          return `Removed contact "${name}" (${cid}).`;
+          const notifiedV = data.Reduce('notified');
+          const notified = notifiedV.IsNil() ? undefined : notifiedV.GetBoolean();
+          // $notified TRUE means the notice was QUEUED to the transport, never
+          // that the peer applied it (fire-and-forget, not redrivable).
+          const remote = notified === undefined
+            ? ''
+            : notified
+              ? ' A best-effort removal notice was sent to the peer (delivery and remote removal are not guaranteed).'
+              : ' No removal notice was sent (the peer does not support it or is unreachable) — the removal is local-only.';
+          return `Removed contact "${name}" (${cid}).${remote}`;
         });
         return textResult(msg);
       } catch (e) {
         return textResult(`remove_contact failed: ${String(e)}`, true);
+      } finally {
+        outboundRemovalInFlight.delete(id!.name);
       }
     },
   );
@@ -4676,7 +5231,10 @@ async function main() {
     }
     return reaped;
   };
-  const sessionReaper = setInterval(reapDeadSessions, 60_000);
+  const sessionReaper = setInterval(() => {
+    reapDeadSessions();
+    sweepStaleTempIdentities();
+  }, 60_000);
   sessionReaper.unref?.();
 
   // ---- undeliverable-response detection (diagnostics only) --------------------
@@ -4781,7 +5339,12 @@ async function main() {
     if (req.method === 'GET' && url.pathname === '/identities') {
       if (!requireAuth(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ identities: [...identities.values()].map((i) => ({ name: i.name })) }));
+      res.end(JSON.stringify({
+        identities: [...identities.values()].map((i) => ({
+          name: i.name,
+          ...(i.temp ? { temporary: true, stale: !pidAlive(i.temp.owner.pid) } : {}),
+        })),
+      }));
       return;
     }
     if (req.method === 'GET' && url.pathname === '/unread') {
@@ -4934,7 +5497,19 @@ async function main() {
         // Explicit release: free every lease this connector's token holds.
         const token = sessionHeaders.get(sessionId)?.token ?? (req.headers['x-ours-lease-token'] as string | undefined);
         if (token) {
-          for (const [n, l] of [...leases]) if (l.token === token) leases.delete(n);
+          for (const [n, l] of [...leases]) {
+            if (l.token !== token) continue;
+            leases.delete(n);
+            // Normal owning-session teardown: an explicit lease release closes the
+            // session's temporary identities (async; the DELETE response does not
+            // wait on the best-effort remove-me fan-out).
+            const rid = identities.get(n);
+            if (rid?.temp && rid.temp.owner.tokenHash === hashLeaseToken(token) && !rid.temp.closing) {
+              void closeTemporaryIdentity(rid, 'owning session released its lease').catch((err) =>
+                log(`[${n}] close on lease release failed:`, String(err)),
+              );
+            }
+          }
           tombstones.delete(token);
           persistBindings();
           log(`lease released by token …${token.slice(-6)}`);

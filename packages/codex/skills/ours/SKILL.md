@@ -210,6 +210,27 @@ the bio, so a persona prompt is only needed if they want to role-play it).
 - **Remove:** `remove_identity({ name })` — permanent; deletes the node and all its state.
   A Human identity with agents refuses until the agents are removed.
 
+### Temporary identities (session-scoped)
+
+For scratch/one-off work ("make a temporary identity", "throwaway identity"):
+`create_temporary_identity({ name? , bio?, expose_local? })` — name optional (omitted → a
+random public-safe `tmp-…` name), binds it to this session, and marks it **temporary**:
+
+- **Session-scoped local lifetime.** When this session ends — an explicit
+  `close_temporary_identity()`, releasing the connection, or the client process dying —
+  each contact is sent **one best-effort remove-me notice** and then ALL local state
+  (keys, profile, contacts, messages, files) is deleted; it disappears from
+  `list_identities`. **Remote contact deletion is NOT guaranteed** (fire-and-forget; an
+  offline or older peer keeps its entry).
+- **Exclusive ownership.** No other session can bind, close, or remove it while the
+  owning session lives — not even with `force`. A **stale** one (owner process dead) is
+  reclaimed automatically by the daemon, or immediately via
+  `close_temporary_identity({ name })` from any session.
+- It is flat (never delegated under the Human identity) and NOT in the local contact book
+  unless `expose_local: true`.
+- `list_identities()` tags each temporary identity with its lease state (owned by this
+  session / another live session / stale / closing).
+
 ### Version mismatch (advisory)
 
 If a notice says your plugin and the running daemon are different
@@ -240,6 +261,18 @@ All of these act as your currently-bound identity.
 2. Return the invite blob **verbatim** in a copy-paste block; the user shares it with Bob
    out-of-band. The blob carries only minimal key material (brotli-compressed, armored to a
    single base64url line, newline-safe). Both ends must run a matching ours version.
+
+**Invite kinds** (`mode`, omitted = `"one_time"`):
+- `"one_time"` — consumed by the first redemption (the default, unchanged behavior).
+- `"public"` — **reusable**, meant for open posting ("post an open invite"): every redeemer
+  gets an independent encrypted channel, and a public invite cannot pre-assign a contact
+  name. It has **no expiry and is never consumed**, so the ONLY way to close it is
+  `revoke_invite({ invite_id })` — record the `invite_id` from the response. It also does
+  **not survive a daemon restart** (re-generate and re-post after one). To keep a specific
+  peer out for good: `revoke_invite` **first**, then `remove_contact` (removal alone does
+  not revoke a shared invite).
+- `list_invites()` shows the outstanding invites (id, kind, assigned name);
+  `revoke_invite` is idempotent.
 
 ### Add a contact from an invite
 When the user pastes an invite blob:
@@ -313,7 +346,11 @@ tools, a separate store. To caption a file, also `send_message`.
   "require approval for local contacts" → `set_local_book_policy({ auto_accept: false })`.
 - Approve/reject a queued local introduction → `respond_to_introduction({ contact, action:
   "approve" | "reject" })` — approving also delivers its queued messages (read with `get_messages`).
-- "forget Bob" → `remove_contact({ contact })` (contacts-layer forget, not a key wipe).
+- "forget Bob" → `remove_contact({ contact })` — a contacts-layer forget (not a key wipe)
+  that also sends Bob one **best-effort** authenticated "remove me from your contacts"
+  notice, so an up-to-date peer drops you too. Fire-and-forget: no retry, no ack — an
+  offline peer or dropped packet leaves the removal **local-only**, and the tool says
+  whether a notice was queued. Never report the peer's side as removed.
 
 ## Conversation rules (1:1 and fan-out)
 
