@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/install",
-  "version": "0.15.4",
+  "version": "0.16.0",
   "private": false,
   "description": "The unified ours.network stack installer (ours-install): one guided ~3-minute flow for ours core (the daemon) + the harness plugins (Claude Code / Codex) + ours-fleet + the Telegram connector, then a single copy-paste hand-off prompt. Self-contained (Node built-ins only); run as `ours-install` or via curl|bash (install.sh).",
   "type": "module",
