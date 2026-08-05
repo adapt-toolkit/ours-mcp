@@ -141,8 +141,10 @@ ok(havePacket, 'preflight: a compiled .muflo packet exists, so the daemon can bo
 if (!havePacket) {
   console.log(
     `\nrefusing to run: no *.muflo packet in any of:\n  ${MUFL_DIRS.join('\n  ')}\n` +
-      'Run `npm run build` in packages/core first — every daemon in this suite would\n' +
-      'otherwise fail to boot and be misreported as a timeout.',
+      'Compile the packet with scripts/compile-mufl.sh, then run `npm run build` in\n' +
+      'packages/core to copy it into dist/ — build alone only copies an existing packet,\n' +
+      'so it cannot fix this. Every daemon in this suite would otherwise fail to boot\n' +
+      'and be misreported as a timeout.',
   );
   console.log(`\ntwo-daemons: ${pass} passed, ${fail} failed`);
   process.exit(1);
