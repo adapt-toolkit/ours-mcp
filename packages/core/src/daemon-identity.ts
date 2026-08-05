@@ -21,7 +21,7 @@
 // That is the named-instance model (P2); this file only carries the label.
 
 import * as fs from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
 import { join, resolve } from 'node:path';
 
@@ -99,27 +99,57 @@ export function stateFingerprint(stateDir: string): string {
   return createHash('sha256').update(seed).digest('hex').slice(0, 16);
 }
 
-export function pidAlive(pid: number): boolean {
+// How liveness is observed. Injectable so the cross-user branch can be proven
+// without arranging for a process owned by another user to exist.
+export interface PidProbe {
+  kill(pid: number, signal: 0): void;
+  readProcStat(pid: number): string;
+}
+
+const defaultPidProbe: PidProbe = {
+  kill: (pid, signal) => {
+    process.kill(pid, signal);
+  },
+  readProcStat: (pid) => fs.readFileSync(`/proc/${pid}/stat`, 'utf8'),
+};
+
+// Classify a failed kill(pid, 0).
+//
+// ESRCH — "no such process" — is the ONLY errno that means dead. EPERM means the
+// opposite: the process EXISTS, we are simply not allowed to signal it because it
+// belongs to another user. Reading EPERM as "dead" is how a daemon running under
+// a different account gets its state lock reclaimed out from under it, which is
+// precisely the corruption the lock exists to prevent. Any other errno is
+// unknown, and unknown fails safe the same way: refusing costs one command,
+// guessing costs two live daemons writing into one directory.
+export function killErrorMeansDead(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | undefined)?.code === 'ESRCH';
+}
+
+export function pidAlive(pid: number, probe: PidProbe = defaultPidProbe): boolean {
   if (!Number.isFinite(pid) || pid <= 0) return false;
   try {
-    process.kill(pid, 0); // signal 0 = existence check
-    // kill(pid, 0) also succeeds for a Linux zombie. A zombie has already
-    // exited and released its files, so it does not own the state dir.
-    if (process.platform === 'linux') {
+    probe.kill(pid, 0); // signal 0 = existence check
+  } catch (e) {
+    return !killErrorMeansDead(e);
+  }
+  // kill(pid, 0) also succeeds for a Linux zombie. A zombie has already
+  // exited and released its files, so it does not own the state dir.
+  if (process.platform === 'linux') {
+    try {
+      if (linuxProcHasExited(probe.readProcStat(pid))) return false;
+    } catch {
+      // /proc unreadable (hidepid, a container, a foreign mount namespace): fall
+      // back to the signal probe, and classify its errno the same way — an
+      // unreadable /proc must not downgrade a cross-user process to "dead".
       try {
-        if (linuxProcHasExited(fs.readFileSync(`/proc/${pid}/stat`, 'utf8'))) return false;
-      } catch {
-        try {
-          process.kill(pid, 0);
-        } catch {
-          return false;
-        }
+        probe.kill(pid, 0);
+      } catch (e) {
+        return !killErrorMeansDead(e);
       }
     }
-    return true;
-  } catch {
-    return false;
   }
+  return true;
 }
 
 // ----- daemon identity over the wire ----------------------------------------
@@ -275,12 +305,137 @@ export type StateLockResult =
   // could not be reclaimed — we refuse rather than guess.
   | { ok: false; holder: StateLockRecord | null };
 
+// Reclaim a lock believed stale, WITHOUT ever destroying a live one.
+//
+// The unsafe version of this was an unconditional `rmSync`. Two contenders could
+// both read the same dead record, both conclude "stale", and the slower one's
+// rmSync would delete the faster one's freshly acquired, LIVE lock — leaving two
+// daemons owning one state directory, exactly the outcome the lock exists to
+// prevent. The window is small and entirely real: it is the interval between
+// reading the record and acting on it.
+//
+// rename() is the serialization, and it needs no second lock file. It is atomic,
+// so of N contenders racing to reclaim one lock exactly ONE moves the file; the
+// losers get ENOENT and simply re-race the O_EXCL create, which is the correct
+// outcome for them anyway. Having moved the file, the winner holds the only
+// reference to it and can inspect it in isolation — nobody else can see it at
+// `path` any more. If what it captured turns out to be a LIVE record (someone
+// acquired the lock between our read and our rename), it is put BACK rather than
+// deleted, and we refuse.
+//
+// The restore uses link(), not rename(), because link fails when the destination
+// exists: if a third daemon has legitimately taken the path in the meantime, its
+// lock must win and our captured copy is simply dropped.
+type ReclaimOutcome = 'retry' | 'refuse';
+
+function reclaimStaleLock(path: string): ReclaimOutcome {
+  const claimed = `${path}.reclaim-${process.pid}-${randomBytes(6).toString('hex')}`;
+  try {
+    fs.renameSync(path, claimed);
+  } catch (e) {
+    // ENOENT: another contender reclaimed it first. Nothing to clean up — go
+    // straight back to the create, where either we win or we meet a live holder.
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 'retry';
+    return 'refuse';
+  }
+
+  let captured: StateLockRecord | null = null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(claimed, 'utf8')) as StateLockRecord;
+    captured = parsed && typeof parsed.pid === 'number' ? parsed : null;
+  } catch {
+    captured = null; // corrupt: no pid to vouch for, and no owner to protect
+  }
+
+  if (captured && pidAlive(captured.pid)) {
+    try {
+      fs.linkSync(claimed, path);
+    } catch {
+      /* a newer lock owns the path now — it wins, our copy is discarded */
+    }
+    try {
+      fs.rmSync(claimed, { force: true });
+    } catch {
+      /* best effort */
+    }
+    return 'refuse';
+  }
+
+  try {
+    fs.rmSync(claimed, { force: true });
+  } catch {
+    /* best effort — the record is already detached from `path` */
+  }
+  return 'retry';
+}
+
+// Test seam. `beforeReclaim` runs after a lock has been observed stale but
+// BEFORE it is claimed for removal — the exact window in which a competing
+// contender can acquire. Production never passes this; it exists so the lost
+// race is reproduced deterministically instead of hoped for under load.
+export interface AcquireStateLockHooks {
+  beforeReclaim?: () => void;
+}
+
+// Publish a fully-formed lock file, atomically, or fail because someone else got
+// there first.
+//
+// `open(path, 'wx')` is atomic for CREATION but not for CONTENT: it produces a
+// ZERO-BYTE file that only becomes a record on the following write. That gap is
+// a real, frequently-hit window, and it is worse than the stale-reclaim TOCTOU
+// because it needs no stale lock at all — a clean directory is enough. A second
+// contender arriving inside it reads an empty file, parses it as corrupt, finds
+// no pid to check for liveness, classifies the LIVE winner's lock as garbage,
+// removes it, and acquires. Measured: 8 racers on a clean directory produced 3
+// winners.
+//
+// So the file is never created empty. The record is written to a private temp in
+// the SAME directory (same filesystem, so link cannot cross devices) and then
+// published with link(), which is atomic and fails EEXIST if the destination
+// exists. The lock therefore only ever exists fully-formed: there is no instant
+// at which a contender can observe it incomplete. This does not weaken the
+// exclusivity O_EXCL provided — link() carries the identical all-or-nothing
+// create guarantee — it extends that guarantee to cover the contents.
+function publishStateLock(path: string, record: StateLockRecord): 'ok' | 'taken' {
+  const tmp = `${path}.new-${process.pid}-${randomBytes(6).toString('hex')}`;
+  const fd = fs.openSync(tmp, 'wx', 0o600);
+  try {
+    fs.writeSync(fd, JSON.stringify(record, null, 2) + '\n');
+    // The record must be on disk before it is reachable under `path`; otherwise a
+    // crash could publish a name whose contents never landed — the zero-byte
+    // problem again, just at a different layer.
+    try {
+      fs.fsyncSync(fd);
+    } catch {
+      /* filesystems without fsync semantics still get an ordered write */
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  try {
+    fs.linkSync(tmp, path);
+    return 'ok';
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') return 'taken';
+    throw e;
+  } finally {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* best effort: the published inode is already linked at `path` */
+    }
+  }
+}
+
 // Take exclusive ownership of a state directory.
 //
-// O_EXCL create is the whole mechanism: it is atomic, so two daemons racing for
-// the same directory cannot both win. A lock left behind by a crashed daemon is
-// reclaimed once its pid is confirmed dead — a daemon that segfaults must not
-// wedge its own state dir forever.
+// Two atomic primitives, because the two failure modes are different:
+//   PUBLISH — link() of a fully-written temp, so a lock is never observable in a
+//             partial state and two daemons cannot both create it.
+//   RECLAIM — rename()-serialized, so reclaiming a dead holder's lock cannot
+//             delete a live one that appeared in the meantime.
+// A lock left behind by a crashed daemon is still reclaimed once its pid is
+// confirmed dead — a daemon that segfaults must not wedge its own state dir.
 //
 // A LIVE holder is always refused, even in the pathological case where the pid
 // was recycled by an unrelated process. Refusing costs the user one command
@@ -289,6 +444,7 @@ export type StateLockResult =
 export function acquireStateLock(
   stateDir: string,
   meta: Omit<StateLockRecord, 'stateDir' | 'stateFingerprint' | 'startedAt'>,
+  hooks: AcquireStateLockHooks = {},
 ): StateLockResult {
   const dir = resolve(stateDir);
   const path = stateLockPath(dir);
@@ -300,29 +456,18 @@ export function acquireStateLock(
     startedAt: new Date().toISOString(),
   };
 
-  // Two attempts: the second exists only to re-race after reclaiming a stale
-  // lock. If we lose that race, another daemon legitimately owns the dir.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let fd: number;
-    try {
-      fd = fs.openSync(path, 'wx', 0o600);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+  // Three attempts: each reclaim earns one more re-race. Bounded so that a
+  // directory churning locks faster than we can take one ends in a refusal
+  // rather than a spin.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (publishStateLock(path, record) === 'taken') {
       const holder = readStateLock(dir);
       if (holder && pidAlive(holder.pid)) return { ok: false, holder };
-      if (attempt > 0) return { ok: false, holder };
-      // Stale (dead pid) or corrupt (no pid to check) — reclaim and retry once.
-      try {
-        fs.rmSync(path, { force: true });
-      } catch {
-        return { ok: false, holder };
-      }
+      if (attempt >= 2) return { ok: false, holder };
+      // Stale (dead pid) or corrupt (no pid to check).
+      hooks.beforeReclaim?.();
+      if (reclaimStaleLock(path) === 'refuse') return { ok: false, holder: readStateLock(dir) };
       continue;
-    }
-    try {
-      fs.writeSync(fd, JSON.stringify(record, null, 2) + '\n');
-    } finally {
-      fs.closeSync(fd);
     }
     let released = false;
     const release = () => {
