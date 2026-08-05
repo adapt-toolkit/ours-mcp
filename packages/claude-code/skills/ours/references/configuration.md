@@ -17,8 +17,8 @@ daemon binds the same port — both read `OURS_PORT`/`config.json`. Change it
 **once in shared config**, never per-side, or the connector won't find the daemon.
 
 **Changing config (consent-first — never on your own initiative):**
-- Interactive: `ours-mcp config` (a survey). It needs a TTY, so ask the **user**
-  to run it via `!ours-mcp config` — you cannot drive the survey yourself.
+- Interactive: `ours-mcp setup` (a survey). It needs a TTY, so ask the **user**
+  to run it via `!ours-mcp setup` — you cannot drive the survey yourself.
 - Scripted: edit `~/.ours/config.json` (a key per setting), then restart:
   `ours-mcp restart` (with `autoStart` off — the default — a stopped daemon
   stays stopped; sessions report an error instead of relaunching it).
