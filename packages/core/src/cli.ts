@@ -25,7 +25,6 @@
 //   OURS_AUTOSTART       "1"/"true": proxy auto-spawns the daemon (default off)
 
 import { spawn, spawnSync } from 'node:child_process';
-import { connect } from 'node:net';
 import { homedir, userInfo } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -58,6 +57,22 @@ import {
   waitForStartup,
   type StartupWaitFailure,
 } from './startup-progress';
+import {
+  acquireStateLock,
+  formatPortCollision,
+  formatStateCollision,
+  inspectPort,
+  pidAlive,
+  portOpen,
+  probeDaemonInfo,
+  readStateLock,
+  resolveInstance,
+  sameStateDir,
+  stateFingerprint,
+  verifyDaemon,
+  EXIT_PORT_COLLISION,
+  EXIT_STATE_COLLISION,
+} from './daemon-identity';
 
 // systemctl/journalctl --user (install-service / uninstall-service) locate the
 // user bus via $XDG_RUNTIME_DIR/bus. sudo/su shells run inside the CALLING
@@ -87,6 +102,18 @@ const apiHeaders = (): Record<string, string> => {
 const BROKER_URL = CONFIG.brokerUrl;
 const PID_PATH = join(STATE_DIR, 'daemon.pid');
 const LOG_PATH = join(STATE_DIR, 'daemon.log');
+// This daemon's non-secret label (OURS_INSTANCE, else "default"). A label only:
+// it names the daemon in diagnostics and over /info, and never selects the port,
+// state dir, or config file — those stay env > config.json > default.
+const INSTANCE = ((): string => {
+  try {
+    return resolveInstance().name;
+  } catch (e) {
+    // A malformed label must not surface as a module-load stack trace.
+    process.stderr.write(`ours-mcp: ${(e as Error).message}\n`);
+    process.exit(1);
+  }
+})();
 
 const SELF = fileURLToPath(import.meta.url);
 const out = (...p: unknown[]) => process.stdout.write(`${p.join(' ')}\n`);
@@ -188,20 +215,6 @@ function runningPid(): number | null {
   return null;
 }
 
-function portOpen(port: number, timeoutMs = 1000): Promise<boolean> {
-  return new Promise((res) => {
-    const sock = connect({ host: '127.0.0.1', port });
-    const done = (ok: boolean) => {
-      sock.destroy();
-      res(ok);
-    };
-    sock.setTimeout(timeoutMs);
-    sock.once('connect', () => done(true));
-    sock.once('timeout', () => done(false));
-    sock.once('error', () => done(false));
-  });
-}
-
 async function waitForPort(port: number, totalMs = 30_000): Promise<boolean> {
   const deadline = Date.now() + totalMs;
   while (Date.now() < deadline) {
@@ -268,12 +281,41 @@ function startupFailureMessage(
   );
 }
 
+// Refuse to spawn a daemon that cannot possibly succeed, and say why.
+//
+// Without this, a second daemon aimed at an occupied port was spawned anyway,
+// died on EADDRINUSE inside the child, and `start` then reported the daemon that
+// was ALREADY there as if it were the one it had just launched. Checking first
+// turns a silent wrong-daemon connection into an exit code and a fix.
+//
+// Returns true when the daemon is already up and is OURS (idempotent `start`).
+async function preflightStart(): Promise<boolean> {
+  const occupant = await inspectPort(PORT, STATE_DIR);
+  if (occupant.kind === 'ours' && occupant.sameState) {
+    out(formatPortCollision(PORT, STATE_DIR, occupant));
+    return true;
+  }
+  if (occupant.kind !== 'free') {
+    err(formatPortCollision(PORT, STATE_DIR, occupant));
+    process.exit(EXIT_PORT_COLLISION);
+  }
+  // The port is free, but the state dir may still be owned — that is the case
+  // where someone gave the second daemon a new port and forgot the state dir.
+  const holder = readStateLock(STATE_DIR);
+  if (holder && pidAlive(holder.pid)) {
+    err(formatStateCollision(STATE_DIR, holder));
+    process.exit(EXIT_STATE_COLLISION);
+  }
+  return false;
+}
+
 async function cmdStart(): Promise<void> {
   const existing = runningPid();
   if (existing) {
     out(`ours-mcp is already running (pid ${existing}, port ${PORT}).`);
     return;
   }
+  if (await preflightStart()) return;
   fs.mkdirSync(STATE_DIR, { recursive: true });
   const logFd = fs.openSync(LOG_PATH, 'a');
 
@@ -314,15 +356,26 @@ async function cmdStart(): Promise<void> {
   });
   if (progressShown && interactive) process.stderr.write('\n');
 
-  if (result.ok) {
-    out(`ours-mcp is up on http://localhost:${PORT}/mcp`);
-    out(`  broker: ${BROKER_URL}`);
-    out(`  state:  ${STATE_DIR}`);
-    out(`  logs:   ${LOG_PATH}`);
-  } else {
+  if (!result.ok) {
     err(`${startupFailureMessage(result.reason, result.lastProgress)} Check ${LOG_PATH}.`);
     process.exit(1);
   }
+
+  // A responding port is liveness, not identity. Before claiming success, make
+  // the daemon prove it is running OUR state dir — otherwise a child that lost
+  // a bind race leaves `start` congratulating itself over somebody else's
+  // daemon, which is exactly how a session ends up on the wrong identities.
+  const verified = await verifyDaemon(PORT, { stateDir: STATE_DIR, instance: INSTANCE });
+  if (!verified.ok) {
+    err(`ours-mcp failed to start: ${verified.message}`);
+    err(`Check ${LOG_PATH}.`);
+    process.exit(verified.reason === 'unreachable' ? 1 : EXIT_PORT_COLLISION);
+  }
+
+  out(`ours-mcp is up on http://localhost:${PORT}/mcp`);
+  out(`  broker: ${BROKER_URL}`);
+  out(`  state:  ${STATE_DIR}`);
+  out(`  logs:   ${LOG_PATH}`);
 }
 
 // Best-effort guarantee that the shared daemon is listening, for the proxy to
@@ -382,7 +435,80 @@ async function cmdStop(): Promise<void> {
   out('stopped.');
 }
 
-async function cmdStatus(): Promise<void> {
+// Machine-readable status. Exists so tooling stops regex-scraping the human
+// output (the installer parses the `broker:` and `url:` lines today) and so a
+// caller can see the one thing the text has never said: whether the daemon
+// answering on this port is actually THIS configuration's daemon.
+//
+// `ownDaemon: false` with `running: true` is the multi-daemon smell — the port
+// is alive, but it belongs to somebody else's state dir.
+interface StatusJson {
+  instance: string;
+  running: boolean;
+  ownDaemon: boolean;
+  pid: number | null;
+  port: number;
+  url: string;
+  reachable: boolean;
+  brokerUrl: string;
+  stateDir: string;
+  stateFingerprint: string;
+  logPath: string;
+  lockHeldBy: number | null;
+  cliVersion: string;
+  daemon: {
+    version: string | null;
+    compat: string | null;
+    protocol: number | null;
+    instance: string | null;
+    stateDir: string | null;
+    stateFingerprint: string | null;
+    pid: number | null;
+    startedAt: string | null;
+  } | null;
+}
+
+async function collectStatus(): Promise<StatusJson> {
+  const pid = runningPid();
+  const reachable = await portOpen(PORT);
+  const info = reachable ? await probeDaemonInfo(PORT) : null;
+  const lock = readStateLock(STATE_DIR);
+  return {
+    instance: INSTANCE,
+    running: Boolean(pid) || reachable,
+    ownDaemon: Boolean(info) && sameStateDir(info!, STATE_DIR),
+    pid: pid ?? info?.pid ?? null,
+    port: PORT,
+    url: `http://localhost:${PORT}/mcp`,
+    reachable,
+    brokerUrl: BROKER_URL,
+    stateDir: STATE_DIR,
+    stateFingerprint: stateFingerprint(STATE_DIR),
+    logPath: LOG_PATH,
+    lockHeldBy: lock && pidAlive(lock.pid) ? lock.pid : null,
+    cliVersion: CLI_VERSION,
+    daemon: info
+      ? {
+          version: info.version ?? null,
+          compat: info.compat ?? null,
+          protocol: info.protocol ?? null,
+          instance: info.instance ?? null,
+          stateDir: info.stateDir ?? null,
+          stateFingerprint: info.stateFingerprint ?? null,
+          pid: info.pid ?? null,
+          startedAt: info.startedAt ?? null,
+        }
+      : null,
+  };
+}
+
+async function cmdStatus(argv: string[]): Promise<void> {
+  if (argv.includes('--json')) {
+    const status = await collectStatus();
+    out(JSON.stringify(status, null, 2));
+    if (!status.running) process.exitCode = 1;
+    return;
+  }
   const pid = runningPid();
   if (!pid) {
     if (await portOpen(PORT)) {
@@ -390,6 +516,7 @@ async function cmdStatus(): Promise<void> {
       out('ours-mcp: running (no pidfile — likely a stale process or external launcher)');
       out(`  url:    http://localhost:${PORT}/mcp (reachable)`);
       reportVersions(info);
+      await reportForeignDaemon();
       return;
     }
     out('ours-mcp: stopped');
@@ -406,6 +533,24 @@ async function cmdStatus(): Promise<void> {
   out(`  state:  ${STATE_DIR}`);
   out(`  logs:   ${LOG_PATH}`);
   reportVersions(info);
+  if (up) await reportForeignDaemon();
+}
+
+// Appended to the human output only when there is something wrong to say, so
+// the existing lines (which the installer parses) keep their exact shape.
+async function reportForeignDaemon(): Promise<void> {
+  const info = await probeDaemonInfo(PORT);
+  if (!info) {
+    err(`  ⚠ port ${PORT} is answering but is NOT an ours daemon.`);
+    return;
+  }
+  if (!sameStateDir(info, STATE_DIR)) {
+    err(
+      `  ⚠ port ${PORT} is served by a DIFFERENT ours daemon ` +
+        `(instance "${info.instance ?? 'default'}", state ${info.stateDir ?? 'unknown'}) — ` +
+        `this config expects ${STATE_DIR}.`,
+    );
+  }
 }
 
 // `ours-mcp version` / --version: print this binary's version, and the running
@@ -1226,7 +1371,8 @@ function usage(): void {
   out('  start     start in the background; show structured progress until ready');
   out('  stop      stop the running daemon');
   out('  restart   stop then start; healthy slow restores may take up to 3 minutes');
-  out('  status    show whether the daemon is running (incl. CLI + running-daemon version)');
+  out('  status [--json]  show whether the daemon is running (incl. CLI + running-daemon version);');
+  out('                   --json adds the daemon identity and whether the port is really yours');
   out('  version   print the CLI version and the running daemon version (GET /version)');
   out('  setup     interactively edit the config file (broker / port / state dir / gc)');
   out('  voice-setup [--dry-run]  securely choose a provider and configure its hidden API key');
@@ -1264,6 +1410,38 @@ async function main(): Promise<void> {
       // at runtime from the sibling dist/index.js.
       if (!process.env.OURS_TRANSPORT) process.env.OURS_TRANSPORT = 'http';
       fs.mkdirSync(STATE_DIR, { recursive: true });
+      // Claim the state directory BEFORE touching daemon.pid. Two daemons aimed
+      // at one state dir share that pidfile, so a refused second daemon that had
+      // already written its own pid there — and then cleaned it up on exit —
+      // would delete the FIRST daemon's pidfile and leave `stop` unable to find
+      // it. Locking first means a refused daemon never writes anything at all.
+      //
+      // `serve` imports index.js into THIS process, so this lock is the daemon's
+      // own; it is released by the exit handler below.
+      {
+        const lock = acquireStateLock(STATE_DIR, {
+          pid: process.pid,
+          port: PORT,
+          instance: INSTANCE,
+          version: CLI_VERSION,
+        });
+        if (!lock.ok) {
+          err(formatStateCollision(STATE_DIR, lock.holder));
+          process.exit(EXIT_STATE_COLLISION);
+        }
+        process.on('exit', lock.release);
+      }
+      // Booting the whole ADAPT wrapper only to discard it on EADDRINUSE wastes
+      // seconds and buries the reason under startup noise. Check the port first.
+      // index.ts still handles the bind error itself — this is the fast, clear
+      // path, that one is the race.
+      {
+        const occupant = await inspectPort(PORT, STATE_DIR);
+        if (occupant.kind !== 'free') {
+          err(formatPortCollision(PORT, STATE_DIR, occupant));
+          process.exit(EXIT_PORT_COLLISION);
+        }
+      }
       fs.writeFileSync(PID_PATH, String(process.pid));
       {
         const cleanup = () => {
@@ -1294,7 +1472,7 @@ async function main(): Promise<void> {
       await cmdStart();
       break;
     case 'status':
-      await cmdStatus();
+      await cmdStatus(process.argv.slice(3));
       break;
     case 'version':
     case '--version':
