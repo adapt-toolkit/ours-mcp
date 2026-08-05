@@ -16,13 +16,14 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, '..', 'dist', 'cli.js');
+const CONFIG_URL = pathToFileURL(join(HERE, '..', 'dist', 'config.js')).href;
 // Deliberately unreachable: these daemons must never talk to a real broker.
 const BROKER = 'ws://127.0.0.1:59997/nobroker';
 
@@ -45,12 +46,39 @@ function tempState(tag) {
 // A clean environment for every child: the host running this suite may itself be
 // an ours user, and an inherited OURS_CONFIG/OURS_API_TOKEN/OURS_STATE_DIR would
 // silently point a test daemon at the real installation.
+//
+// DELETING OURS_CONFIG IS NOT ISOLATION. It was what this did, and it is worse
+// than doing nothing: with the variable unset, config.ts falls back to
+// <home>/.ours/config.json — the LIVE file. strace showed every child opening it.
+// That file can carry apiVisibility, an apiToken, and an STT provider key, any of
+// which would silently steer a test daemon or pull a real secret into it.
+//
+// So every child gets, positively:
+//   OURS_CONFIG — a test-owned empty {} file. Semantically identical to "no
+//                 config" (readFileConfig returns {} either way) but ours.
+//   HOME        — a temp dir, so every ~/-derived path resolves inside tmpdir:
+//                 DEFAULT_CONFIG.stateDir AND configPath()'s fallback alike.
+//                 It must be set at SPAWN time; config.ts reads homedir() at
+//                 module load, so mutating it in-process would do nothing.
+// Both are defence in depth over the explicit OURS_PORT/OURS_STATE_DIR that
+// almost every child also gets — the point is that no child depends on them.
+const TEST_HOME = tempState('home');
+const TEST_CONFIG = join(tempState('cfg'), 'config.json');
+writeFileSync(TEST_CONFIG, '{}\n');
+
 function childEnv(extra) {
   const env = { ...process.env };
   for (const k of ['OURS_CONFIG', 'OURS_API_TOKEN', 'OURS_API_VISIBILITY', 'OURS_STATE_DIR', 'OURS_PORT', 'OURS_INSTANCE', 'OURS_AUTOSTART']) {
     delete env[k];
   }
-  return { ...env, OURS_TRANSPORT: 'http', OURS_BROKER_URL: BROKER, ...extra };
+  return {
+    ...env,
+    HOME: TEST_HOME,
+    OURS_CONFIG: TEST_CONFIG,
+    OURS_TRANSPORT: 'http',
+    OURS_BROKER_URL: BROKER,
+    ...extra,
+  };
 }
 
 const running = [];
@@ -79,15 +107,75 @@ console.log('two-daemons\n');
 
 // ─── guard: nothing here may touch the live installation ─────────────────────
 const HOME_STATE = resolve(homedir(), '.ours');
+const LIVE_CONFIG = join(HOME_STATE, 'config.json');
+const TMP_ROOT = resolve(tmpdir());
+const underTmp = (p) => typeof p === 'string' && resolve(p).startsWith(TMP_ROOT);
+
 const dirA = tempState('a');
 const dirB = tempState('b');
 const dirC = tempState('c');
 for (const [label, dir] of [['A', dirA], ['B', dirB], ['C', dirC]]) {
-  const under = resolve(dir).startsWith(resolve(tmpdir()));
+  const under = underTmp(dir);
   ok(under && resolve(dir) !== HOME_STATE, `guard: state dir ${label} is a temp dir, not ${HOME_STATE}`);
   if (!under || resolve(dir) === HOME_STATE) {
     console.log('\nrefusing to run against non-temporary state.');
     process.exit(1);
+  }
+}
+
+// ─── preflight: the daemon cannot boot without its compiled packet ───────────
+// index.ts resolves the ADAPT packet from dist/mufl_code, then ../mufl_code, and
+// throws when neither holds a *.muflo. Children run with stdio:'ignore', so that
+// throw is invisible: waitVersion would burn its full 60 s budget per daemon and
+// the suite would then blame "both daemons must be up" — true, and useless. Cost
+// of finding out the honest way: about two minutes. Cost of this check: one stat.
+const MUFL_DIRS = [join(HERE, '..', 'dist', 'mufl_code'), join(HERE, '..', 'mufl_code')];
+const havePacket = MUFL_DIRS.some((d) => {
+  try {
+    return readdirSync(d).some((f) => f.endsWith('.muflo'));
+  } catch {
+    return false;
+  }
+});
+ok(havePacket, 'preflight: a compiled .muflo packet exists, so the daemon can boot at all');
+if (!havePacket) {
+  console.log(
+    `\nrefusing to run: no *.muflo packet in any of:\n  ${MUFL_DIRS.join('\n  ')}\n` +
+      'Run `npm run build` in packages/core first — every daemon in this suite would\n' +
+      'otherwise fail to boot and be misreported as a timeout.',
+  );
+  console.log(`\ntwo-daemons: ${pass} passed, ${fail} failed`);
+  process.exit(1);
+}
+
+// ─── regression: no child may resolve a LIVE ~/.ours path ────────────────────
+// Structural, not host-dependent. Two layers:
+//   (a) over the env BUILDER, which covers every child by construction rather
+//       than by inspecting them one at a time;
+//   (b) over the REAL shipped resolver, run in a fresh process on that exact env,
+//       because what matters is the paths config.ts actually computes — not the
+//       ones we believe it will. Resolution only: it binds no port and starts no
+//       daemon.
+{
+  const e = childEnv({});
+  ok(underTmp(e.OURS_CONFIG), 'childEnv points every child at an OURS_CONFIG under tmpdir');
+  ok(resolve(e.OURS_CONFIG) !== LIVE_CONFIG, 'childEnv never points a child at the live config file');
+  ok(underTmp(e.HOME), 'childEnv gives every child a HOME under tmpdir');
+  ok(resolve(e.HOME) !== resolve(homedir()), 'childEnv never leaves a child on the live HOME');
+
+  const probe = spawnSync(
+    process.execPath,
+    ['-e', `import(${JSON.stringify(CONFIG_URL)}).then((m) => process.stdout.write(JSON.stringify({ cfg: m.configPath(), state: m.loadConfig().stateDir })));`],
+    { env: childEnv({}), encoding: 'utf8', timeout: 30_000 },
+  );
+  let seen = null;
+  try { seen = JSON.parse(probe.stdout); } catch { /* reported below */ }
+  ok(seen !== null, `the resolver probe returned JSON (stderr: ${probe.stderr?.trim().slice(0, 200) || 'none'})`);
+  if (seen) {
+    ok(resolve(seen.cfg) !== LIVE_CONFIG, 'a child never RESOLVES the live ~/.ours/config.json');
+    ok(underTmp(seen.cfg), 'the config path a child resolves is under tmpdir');
+    ok(resolve(seen.state) !== HOME_STATE, 'a child never resolves the live state dir');
+    ok(underTmp(seen.state), 'the state dir a child resolves is under tmpdir, even with no OURS_STATE_DIR set');
   }
 }
 
@@ -171,7 +259,7 @@ function configOnlyGuard(cfgPath) {
   // Resolution only: this child imports the resolver and prints. It binds no
   // port, starts no daemon, and never contacts 3050.
   writeFileSync(cfg, '{ not json');
-  const configUrl = pathToFileURL(join(HERE, '..', 'dist', 'config.js')).href;
+  const configUrl = CONFIG_URL;
   const probeEnv = childEnv({ OURS_CONFIG: cfg, HOME: sandbox });
   delete probeEnv.OURS_PORT;
   delete probeEnv.OURS_STATE_DIR;
@@ -201,7 +289,16 @@ try {
   const upB = await waitVersion(portB);
   ok(upA, 'daemon A boots on its own port + state dir');
   ok(upB, 'daemon B boots simultaneously on a different port + state dir');
-  if (!upA || !upB) throw new Error('both daemons must be up for the rest of the suite');
+  if (!upA || !upB) {
+    // The compiled-packet preflight above already ruled out the usual cause, so
+    // say what is left rather than repeating the symptom: children run with
+    // stdio:'ignore', so their own diagnostics are not on this stream.
+    throw new Error(
+      `both daemons must be up for the rest of the suite (A=${upA}, B=${upB}) — ` +
+        'the .muflo preflight passed, so re-run one by hand with stdio inherited to see why it did not boot: ' +
+        `OURS_TRANSPORT=http OURS_BROKER_URL=${BROKER} OURS_PORT=<free> OURS_STATE_DIR=<tmp> node ${CLI} serve`,
+    );
+  }
 
   // ─── 1. each daemon can prove which daemon it is ───────────────────────────
   const infoA = await info(portA);
@@ -399,6 +496,71 @@ try {
     const revived = startDaemon(reuse, dirB, {});
     ok(await waitVersion(reuse), 'the released state dir can be claimed again');
     kill(revived);
+  }
+
+  // ─── E2E: two REAL daemons race one stale-locked state dir, 10 rounds ──────
+  // The unit-level race harness (test/lock-race.test.mjs) drives acquireStateLock
+  // directly. This drives the actual product: two `ours-mcp serve` processes,
+  // different ports, SAME state directory, with a stale lock pre-seeded so both
+  // take the reclaim path. Dual-live must be zero — not rare, zero.
+  {
+    const corpse = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+    let dualLive = 0;
+    let rounds = 0;
+    const exitCodes = [];
+
+    for (let round = 0; round < 10; round++) {
+      const dir = tempState(`e2e-${round}`);
+      writeFileSync(
+        join(dir, 'daemon.lock'),
+        JSON.stringify({
+          pid: corpse.pid, port: 3050, instance: 'ghost', stateDir: dir,
+          stateFingerprint: 'x', version: '0', startedAt: 'then',
+        }),
+      );
+      const p1 = await freePort();
+      const p2 = await freePort();
+      const spawnRacer = (port) => {
+        const child = spawn(process.execPath, [CLI, 'serve'], {
+          env: childEnv({ OURS_PORT: String(port), OURS_STATE_DIR: dir }),
+          stdio: 'ignore', detached: true,
+        });
+        running.push(child);
+        child.on('exit', (code) => { child.exitCode_ = code; });
+        return child;
+      };
+      const c1 = spawnRacer(p1);
+      const c2 = spawnRacer(p2);
+
+      // Settle: wait until one has exited (the refusal is immediate — it happens
+      // at lock acquisition, before any ADAPT boot) or the budget runs out.
+      const deadline = Date.now() + 45_000;
+      while (Date.now() < deadline && c1.exitCode_ === undefined && c2.exitCode_ === undefined) {
+        await sleep(200);
+      }
+      // Give the winner a moment to finish binding before asking who is serving.
+      const winnerPort = c1.exitCode_ === undefined ? p1 : p2;
+      await waitVersion(winnerPort, 40_000);
+
+      const live = (await Promise.all([p1, p2].map(async (p) => {
+        try { return (await fetch(`http://127.0.0.1:${p}/info`)).ok; } catch { return false; }
+      }))).filter(Boolean).length;
+      if (live > 1) dualLive++;
+      rounds++;
+      const loserCode = c1.exitCode_ ?? c2.exitCode_;
+      if (loserCode !== undefined && loserCode !== null) exitCodes.push(loserCode);
+
+      kill(c1);
+      kill(c2);
+      await sleep(200);
+    }
+
+    ok(rounds === 10, `the stale-seeded E2E completed all 10 rounds (got ${rounds})`);
+    ok(dualLive === 0, `zero rounds had BOTH daemons live on one state dir (got ${dualLive}/10)`);
+    ok(
+      exitCodes.length > 0 && exitCodes.every((c) => c === 4),
+      `every refused daemon exited 4 (state collision) — got [${exitCodes.join(', ')}]`,
+    );
   }
 
   kill(a);
