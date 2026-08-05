@@ -19,7 +19,7 @@ import { createServer } from 'node:net';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, '..', 'dist', 'cli.js');
@@ -88,6 +88,105 @@ for (const [label, dir] of [['A', dirA], ['B', dirB], ['C', dirC]]) {
   if (!under || resolve(dir) === HOME_STATE) {
     console.log('\nrefusing to run against non-temporary state.');
     process.exit(1);
+  }
+}
+
+// ─── config-only spawn safety ────────────────────────────────────────────────
+// One case below deliberately spawns a daemon with NO OURS_PORT and NO
+// OURS_STATE_DIR, because that is the only way to prove config.json beats the
+// built-in defaults. It is also the one place in this file where a fallback can
+// escape: readFileConfig() swallows every read and parse error and returns {},
+// so an unreadable or malformed temp config resolves to DEFAULT_CONFIG — port
+// 3050 and ~/.ours, i.e. the LIVE daemon's endpoint and state directory. The
+// child would then create and release ~/.ours/daemon.lock and probe the live port.
+//
+// Two independent defences, because either alone can be defeated:
+//   GUARD   — refuse to spawn unless the file demonstrably supplies a non-default
+//             port AND a temp state dir. It fails closed: anything it cannot
+//             positively verify is a refusal, and a refusal aborts before spawn.
+//   SANDBOX — give the child a temp HOME. os.homedir() reads $HOME, and both
+//             DEFAULT_CONFIG.stateDir and configPath() derive from it, so even a
+//             fallback that somehow happened lands inside tmpdir.
+const DEFAULT_PORT = 3050;
+
+// Resolve what the child will actually read out of the file, mirroring
+// readFileConfig()'s accepted shapes. null means "cannot be trusted" — which is
+// exactly the condition under which the daemon would fall back.
+function resolveConfigFile(cfgPath) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(cfgPath, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const port = typeof parsed.port === 'number' && Number.isFinite(parsed.port) ? parsed.port : null;
+  const stateDir = typeof parsed.stateDir === 'string' ? resolve(parsed.stateDir) : null;
+  return port === null || stateDir === null ? null : { port, stateDir };
+}
+
+function configOnlyGuard(cfgPath) {
+  const r = resolveConfigFile(cfgPath);
+  if (!r) return { ok: false, reason: 'config unreadable or missing port/stateDir — the daemon would fall back to DEFAULT_CONFIG' };
+  if (r.port === DEFAULT_PORT) return { ok: false, reason: `config resolves to the default port ${DEFAULT_PORT}` };
+  if (r.stateDir === HOME_STATE) return { ok: false, reason: `config resolves to the live state dir ${HOME_STATE}` };
+  if (!r.stateDir.startsWith(resolve(tmpdir()))) return { ok: false, reason: `config state dir ${r.stateDir} is not under ${tmpdir()}` };
+  return { ok: true, port: r.port, stateDir: r.stateDir };
+}
+
+// ─── regression: the config-only fallback cannot escape ──────────────────────
+// Pure and local — spawns nothing, binds nothing, touches no port.
+{
+  const probe = tempState('guard');
+  const sandbox = tempState('guard-home');
+  const cfg = join(probe, 'cfg.json');
+
+  for (const [label, body] of [
+    ['malformed JSON', '{ not json'],
+    ['empty file', ''],
+    ['JSON that is not an object', '"a string"'],
+    ['valid JSON without port or stateDir', JSON.stringify({ brokerUrl: BROKER })],
+    ['port present, stateDir missing', JSON.stringify({ port: 3999 })],
+    ['stateDir present, port missing', JSON.stringify({ stateDir: probe })],
+    ['the default port 3050', JSON.stringify({ port: DEFAULT_PORT, stateDir: probe })],
+    ['the live state dir', JSON.stringify({ port: 3999, stateDir: HOME_STATE })],
+    ['a state dir outside tmpdir', JSON.stringify({ port: 3999, stateDir: '/var/lib/not-mktemp' })],
+  ]) {
+    writeFileSync(cfg, body);
+    ok(!configOnlyGuard(cfg).ok, `guard refuses a config-only spawn: ${label}`);
+  }
+  ok(!configOnlyGuard(join(probe, 'absent.json')).ok, 'guard refuses a config-only spawn: file does not exist');
+  writeFileSync(cfg, JSON.stringify({ port: 3999, stateDir: probe }));
+  ok(configOnlyGuard(cfg).ok, 'guard admits a config that supplies a non-default port and a temp state dir');
+
+  // The SANDBOX defence, proven against the REAL shipped resolver.
+  //
+  // It must be proven in a FRESH PROCESS, and that is not a testing convenience —
+  // it is the mechanism. config.ts computes DEFAULT_CONFIG.stateDir as
+  // resolve(homedir(), '.ours') at MODULE LOAD, so $HOME is read exactly once,
+  // when the process starts. Setting process.env.HOME inside an already-running
+  // process therefore changes nothing. A spawned child reads the sandbox HOME
+  // before it loads config.js, which is precisely the case being defended.
+  //
+  // Resolution only: this child imports the resolver and prints. It binds no
+  // port, starts no daemon, and never contacts 3050.
+  writeFileSync(cfg, '{ not json');
+  const configUrl = pathToFileURL(join(HERE, '..', 'dist', 'config.js')).href;
+  const probeEnv = childEnv({ OURS_CONFIG: cfg, HOME: sandbox });
+  delete probeEnv.OURS_PORT;
+  delete probeEnv.OURS_STATE_DIR;
+  const printed = spawnSync(
+    process.execPath,
+    ['-e', `import(${JSON.stringify(configUrl)}).then((m) => { const c = m.loadConfig(); process.stdout.write(JSON.stringify({ stateDir: c.stateDir, port: c.port })); });`],
+    { env: probeEnv, encoding: 'utf8', timeout: 30_000 },
+  );
+  let fell = null;
+  try { fell = JSON.parse(printed.stdout); } catch { /* reported below */ }
+  ok(fell !== null, `the resolver probe returned JSON (stderr: ${printed.stderr?.trim().slice(0, 200) || 'none'})`);
+  if (fell) {
+    ok(resolve(fell.stateDir).startsWith(resolve(sandbox)), 'HOME sandbox: a malformed config falls back INSIDE the sandbox');
+    ok(resolve(fell.stateDir) !== HOME_STATE, 'HOME sandbox: the fallback is never the live state dir');
+    ok(fell.port === DEFAULT_PORT, 'the fallback port really is 3050 — which is why the GUARD, not the sandbox, is what must stop it');
   }
 }
 
@@ -241,8 +340,26 @@ try {
     writeFileSync(cfgPath, JSON.stringify({ port: filePort, stateDir: fileState, brokerUrl: BROKER }));
 
     // config.json alone wins over the built-in defaults (3050 / ~/.ours).
+    // This is the ONLY child in this file with no OURS_PORT and no
+    // OURS_STATE_DIR, so it is gated twice before it is allowed to exist.
+    const sandboxHome = tempState('prec-home');
+    const guard = configOnlyGuard(cfgPath);
+    ok(guard.ok, `config-only spawn admitted by the guard${guard.ok ? '' : ` — ${guard.reason}`}`);
+    if (!guard.ok) throw new Error(`refusing to spawn a config-only daemon: ${guard.reason}`);
+    ok(
+      guard.port === filePort && guard.stateDir === resolve(fileState),
+      'the guard resolved exactly the port and state dir the child will use',
+    );
     const viaFile = spawn(process.execPath, [CLI, 'serve'], {
-      env: (() => { const e = childEnv({ OURS_CONFIG: cfgPath }); delete e.OURS_PORT; delete e.OURS_STATE_DIR; return e; })(),
+      env: (() => {
+        const e = childEnv({ OURS_CONFIG: cfgPath });
+        delete e.OURS_PORT;
+        delete e.OURS_STATE_DIR;
+        // Backstop: if resolution ever fell back despite the guard, ~/.ours
+        // resolves inside tmpdir rather than to the live state directory.
+        e.HOME = sandboxHome;
+        return e;
+      })(),
       stdio: 'ignore', detached: true,
     });
     running.push(viaFile);
