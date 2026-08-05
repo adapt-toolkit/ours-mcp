@@ -45,9 +45,21 @@ console.log('lock-race\n');
   if (!resolve(probe).startsWith(resolve(tmpdir()))) process.exit(1);
 }
 
-// One racer process: acquire, report, and HOLD. Holding matters — a racer that
-// released would let the next one win legitimately and hide a double-acquire.
-const RACER = (dir) => `
+// One racer process: acquire, report, then WAIT FOR THE PARENT'S RELEASE SENTINEL.
+//
+// Holding matters, but holding for a FIXED DURATION is a bug that manufactures the
+// very defect this file tests for. A winner that exits after N seconds leaves a
+// lock whose owner is genuinely dead; a racer that started later then CORRECTLY
+// reclaims it — and the harness scores that correct behaviour as a double-win.
+// The result is skew-dependent, so it is both a false alarm and a flaky gate.
+//
+// Lengthening the timeout only moves the threshold; it does not remove the
+// dependence on scheduling. So the winner blocks on a sentinel file that the
+// parent writes ONLY after every racer has reported its verdict. No lock is ever
+// released while a contender is still to attempt. The absolute deadline below is
+// a deadlock backstop for a parent that died, never the mechanism.
+const RACER = (dir, releasePath) => `
+  const fs = require('fs');
   import(${JSON.stringify(MOD)}).then((m) => {
     const r = m.acquireStateLock(${JSON.stringify(dir)}, { pid: process.pid, port: 3050, instance: 'r' + process.pid, version: '0' });
     process.stdout.write(JSON.stringify({
@@ -56,20 +68,39 @@ const RACER = (dir) => `
       holder: r.ok ? null : (r.holder ? r.holder.pid : null),
       holderInstance: r.ok ? null : (r.holder ? r.holder.instance : null),
     }));
-    if (r.ok) setTimeout(() => {}, 5000);
+    if (!r.ok) return;
+    const deadline = Date.now() + 120000; // backstop only: parent died
+    const wait = () => {
+      if (fs.existsSync(${JSON.stringify(releasePath)}) || Date.now() > deadline) return;
+      setTimeout(wait, 10);
+    };
+    wait();
   }).catch((e) => process.stdout.write(JSON.stringify({ ok: false, error: String(e && e.message) })));
 `;
 
-// Start all racers as close together as possible, then collect every verdict.
+// Start all racers as close together as possible, collect every verdict, and only
+// then release the winner. Two phases, in this order, because the ordering IS the
+// barrier: verdicts first, release second.
+let raceSeq = 0;
 async function race(dir, racers) {
+  const releasePath = join(dir, `.release-${raceSeq++}`);
   const kids = Array.from({ length: racers }, () =>
-    spawn(process.execPath, ['-e', RACER(dir)], { stdio: ['ignore', 'pipe', 'ignore'] }));
-  const outs = await Promise.all(kids.map((k) => new Promise((res) => {
+    spawn(process.execPath, ['-e', RACER(dir, releasePath)], { stdio: ['ignore', 'pipe', 'ignore'] }));
+
+  // A racer writes its verdict BEFORE waiting on the sentinel, so every verdict is
+  // readable while the winner is still holding.
+  const verdicts = await Promise.all(kids.map((k) => new Promise((res) => {
     let buf = '';
-    k.stdout.on('data', (d) => { buf += d; });
-    k.on('close', () => res(buf));
+    k.stdout.on('data', (d) => {
+      buf += d;
+      try { res(JSON.parse(buf)); } catch { /* keep reading */ }
+    });
+    k.on('close', () => { try { res(JSON.parse(buf)); } catch { res({ ok: false, error: 'no verdict: ' + buf.slice(0, 80) }); } });
   })));
-  return outs.map((o) => { try { return JSON.parse(o); } catch { return { ok: false, error: 'no verdict: ' + o.slice(0, 80) }; } });
+
+  writeFileSync(releasePath, '');            // every racer has reported — winner may exit
+  await Promise.all(kids.map((k) => new Promise((res) => (k.exitCode === null ? k.on('close', res) : res()))));
+  return verdicts;
 }
 
 const deadPid = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
@@ -126,13 +157,27 @@ for (const racers of [2, 4, 8]) {
 }
 
 // ─── 3. a LIVE holder must yield exactly zero winners ────────────────────────
+// Same lifetime defect, opposite direction. This holder used to live for a fixed
+// 30 s; if it died before the trials below finished, every later racer would
+// CORRECTLY acquire the now-unowned directory and "exactly zero winners" would
+// fail spuriously. That is the safe direction — a false alarm rather than a false
+// pass — but it is the same bug, so it gets the same cure: the holder lives until
+// the parent releases it, not until a clock runs out.
 {
   const dir = tmp('live');
+  const holderRelease = join(dir, '.release-holder');
   const held = spawn(process.execPath, ['-e', `
+    const fs = require('fs');
     import(${JSON.stringify(MOD)}).then((m) => {
       const r = m.acquireStateLock(${JSON.stringify(dir)}, { pid: process.pid, port: 3050, instance: 'owner', version: '0' });
       process.stdout.write(JSON.stringify({ ok: r.ok }));
-      if (r.ok) setTimeout(() => {}, 30000);
+      if (!r.ok) return;
+      const deadline = Date.now() + 600000; // backstop only: parent died
+      const wait = () => {
+        if (fs.existsSync(${JSON.stringify(holderRelease)}) || Date.now() > deadline) return;
+        setTimeout(wait, 25);
+      };
+      wait();
     });
   `], { stdio: ['ignore', 'pipe', 'ignore'] });
   const first = await new Promise((res) => {
@@ -147,7 +192,12 @@ for (const racers of [2, 4, 8]) {
       winners += (await race(dir, racers)).filter((r) => r.ok).length;
     }
   }
+  // Prove the holder was still alive for the WHOLE run before trusting the zero.
+  // Otherwise "no winners" could mean "nobody raced a live holder at all".
+  const holderStillLive = held.exitCode === null;
+  ok(holderStillLive, 'the live holder survived every trial, so the zero above is about a LIVE lock');
   ok(winners === 0, `against a LIVE holder, ${TRIALS * 3} trials produced exactly zero winners (got ${winners})`);
+  writeFileSync(holderRelease, '');
   held.kill('SIGKILL');
 }
 
@@ -218,7 +268,8 @@ for (const racers of [2, 4, 8]) {
   const dir = tmp('litter');
   writeFileSync(join(dir, 'daemon.lock'), staleRecord(dir));
   await race(dir, 8);
-  const litter = readdirSync(dir).filter((f) => f !== 'daemon.lock');
+  // The harness's own release sentinel lives here too; it is ours, not the lock's.
+  const litter = readdirSync(dir).filter((f) => f !== 'daemon.lock' && !f.startsWith('.release-'));
   ok(litter.length === 0, `a contested race leaves no temporary files (found: ${litter.join(', ') || 'none'})`);
 }
 
