@@ -118,6 +118,13 @@ import {
 } from './startup-progress.js';
 import { armSseKeepalive } from './sse-keepalive.js';
 import { buildContactLines } from './contacts.js';
+import {
+  resolveInstance,
+  stateFingerprint,
+  inspectPort,
+  formatPortCollision,
+  EXIT_PORT_COLLISION,
+} from './daemon-identity.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -135,6 +142,21 @@ const TRANSPORT = process.env.OURS_TRANSPORT ?? 'http';
 const PORT = CONFIG.port;
 const GC_INTERVAL_MS = CONFIG.gcIntervalMs;
 const API_VISIBILITY = CONFIG.apiVisibility;
+// Non-secret daemon identity, reported over /info so a caller can prove it
+// reached the daemon it meant rather than a look-alike on a recycled port.
+// INSTANCE is a LABEL (OURS_INSTANCE) — it never selects the port or state dir.
+const INSTANCE = resolveInstance().name;
+// The daemon owns STATE_DIR, so create it before fingerprinting: the fingerprint
+// identifies the real directory (device+inode) and only falls back to hashing the
+// path string when the directory does not exist. A CLI probing this daemon must
+// compute the same value, so both must be looking at a directory that exists.
+try {
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+} catch {
+  /* boot fails later with a far better message than one thrown from here */
+}
+const STATE_FINGERPRINT = stateFingerprint(STATE_DIR);
+const STARTED_AT = new Date().toISOString();
 const startupHeartbeatMs = Number(process.env.OURS_TEST_STARTUP_HEARTBEAT_MS || '') || undefined;
 const startupProgress: StartupProgressReporter | null =
   TRANSPORT === 'http'
@@ -5311,6 +5333,13 @@ async function main() {
     // Reports the version of the code ACTUALLY RUNNING in this daemon — which can
     // lag the installed package when the daemon wasn't restarted after an upgrade.
     // `ours-mcp status` reads this; it is also handy from curl.
+    //
+    // It also reports this daemon's IDENTITY (instance/port/stateFingerprint), so
+    // a caller can prove the daemon answering here is the one it meant. That is
+    // why the route stays unauthenticated: collision diagnostics have to work
+    // BEFORE you hold the right token — indeed, holding the wrong token is one of
+    // the things you are trying to diagnose. Every field is non-secret; identity
+    // names and counts stay behind auth on /identities.
     if (req.method === 'GET' && (url.pathname === '/version' || url.pathname === '/info')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
@@ -5321,6 +5350,10 @@ async function main() {
           protocol: PROTOCOL_VERSION,
           pid: process.pid,
           stateDir: STATE_DIR,
+          instance: INSTANCE,
+          stateFingerprint: STATE_FINGERPRINT,
+          port: PORT,
+          startedAt: STARTED_AT,
         }),
       );
       return;
@@ -5538,9 +5571,38 @@ async function main() {
   // HTTP request timer.
   httpServer.requestTimeout = 0;
 
+  // A failed bind is the single most common multi-daemon failure and it used to
+  // be the worst-reported one: with no 'error' listener, EADDRINUSE became an
+  // uncaught exception, so the user's only evidence was a Node stack trace at the
+  // bottom of daemon.log. Ask the port who is there and say what to do instead.
+  // Exit 3 (not 1) so a supervisor can distinguish a collision from a crash.
+  httpServer.on('error', (e: NodeJS.ErrnoException) => {
+    startupProgress?.failed();
+    if (e.code === 'EADDRINUSE') {
+      void inspectPort(PORT, STATE_DIR).then(
+        (occupant) => {
+          log(formatPortCollision(PORT, STATE_DIR, occupant));
+          process.exit(EXIT_PORT_COLLISION);
+        },
+        () => {
+          log(`ours: port ${PORT} is already in use.`);
+          process.exit(EXIT_PORT_COLLISION);
+        },
+      );
+      return;
+    }
+    if (e.code === 'EACCES') {
+      log(`ours: not permitted to bind port ${PORT} on 127.0.0.1 — pick a port above 1024 (OURS_PORT).`);
+      process.exit(EXIT_PORT_COLLISION);
+    }
+    // Anything else is genuinely unexpected; keep the stack, it is the evidence.
+    log(`fatal HTTP server error: ${e?.stack ?? e}`);
+    process.exit(1);
+  });
+
   httpServer.listen(PORT, '127.0.0.1', () => {
     startupProgress?.ready();
-    log(`MCP server v${VERSION} ready (transport=http, port=${PORT}, visibility=${API_VISIBILITY}, identities=${identities.size}, state=${STATE_DIR}, broker=${BROKER_URL})`);
+    log(`MCP server v${VERSION} ready (transport=http, instance=${INSTANCE}, port=${PORT}, visibility=${API_VISIBILITY}, identities=${identities.size}, state=${STATE_DIR}, broker=${BROKER_URL})`);
   });
 
   const shutdown = async () => {

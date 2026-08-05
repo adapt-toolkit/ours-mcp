@@ -122,6 +122,15 @@ await build({
   outfile: resolve(dist, 'sse-keepalive.js'),
 });
 
+// Daemon identity + state-directory lock + collision diagnostics. index.ts and
+// cli.ts inline these; the standalone output lets the unit test drive the REAL
+// lock/fingerprint/message functions instead of a copy living in the test.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/daemon-identity.ts')],
+  outfile: resolve(dist, 'daemon-identity.js'),
+});
+
 // Pure contact-list rendering (duplicate-name markers). Standalone for the unit
 // test (test/contact-lines.test.mjs) — same pattern as files.js / inbox.js.
 await build({
