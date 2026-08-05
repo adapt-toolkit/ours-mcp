@@ -38,3 +38,9 @@ Out of scope: third-party dependencies (report upstream — though we'd apprecia
 ## Threat model
 
 Our published threat model (see `docs/threat-model.md`) states precisely what ours.network protects against and what it does not — including the explicit limitation that the relay, while unable to read message content, can observe delivery metadata. Claims in reports should be assessed against that model.
+
+### Known, intentional local disclosure
+
+The daemon binds `127.0.0.1` only, and its messaging surface requires a bearer token (see `apiVisibility`). Three introspection routes — `GET /info`, `GET /version`, `GET /state-dir` — are deliberately **unauthenticated in every visibility mode**, because collision diagnostics have to work before a caller holds the right token; holding the wrong token is one of the conditions they exist to diagnose.
+
+Any local OS user can therefore read a daemon's version, pid, port, state-directory path, instance label, and state fingerprint. This is a deliberate accepted trade-off, not an oversight. The instance label and state fingerprint additionally reveal that a host runs more than one daemon and which endpoint belongs to which state directory. No identity names, message content, counts, or token material are exposed on these routes — identity data stays behind `requireAuth`. Reports about these three routes should say what is disclosed *beyond* this list.

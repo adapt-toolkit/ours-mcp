@@ -122,6 +122,26 @@ await build({
   outfile: resolve(dist, 'sse-keepalive.js'),
 });
 
+// Runtime config resolution (env > config.json > built-in default). index.ts and
+// cli.ts inline it; the standalone output lets the config-fallback regression in
+// test/two-daemons.test.mjs drive the REAL loadConfig() in-process — no child
+// process, no port, no daemon — to prove that a malformed config cannot resolve
+// to the live state directory.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/config.ts')],
+  outfile: resolve(dist, 'config.js'),
+});
+
+// Daemon identity + state-directory lock + collision diagnostics. index.ts and
+// cli.ts inline these; the standalone output lets the unit test drive the REAL
+// lock/fingerprint/message functions instead of a copy living in the test.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/daemon-identity.ts')],
+  outfile: resolve(dist, 'daemon-identity.js'),
+});
+
 // Pure contact-list rendering (duplicate-name markers). Standalone for the unit
 // test (test/contact-lines.test.mjs) — same pattern as files.js / inbox.js.
 await build({

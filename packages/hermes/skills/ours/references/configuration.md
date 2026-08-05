@@ -1,8 +1,9 @@
 # ours configuration & self-service
 
-The daemon is a **shared, host-wide singleton** reachable only on `127.0.0.1`
-(loopback — there is no host knob, by design). Configuration is resolved
-**env var > `~/.ours/config.json` > built-in default**:
+The daemon is normally a **single host-wide instance** reachable only on
+`127.0.0.1` (loopback — there is no host knob, by design). One host *can* run
+more than one, but only under the rules in "Running a second daemon" below.
+Configuration is resolved **env var > `~/.ours/config.json` > built-in default**:
 
 | Setting | Env | config.json | Default |
 |---|---|---|---|
@@ -17,9 +18,12 @@ server and `ours-mcp watch` — connects to `127.0.0.1:<OURS_PORT>`, and the dae
 same port (both read `OURS_PORT`/`config.json`). Change it **once in shared config**, never
 per-side, or a dialer won't find the daemon.
 
+`OURS_CONFIG` points at a config file other than `~/.ours/config.json`. It is
+the only way to give a second daemon its own file.
+
 **Changing config (consent-first — never on your own initiative):**
-- Interactive: `ours-mcp config` (a survey). It needs a TTY, so ask the **user**
-  to run it via `!ours-mcp config` — you cannot drive the survey yourself.
+- Interactive: `ours-mcp setup` (a survey). It needs a TTY, so ask the **user**
+  to run it via `!ours-mcp setup` — you cannot drive the survey yourself.
 - Scripted: edit `~/.ours/config.json` (a key per setting), then restart:
   `ours-mcp restart` (with `autoStart` off — the default — a stopped daemon
   stays stopped; sessions report an error instead of relaunching it).
@@ -36,6 +40,59 @@ on which port). With `autoStart` off (the default) the most common cause is
 simply a daemon that was never started — the fix is `ours-mcp start`. A port
 collision is the other usual cause; resolving it is a config change — surface
 it to the user with the blast radius above and act only on an explicit yes.
+
+`ours-mcp status --json` is the machine-readable form — prefer it when you need
+to reason about the answer rather than show it. Beyond the text version it
+reports `ownDaemon`: whether the daemon answering on your port is really the one
+your configuration selects. `running: true` with `ownDaemon: false` means you are
+looking at **someone else's daemon** — see below.
+
+## Running a second daemon
+
+A daemon owns exactly one **(port, state directory)** pair. A second daemon
+needs **both** to differ. A different port alone is not enough.
+
+**Sharing a state directory is forbidden.** Two daemons writing one state
+directory interleave writes into the same identity packets and key material.
+This is enforced, not merely advised: at startup a daemon takes an exclusive
+lock on `<stateDir>/daemon.lock` and refuses to start if another live daemon
+owns that directory (exit code 4). A port that is already taken is refused the
+same way (exit code 3), naming which daemon is sitting there.
+
+Working recipe today — no new commands, just the two env vars:
+
+```sh
+export OURS_PORT=3070
+export OURS_STATE_DIR="$HOME/.ours-work"
+ours-mcp start
+ours-mcp status --json          # expect ownDaemon: true
+ours-mcp create-root "Work Root"
+```
+
+Every `ours-mcp` command run in **that shell** targets that daemon; a shell
+without those variables is back on the default one. Port 3051 is reserved (the
+Telegram connector), so pick something else if you are choosing by hand.
+
+**Two daemons are two separate presences on the network.** A state directory
+*is* an identity set, so the second daemon has its own root identity, its own
+contacts, and its own API token. An identity created on one is invisible to the
+other, and `create-root` run against a new state dir creates a *second,
+unrelated* root — never assume it is a no-op there.
+
+**How each caller picks a daemon today:** every dialer — the `ours-mcp proxy`
+MCP server, `ours-mcp watch`, and every `ours-mcp` subcommand — resolves the
+endpoint from **its own** environment, then `OURS_CONFIG`/`~/.ours/config.json`.
+There is no per-workspace or per-session selector: to point a client at a
+non-default daemon, the **user** must launch that client with `OURS_PORT` and
+`OURS_STATE_DIR` already set. You cannot retarget a running session, and editing
+shared config to do it would move *every* session. Named instances (a
+first-class selector) are planned; they do not exist yet.
+
+`OURS_INSTANCE` gives a daemon a **name** (lower-case, `[a-z0-9._-]`, ≤32
+chars). It shows up in `/info`, in `status --json`, and in collision messages
+("port 3070 is already in use by instance \"work\""), which is what makes those
+messages readable. It is a label only — it selects no port, state dir, or config
+file. Do not present it to a user as a way to choose a daemon.
 
 ## Voice-message transcription
 

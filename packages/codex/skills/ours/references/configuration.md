@@ -20,8 +20,27 @@ or incompatible selected daemon is an error.
 
 Changing daemon configuration is separate operator work. Explain the impact and obtain
 explicit consent before editing or restarting anything. A changed state directory selects a
-different identity store. Use a distinct `OURS_CONFIG`, port, and state directory for a
-second daemon.
+different identity store.
+
+A second daemon requires a distinct port **and** a distinct state directory; a distinct
+`OURS_CONFIG` gives it its own file. Sharing a state directory between daemons is
+forbidden — concurrent writers corrupt identity packets and key material — and the daemon
+enforces it: it holds an exclusive lock on `<stateDir>/daemon.lock` and refuses to start
+when another live daemon owns the directory (exit 4). A taken port is refused the same way
+(exit 3) and the message names the daemon already there. Two daemons are two separate
+presences on the network: separate root identity, contacts, and API token.
+
+```sh
+OURS_PORT=3070 OURS_STATE_DIR="$HOME/.ours-work" ours-mcp start
+OURS_PORT=3070 OURS_STATE_DIR="$HOME/.ours-work" ours-mcp status --json
+```
+
+`ours-mcp status --json` is the machine-readable status. Its `ownDaemon` field reports
+whether the daemon answering on the configured port is the one this configuration selects;
+`running: true` with `ownDaemon: false` means a different daemon holds the port. `/info`
+additionally carries `instance`, `port`, and `stateFingerprint` for the same verification
+the launcher already performs. `OURS_INSTANCE` names a daemon for diagnostics only — it
+selects no port, state directory, or config file.
 
 Standard mode and live mode use the same MCP tools. Live mode only adds explicitly armed,
 session-scoped wake; it stops with the `ours-codex` session.

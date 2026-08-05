@@ -394,8 +394,10 @@ requests, and each agent's monitoring ON/off. Works whenever the Human identity 
 ## Notes
 
 - Identities and their state (contacts, inbox, keys) persist under the daemon's state dir
-  (`OURS_STATE_DIR`, default `~/.ours`) and survive restarts. The daemon is a singleton
-  shared by all your Claude Code sessions.
+  (`OURS_STATE_DIR`, default `~/.ours`) and survive restarts. One daemon serves all your
+  Claude Code sessions. A host can run a second one, but only with **both** a different port
+  and a different state dir — two daemons may never share a state dir, and each is a separate
+  presence with its own identities (see `references/configuration.md`).
 - Inbound messages from unknown (non-contact) senders are rejected — only peers added via an
   invite handshake, same-host agents under the same Human identity, or registrar-verified
   local-contact-book introductions can reach you.

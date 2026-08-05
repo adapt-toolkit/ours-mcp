@@ -63,6 +63,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { formatVersionAdvisory } from './version-advisory';
+import { sameStateDir, type DaemonIdentity } from './daemon-identity';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, chmodSync, createWriteStream, accessSync, constants as fsConstants } from 'node:fs';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
@@ -886,21 +887,44 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   // will be appended to the MCP initialize result's instructions so the model
   // sees it once at session start. Never refuse, never auto-restart.
   async function runCompatHandshake(): Promise<void> {
-    const sd = new URL(url.href);
-    sd.pathname = '/state-dir';
-    let info: { version?: unknown };
-    try {
-      const r = await fetch(sd, { signal: AbortSignal.timeout(3000) });
-      info = (await r.json()) as typeof info;
-    } catch (e) {
-      log('compat handshake: could not read daemon /state-dir, proceeding:', String(e));
-      return;
+    // /info is the superset (identity + version); /state-dir is the fallback for
+    // daemons that predate it and carries `version` too.
+    let info: DaemonIdentity | null = null;
+    for (const path of ['/info', '/state-dir']) {
+      const probe = new URL(url.href);
+      probe.pathname = path;
+      try {
+        const r = await fetch(probe, { signal: AbortSignal.timeout(3000) });
+        info = (await r.json()) as DaemonIdentity;
+        break;
+      } catch (e) {
+        if (path === '/state-dir') {
+          log('compat handshake: could not read daemon /info or /state-dir, proceeding:', String(e));
+          return;
+        }
+      }
     }
+    if (!info) return;
     versionAdvisory = formatVersionAdvisory({
       selfVersion: VERSION,
-      daemonVersion: typeof info?.version === 'string' ? info.version : null,
+      daemonVersion: typeof info.version === 'string' ? info.version : null,
     });
     if (versionAdvisory) log(versionAdvisory);
+
+    // The daemon we reached may not be the one this process is configured for —
+    // typically because only OURS_PORT was set and OURS_STATE_DIR still points
+    // at the default. That matters here specifically: session-restore records
+    // are written under OUR restoreStateDir while the identities they name live
+    // in the daemon's. Warn loudly; never refuse, for the same reason the
+    // version check never refuses — a working session beats a correct opinion.
+    if (info.stateDir && !sameStateDir(info, restoreStateDir)) {
+      log(
+        `WARNING: this daemon runs state ${info.stateDir} (instance "${info.instance ?? 'default'}"), ` +
+          `but this session resolved ${restoreStateDir}. Session-restore records will be written ` +
+          'to a directory the daemon does not use. Set OURS_STATE_DIR to match the daemon, or ' +
+          'point OURS_PORT at the daemon for this state dir.',
+      );
+    }
   }
 
   // ---- boot: upstream first (with retry), then accept Claude ----------------
