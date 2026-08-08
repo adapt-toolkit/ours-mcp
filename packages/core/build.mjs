@@ -41,11 +41,32 @@ const shared = {
   banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" },
   // Inline the package version (see src/index.ts __OURS_VERSION__).
   define: { __OURS_VERSION__: JSON.stringify(pkgVersion) },
-  // The ADAPT SDK pulls in a native NAPI addon and a WASM blob that cannot be
-  // bundled — keep it external and resolve it from node_modules at runtime (it
-  // is a real `dependency`). Everything else (MCP SDK, zod) is pure JS and gets
-  // inlined so the bundle stays self-contained.
-  external: ['@adapt-toolkit/sdk', '@adapt-toolkit/sdk/*', '@adapt-toolkit/sdk-native'],
+  // @ours.network/sdk MUST BE EXTERNAL, and not for the usual reason.
+  //
+  // Inlining it produces a bundle that builds, typechecks and then dies at boot:
+  //
+  //   ours: fatal startup error: Error: no compiled .muflo packet found
+  //     (looked in: packages/core/dist/mufl_code, packages/core/mufl_code)
+  //
+  // The SDK finds its MUFL packet with `locateUnit()`, which resolves relative to
+  // `dirname(import.meta.url)` — inside the SDK package, where the packet ships.
+  // Bundled into dist/index.js that expression resolves HERE instead, and ours-mcp
+  // has no packet because it no longer owns the engine. Bundling a dependency
+  // that locates its own runtime assets relocates them out from under it.
+  //
+  // Keeping it external is also what preserves the SDK's single-module-instance
+  // guarantee across our three entry points (dist/index.js, dist/cli.js and the
+  // rest): inlined, each bundle would hold a private copy of `identities` and the
+  // lease table — the exact duplicated-state failure ours-sdk's `splitting: true`
+  // exists to prevent, reintroduced one level up.
+  //
+  // The ADAPT SDK stays external for its own reason: a native NAPI addon and a
+  // WASM blob that cannot be bundled at all. Everything else (MCP SDK, zod) is
+  // pure JS and is still inlined, so the bundle stays self-contained.
+  external: [
+    '@ours.network/sdk', '@ours.network/sdk/*',
+    '@adapt-toolkit/sdk', '@adapt-toolkit/sdk/*', '@adapt-toolkit/sdk-native',
+  ],
   logLevel: 'info',
 };
 
