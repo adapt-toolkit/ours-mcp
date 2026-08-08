@@ -47,7 +47,10 @@ import {
   type OursConfig,
   type ApiVisibility,
 } from './config';
-import { runProxy } from './proxy';
+import { runProxy } from '@ours.network/sdk/connector';
+
+import { connectorTransports } from './mcp/transports';
+import { annotateResultFrame } from './mcp/format';
 import { sttStatus } from './transcribe';
 import { linuxProcHasExited } from './process-state';
 import { runVoiceSetup, VOICE_SETUP_HELP } from './voice-setup';
@@ -1341,6 +1344,14 @@ async function main(): Promise<void> {
         ensureDaemon: CONFIG.autoStart ? ensureDaemonRunning : undefined,
         stateDir: STATE_DIR,
         apiToken: resolveApiToken(CONFIG, { generate: false })?.token,
+        // The SDK owns the connector; ours-mcp owns what MCP looks like. These
+        // two options are the entire boundary between them.
+        transports: connectorTransports,
+        // NOT `annotateGetFilesResult` directly: the SDK hands this hook the whole
+        // JSON-RPC frame, where proxy.ts unwrapped `.result` before calling the
+        // annotator. Passing the annotator straight in silently annotates nothing.
+        // See THE FRAME CONTRACT in ./mcp/format.ts.
+        annotateResult: annotateResultFrame,
       });
       break;
     case 'install-service':

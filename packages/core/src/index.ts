@@ -5583,5 +5583,3 @@ main().catch((err) => {
   log(`fatal startup error: ${err?.stack ?? err}`);
   process.exit(1);
 });
-
-export { formatVersionAdvisory } from './version-advisory';
