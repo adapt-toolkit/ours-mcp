@@ -389,6 +389,8 @@ export function registerIdentityTools(server: McpServer, ctxFor: () => SessionCo
         const persona = r.persona ? `\nPersona: ${r.persona}` : '';
         return textResult(`Bound to "${r.name}" (${r.cid})${place}.${temp}${bio}${persona}`);
       } catch (err) {
+        // NOT a missing `true` and NOT a forgotten runTool: index.ts:4018 renders
+        // the not-bound case with isError FALSE, and this handler preserves that.
         if (err instanceof OursError) return textResult(err.message);
         throw err;
       }
