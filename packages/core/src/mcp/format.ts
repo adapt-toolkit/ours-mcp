@@ -8,7 +8,7 @@
 // which is the one thing about this move that can go wrong silently.
 import { accessSync, constants as fsConstants } from 'node:fs';
 
-import type { ReceivedFileMeta } from '@ours.network/sdk';
+import type { IncomingFileMeta, InboxMsg, ReceivedFileMeta } from '@ours.network/sdk';
 
 // access(2) resolves against the REAL uid/gid and needs +x on every parent, so a
 // daemon-owned 0700 state dir correctly reports unreadable here. No setuid in
@@ -16,6 +16,45 @@ import type { ReceivedFileMeta } from '@ours.network/sdk';
 export const canRead = (p: string): boolean => {
   try { accessSync(p, fsConstants.R_OK); return true; } catch { return false; }
 };
+
+// ----- the two list renderers, moved here VERBATIM ---------------------------
+//
+// `renderFiles` is index.ts:3292 and `fmtMsg` is index.ts:3544, unchanged. They
+// moved because the converted handlers live in src/mcp/tools/ and cannot import
+// from index.ts, which is being emptied — and because rendering is what this file
+// is for. The types are now the SDK's `IncomingFileMeta` / `InboxMsg`, which are
+// the same shapes index.ts declared locally.
+//
+// ⚠ index.ts STILL HAS ITS OWN COPY of both, because the `ours://inbox` RESOURCE
+// (index.ts:4095-4107) uses fmtMsg and is not a tool, so it belongs to no
+// registrar. Those copies are duplicates from now on: whoever moves that resource
+// must delete them and import from here, or the two will drift.
+
+function renderFiles(files: IncomingFileMeta[]): string {
+  if (files.length === 0) return 'No files received.';
+  const lines: string[] = [];
+  for (const file of files) {
+    const voiceTag = file.kind === 'voice_message' ? '🎤 voice message · ' : '';
+    lines.push(
+      `  • ${voiceTag}${file.filename} (${file.mime}, ${file.size} B) from ${file.from.name} ` +
+      `[${file.status}] {${file.wire_id}} sender_id=${file.from.id}`,
+    );
+  }
+  return `${lines.length} file(s):\n${lines.join('\n')}`;
+}
+
+// One-line message rendering: id + sender + body + date, with status when not
+// the default "unread" (so list views show what's already been read).
+function fmtMsg(m: InboxMsg, withStatus = true): string {
+  const status = withStatus && m.status && m.status !== 'unread' ? ` [${m.status}]` : '';
+  const wire = m.wire_id ? ` {${m.wire_id}}` : '';
+  const reply = m.reply_to
+    ? ` ↳re ${m.reply_to.wire_id}${m.reply_to.sentence ? `·s${m.reply_to.sentence}` : ''}`
+    : '';
+  return `#${m.msg_id} [${m.sender_name}]${status}${wire}${reply} ${m.text}  (${m.date})`;
+}
+
+export { fmtMsg, renderFiles };
 
 const describeFile = (f: ReceivedFileMeta): string =>
   `  • ${f.filename} — ${f.mime || 'application/octet-stream'}, ${f.size} B, ` +
