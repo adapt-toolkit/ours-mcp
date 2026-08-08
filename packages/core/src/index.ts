@@ -29,8 +29,9 @@
 // daemon, and a single stdio session is ours-mcp's own front door.
 import * as fs from 'node:fs';
 
+import { startupProgress } from '@ours.network/sdk/daemon';
+
 import { loadConfig } from './config';
-import { createStartupProgressReporter, type StartupProgressReporter } from './startup-progress.js';
 import { serve, serveStdio } from './serve.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
@@ -44,11 +45,11 @@ const TRANSPORT = process.env.OURS_TRANSPORT ?? 'http';
 // stderr only — MCP speaks JSON-RPC over stdout.
 const log = (...parts: unknown[]) => process.stderr.write(`ours: ${parts.join(' ')}\n`);
 
-const startupHeartbeatMs = Number(process.env.OURS_TEST_STARTUP_HEARTBEAT_MS || '') || undefined;
-const startupProgress: StartupProgressReporter | null =
-  TRANSPORT === 'http'
-    ? createStartupProgressReporter(STATE_DIR, { heartbeatMs: startupHeartbeatMs })
-    : null;
+// THE SDK'S REPORTER, NOT A SECOND ONE. The reporter keeps a heartbeat interval
+// re-writing its phase, so two instances over one state dir fight and the loser
+// overwrites the winner: building our own here left this daemon reporting
+// 'initializing' forever, because our heartbeat kept undoing the SDK's
+// `ready()`. One process, one reporter.
 
 async function main(): Promise<void> {
   // Test-only immediate-failure seam for the CLI wait contract. This happens
