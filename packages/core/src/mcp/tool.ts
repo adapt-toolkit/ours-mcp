@@ -37,11 +37,11 @@ import { OursError } from '@ours.network/sdk';
 import type { SessionContext } from '@ours.network/sdk';
 
 /** The MCP content shape every ours tool returns. Was `index.ts:3458`. */
-export type McpTextResult = {
+export interface McpTextResult {
   content: Array<{ type: 'text'; text: string }>;
   isError: boolean;
   structuredContent?: Record<string, unknown>;
-};
+}
 
 export function textResult(text: string, isError = false): McpTextResult {
   return { content: [{ type: 'text' as const, text }], isError };
