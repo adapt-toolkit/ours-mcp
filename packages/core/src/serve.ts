@@ -17,14 +17,18 @@
 // and a single stdio session is ours-mcp's own front door.
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
+import { listIdentities } from '@ours.network/sdk';
 import { bootWrapper, startDaemon } from '@ours.network/sdk/daemon';
 import type { DaemonHandle, McpTransportInit, McpTransportLike } from '@ours.network/sdk/daemon';
 // SessionContext is on the root barrel, not ./daemon — the daemon entry re-exports
 // the daemon surface, the typed API surface lives at '.'.
 import type { SessionContext } from '@ours.network/sdk';
 
+import { loadConfig } from './config';
 import { createHttpServerTransport, isInitializeRequest } from './mcp/transports.js';
 import { createOursMcpServer } from './mcp/server.js';
+
+const CONFIG = loadConfig();
 // ONE definition of the inbox uri, imported rather than repeated: this and the
 // resource handler must agree exactly or a client subscribes to a uri nothing
 // updates. index.ts:2160 held the only other copy and it is going.
@@ -61,6 +65,9 @@ function pushNotification(identityName: string, summary: string, boundSessionId:
 
 export async function serve(version: string): Promise<DaemonHandle> {
   return startDaemon({
+    // Without this the daemon's startup line announces the SDK's version rather
+    // than the ours-mcp release the operator installed.
+    version,
     mcp: {
       createServer: (ctx: SessionContext) => {
         const server = createOursMcpServer(ctx, version);
@@ -106,5 +113,15 @@ export async function serveStdio(version: string): Promise<void> {
   process.stderr.write('ours: MCP stdio transport connected, booting wrapper…\n');
 
   await bootWrapper();
-  process.stderr.write(`ours: MCP server v${version} ready (transport=stdio)\n`);
+  // The baseline's line, restored in full (index.ts:5171). The truncated version
+  // I first wrote dropped identities/state/broker — all three are what an
+  // operator reads to confirm WHICH daemon came up, and the ux-strings run
+  // against the integrated trees is what caught the loss.
+  const ids = await listIdentities({
+    sessionId: () => 'stdio', leaseToken: () => 'stdio-local', clientPid: () => process.pid,
+  });
+  process.stderr.write(
+    `ours: MCP server v${version} ready (transport=stdio, identities=${ids.length}, ` +
+    `state=${CONFIG.stateDir}, broker=${CONFIG.brokerUrl})\n`,
+  );
 }

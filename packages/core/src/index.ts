@@ -57,8 +57,11 @@ async function main(): Promise<void> {
   }
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
-  const handle = await serve(VERSION);
-  log(`MCP server v${VERSION} ready (transport=http, port=${handle.port}, state=${STATE_DIR})`);
+  // NO ready line here: `startDaemon` logs the canonical one itself, with the
+  // host version we hand it. Logging a second would print two different
+  // "MCP server vX ready" lines per boot — which is exactly what the first
+  // integration run did.
+  await serve(VERSION);
 }
 
 main().catch((err) => {
