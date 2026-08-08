@@ -134,8 +134,17 @@ export function annotateGetFilesResult(result: unknown, readable: (p: string) =>
  * Gated by `test/annotate-frame.test.mjs` here and by
  * `test/proxy-annotate-hook.test.mjs` in ours-sdk — the two halves of one
  * contract, one test each side.
+ *
+ * `readable` IS REQUIRED, DELIBERATELY. It defaulted to `canRead` and that cost
+ * us the second silent drop in this same seam: `proxy.ts:706` passed the probe
+ * EXPLICITLY as `FILES_ALWAYS_PROMPT ? () => false : canRead`, and a call site
+ * that simply passed the function bare inherited the default and silently lost
+ * the override. This annotator reports by NOT annotating, so losing its probe
+ * looks exactly like "nothing needed annotating" — there is no failure to see.
+ * A defaultable argument on a function of that shape is a trap; make every
+ * caller say which probe it means.
  */
-export function annotateResultFrame(message: unknown, readable: (p: string) => boolean = canRead): boolean {
+export function annotateResultFrame(message: unknown, readable: (p: string) => boolean): boolean {
   const frame = message as { result?: unknown } | undefined;
   if (!frame || typeof frame !== 'object' || !('result' in frame)) return false;
   return annotateGetFilesResult(frame.result, readable);
