@@ -1,6 +1,13 @@
 // The ours daemon entry point. `dist/cli.js` imports this file to run the
 // server in-process (`ours-mcp serve`), so it auto-starts on import.
 //
+// ⚠ NEVER IMPORT dist/index.js TO INSPECT IT. Importing it BOOTS A DAEMON against
+// whatever OURS_STATE_DIR is set — the real one, if you did not set it — and
+// restores every persisted identity. That has always been true, but this file is
+// now 68 lines and looks inert, which makes it far easier to trip: someone
+// reaching for `node -e 'import("./dist/index.js")'` to list its exports gets a
+// live second daemon contending for identity locks. Read the exports statically.
+//
 // ============================================================================
 // THIS FILE WAS 5587 LINES. IT IS NOW THE STARTUP SEQUENCE AND NOTHING ELSE.
 // ============================================================================
