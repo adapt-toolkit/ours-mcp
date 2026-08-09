@@ -19,7 +19,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import { listIdentities } from '@ours.network/sdk';
 import { bootWrapper, startDaemon } from '@ours.network/sdk/daemon';
-import type { DaemonHandle, McpTransportInit, McpTransportLike } from '@ours.network/sdk/daemon';
+import type { DaemonHandle, McpServerLike, McpTransportInit, McpTransportLike } from '@ours.network/sdk/daemon';
 // SessionContext is on the root barrel, not ./daemon — the daemon entry re-exports
 // the daemon surface, the typed API surface lives at '.'.
 import type { SessionContext } from '@ours.network/sdk';
@@ -51,9 +51,21 @@ const serversBySession = new Map<string, ReturnType<typeof createOursMcpServer>>
  */
 function pushNotification(identityName: string, summary: string, boundSessionId: string | null): void {
   process.stderr.write(`ours: [${identityName}] notify: ${summary}\n`);
-  if (!boundSessionId) return;
+  // WHY THE OUTCOME IS LOGGED AND NOT JUST THE SUMMARY. Both `return`s below are
+  // silent drops on the happy path's own route, and the line above prints
+  // identically whether the update reached a client or went nowhere — which is
+  // exactly how a broken resource-update path can look healthy in a log for
+  // months. test/resource-updated.test.mjs proves the delivery end to end; this
+  // is what makes a live failure legible without a debugger.
+  if (!boundSessionId) {
+    process.stderr.write(`ours: [${identityName}] no bound session — no resource update sent\n`);
+    return;
+  }
   const server = serversBySession.get(boundSessionId);
-  if (!server) return;
+  if (!server) {
+    process.stderr.write(`ours: [${identityName}] session ${boundSessionId.slice(0, 8)}… has no MCP server registered — no resource update sent\n`);
+    return;
+  }
   // Best-effort: a client that has gone away must not turn an inbound message
   // into an unhandled rejection in the daemon.
   try {
@@ -69,14 +81,23 @@ export async function serve(version: string): Promise<DaemonHandle> {
     // than the ours-mcp release the operator installed.
     version,
     mcp: {
-      createServer: (ctx: SessionContext) => {
-        const server = createOursMcpServer(ctx, version);
-        // The SDK registers the session id -> server association for its own
-        // bookkeeping; this keeps OURS in step for notifications. It is keyed
-        // lazily because the session id does not exist until initialize lands.
-        const sid = ctx.sessionId();
-        if (sid && sid !== 'pending') serversBySession.set(sid, server);
-        return server;
+      // NOTE THE SHAPE OF WHAT WAS HERE, because it looked right and was dead.
+      // This used to end with `const sid = ctx.sessionId(); if (sid && sid !==
+      // 'pending') serversBySession.set(sid, server)`. createServer runs BEFORE
+      // the initialize response, so ctx.sessionId() ALWAYS answers 'pending'
+      // here and the guard was always false: the map stayed empty for the whole
+      // life of the daemon and no inbox resource update ever reached an HTTP
+      // client. Nothing errored — pushNotification's log line reads the same on
+      // the way to a client and on the way to nowhere.
+      // The registration now happens in onSessionInitialized, which is the
+      // moment the id exists. test/resource-updated.test.mjs is what caught it
+      // and is what keeps it caught.
+      createServer: (ctx: SessionContext) => createOursMcpServer(ctx, version),
+      onSessionInitialized: (sid: string, server: McpServerLike) => {
+        // The cast is sound and narrow: this is the very server createServer
+        // returned one step earlier, handed back by the SDK precisely so the
+        // host does not have to guess which session it belonged to.
+        serversBySession.set(sid, server as ReturnType<typeof createOursMcpServer>);
       },
       createTransport: (init: McpTransportInit): McpTransportLike =>
         // The SDK owns the construction ARGUMENTS (session id generation, the
