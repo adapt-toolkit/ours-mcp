@@ -10,9 +10,15 @@
 // is left here is what ours-mcp is actually for: the MCP vocabulary. Tool names,
 // descriptions, zod schemas, and the rendering of typed facts into prose.
 //
-// The six registrars are grouped exactly as the SDK's `src/api/*` modules are —
-// identity, contacts, profile, messaging, files, monitoring — so a tool and the
-// operation behind it are one import apart.
+// The registrars are grouped exactly as the SDK's `src/api/*` modules are —
+// identity, contacts, profile, messaging, files — so a tool and the operation
+// behind it are one import apart.
+//
+// MONITORING IS NOT IN THAT LIST ANY MORE. bind_monitoring_proxy and
+// get_monitoring_status were removed with the daemon-side control plane
+// (ours-sdk 0b84122), so there are no operations behind them to adapt. The
+// surface remains in the PROTOCOL CORE, untouched, for whenever it is
+// reimplemented — this repo simply no longer exposes it as MCP tools.
 //
 // ----- WHY `ctx` IS PASSED AS A THUNK -------------------------------------
 // `startDaemon` hands us a `SessionContext` whose three members are GETTERS
@@ -31,7 +37,6 @@ import { registerContactsTools } from './tools/contacts.js';
 import { registerFilesTools } from './tools/files.js';
 import { registerIdentityTools } from './tools/identity.js';
 import { registerMessagingTools } from './tools/messaging.js';
-import { registerMonitoringTools } from './tools/monitoring.js';
 import { registerProfileTools } from './tools/profile.js';
 
 /**
@@ -51,7 +56,6 @@ export function createOursMcpServer(ctx: SessionContext, version: string): McpSe
   registerProfileTools(server, ctxFor);
   registerMessagingTools(server, ctxFor);
   registerFilesTools(server, ctxFor);
-  registerMonitoringTools(server, ctxFor);
 
   // The one registration that is not a tool: `ours://inbox` (was
   // index.ts:4094-4107). Both developers flagged it as belonging to no
