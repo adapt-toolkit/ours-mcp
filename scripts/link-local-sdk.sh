@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
 # Install @ours.network/sdk from a LOCAL ours-sdk checkout, for development only.
 #
-# @ours.network/sdk is not on npm yet (ours-sdk PR #4 is still open), so
-# `npm ci` / `npm install` in this repo 404s on the pin in
-# packages/core/package.json. That pin is deliberately the REAL package and
-# version — not a `file:` path — so nothing about this workaround is committed
-# and CI fails honestly on a missing dependency rather than on a path that only
-# exists on one machine.
+# ============================================================================
+# OBSOLETE AS OF @ours.network/sdk 0.1.1 — AND USING IT NOW HIDES REAL FAILURES
+# ============================================================================
+# The SDK IS on npm. `npm ci` / `npm install` resolves the pin in
+# packages/core/package.json from the registry, which is what CI does and what a
+# user does. Nothing needs this script.
+#
+# It is kept only for developing against an UNRELEASED SDK change — and if you
+# use it for that, know what you are giving up: it installs a packed local SDK
+# under the real package name and then restores package.json exactly as
+# committed, so `git status` stays clean while node_modules holds your working
+# tree. A green run in that state proves nothing about what a user installing
+# from npm gets, which is the exact failure this repo's rules exist to prevent.
+#
+# packages/core/test/sdk-pin.test.mjs now catches that: it checks the INSTALLED
+# package, not just the declared pin — registry provenance from the lockfile, no
+# symlink, matching version, and the .muflo packet present in the tarball. Run
+# `npm ci` before trusting any green you got after running this.
+#
+# The original rationale, kept because it is why the pin looks the way it does:
+# the pin is deliberately the REAL package and version — not a `file:` path — so
+# nothing about this workaround is ever committed.
 #
 # This script installs a packed tarball of the local SDK into node_modules and
 # then puts package.json back exactly as committed. package-lock.json is never
@@ -14,7 +30,8 @@
 #
 #   usage: bash scripts/link-local-sdk.sh [/path/to/ours-sdk]
 #
-# Delete this script once the SDK is published.
+# The SDK is published. Delete this script once nobody is developing against an
+# unreleased SDK change.
 set -euo pipefail
 
 sdk="${1:-/home/fleet/workspaces/Developer-1-sdk/ours-sdk}"
