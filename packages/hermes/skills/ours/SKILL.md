@@ -1,6 +1,6 @@
 ---
 name: ours
-description: Use when the user wants to set up or configure ours or ours-fleet, onboard onto the ours network, create or switch an identity, connect with another agent or person, exchange encrypted messages or files, check incoming mail, arm live monitoring, bind a web-messenger control proxy, or spawn/configure/oversee a persistent or temporary fleet agent. Trigger phrases include "set up ours", "set up ours-fleet", "configure fleet", "spawn fleet agent", "use identity X", "send a message", "check my messages", "watch for messages", "wake me on new mail", "bind the monitoring proxy", and "set up the control panel".
+description: Use when the user wants to set up or configure ours or ours-fleet, onboard onto the ours network, create or switch an identity, connect with another agent or person, exchange encrypted messages or files, check incoming mail, arm live monitoring, or spawn/configure/oversee a persistent or temporary fleet agent. Trigger phrases include "set up ours", "set up ours-fleet", "configure fleet", "spawn fleet agent", "use identity X", "send a message", "check my messages", "watch for messages", "wake me on new mail".
 metadata:
   hermes:
     tags: [ours, ours.network, a2a, adapt, e2e, messaging, identity]
@@ -21,8 +21,9 @@ are three surfaces:
 
 - **Layer 1 — identities** (global): create / bind / switch the identity you act as.
 - **Layer 2 — messaging** (per the bound identity): invites, contacts, send/read.
-- **Control plane** (the host's **Human identity**): bind a human's web-messenger as a
-  **monitoring & control proxy** that can oversee and command a fleet of agents.
+- **Control plane** (the host's **Human identity**): a human's web-messenger acting as a
+  **monitoring & control proxy** over a fleet of agents. **Not available in this release** —
+  its MCP tools were removed; see "Control plane" below before offering anything.
 
 Identities come in exactly two kinds, in a fixed order:
 
@@ -103,8 +104,9 @@ Walk the user through these, checking each. Stop and help at the first one that 
    via the `terminal` tool and react to each new message from that loop (see *Getting woken on new mail*
    below). **Be honest that this BLOCKS the session** (unlike Claude Code's background Monitor) —
    don't sell it as "just works". The installer never sets this up.
-6. **(Optional) Oversight.** If they want to watch/command a fleet from a phone or
-   browser, set up the **control-plane monitoring proxy**.
+6. **Oversight.** If they ask to watch/command a fleet from a phone or browser, say the
+   **control-plane monitoring proxy is not available in this release** — there is no tool
+   to call. See "Control plane" below.
 
 - **Configuration.** Port, state dir, broker, and GC interval are configurable
   (env > `~/.ours/config.json` > default; port default 3050). Daemon config is
@@ -365,45 +367,21 @@ When you bind an identity, offer the user, in plain language:
 - **Auto-wake** → arm the monitor: you hold a live `ours-mcp watch <id>` and react to each message as it arrives. **Be upfront:** while watching, this session is **busy** — you can't send it new prompts. To do something else: press **ESCAPE** to interrupt the watch, type your prompt, then ask it to **resume** watching. *(On Claude Code this same monitor runs non-blocking in the background — a Claude Code advantage.)*
 - **Manual** → don't arm it; ask it to check `get_messages` whenever you want. No blocking.
 
-## Control plane — bind a monitoring proxy (human oversight of a fleet)
+## Control plane — human oversight of a fleet
 
-This is **separate** from the wake-on-mail watch above. The control plane lets a **person's
-web-messenger account** (the ours web messenger, shipping as part of the upcoming ours-control-plane)
-oversee and command all agents under this host's **Human identity** from a **Control
-Panel**: view a **live monitoring feed** of monitored agents' traffic, create agents, edit
-their bios **and personas**, toggle each agent's monitoring, open a chat with any agent (the
-Human identity commands the agent to mint an invite — no out-of-band step), and remove agents. A
-coordinator can also set a worker's local persona via the cluster; the agent still asks the
-user before adopting it. All of it rides the same
-e2e channels as messages but in a separate control queue agents never see; monitoring bodies
-are never written to disk on the host.
+**NOT AVAILABLE IN THIS RELEASE. Do not offer it, and do not call a tool for it.**
+The `bind_monitoring_proxy` and `get_monitoring_status` MCP tools were removed with the
+daemon-side control plane; there is no tool behind them and a call will fail. Nothing has
+replaced them yet.
 
-**Prerequisites**
-- The **Human identity** exists (`create_root_identity` — the onboarding step). The
-  proxy binds to the Human identity.
-- The messenger account is already a **contact of the Human identity** — do the normal
-  invite exchange first: bind the Human identity, `generate_invite`, and have the
-  messenger redeem it (or redeem the messenger's invite with `add_contact`).
+The capability itself is not cancelled: the monitoring/control surface remains in the
+**protocol core**, untouched, for whenever it is reimplemented. What is gone is this
+plugin's exposure of it as MCP tools.
 
-**Binding ceremony (6-digit code, out-of-band)**
-1. "bind my messenger account as the monitoring proxy" →
-   `bind_monitoring_proxy({ contact: "<the messenger contact>" })`. This automatically
-   targets the host's Human identity (you do **not** need to be bound as it). It returns a
-   **6-digit code** (valid 5 minutes, 3 attempts) and shows it **here**.
-2. **Read the code to the user.** They open the messenger → the conversation with the Human identity →
-   **Control Panel** → enter the code. The code must travel **out-of-band** — reading it off
-   this terminal is what proves you control both ends. **Never send the code over ours.**
-3. On success the contact becomes the proxy. Confirm with `get_monitoring_status`.
-
-**Per-agent monitoring is controller-gated.** Once a proxy is bound, the proxy (Control
-Panel) turns an agent's monitoring on/off — there is **no local enable/disable tool**. A
-monitored agent reports a signed copy of every message it sends/receives to the Human
-identity's node, which forwards it to the proxy's feed.
-
-**Status** — "what's the monitoring/control state" → `get_monitoring_status()` reports the
-Human identity's bound proxy (if any), a pending code verification, queued copies/control
-requests, and each agent's monitoring ON/off. Works whenever the Human identity exists.
-
+If a user asks to bind a web-messenger account as a monitoring/control proxy, to open a
+Control Panel, or to check monitoring status — say plainly that it is not available in this
+release, and do not improvise a substitute. Per-identity wake-on-mail is a **different**
+feature and still works; it is described above.
 ## Notes
 
 - Identities and their state (contacts, inbox, keys) persist under the daemon's state dir
