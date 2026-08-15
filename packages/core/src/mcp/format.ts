@@ -131,9 +131,12 @@ export function annotateGetFilesResult(result: unknown, readable: (p: string) =>
  * and no log line on either side of the seam. This adapter is the fix, and it is
  * the only correct way to install the annotator.
  *
- * Gated by `test/annotate-frame.test.mjs` here and by
- * `test/proxy-annotate-hook.test.mjs` in ours-sdk — the two halves of one
- * contract, one test each side.
+ * Gated by `test/file-save-stream.test.mjs:206-227` here — it spawns a proxy with
+ * `OURS_FILES_ALWAYS_PROMPT=1`, which forces the probe to report unreadable, and
+ * asserts the prompt is PREPENDED to the daemon's own text — and by
+ * `test/proxy-annotate-hook.test.mjs` in ours-sdk: the two halves of one
+ * contract, one test each side. (This said `test/annotate-frame.test.mjs`, which
+ * does not exist; the contract was gated all along, just somewhere else.)
  *
  * `readable` IS REQUIRED, DELIBERATELY. It defaulted to `canRead` and that cost
  * us the second silent drop in this same seam: `proxy.ts:706` passed the probe
