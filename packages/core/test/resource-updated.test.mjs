@@ -16,7 +16,7 @@
 // times out.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
+import { LoggingMessageNotificationSchema, ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -92,6 +92,20 @@ try {
     updates.push(n.params?.uri);
   });
 
+  // THE SECOND CHANNEL. pushNotification sends TWO notifications per event —
+  // notifications/message carrying the summary itself, then
+  // notifications/resources/updated saying only "the inbox changed". The SDK
+  // conversion dropped the first and kept the second, and no assertion here
+  // noticed, because a client watching only resources cannot tell. Collected on
+  // the same client and asserted below alongside the resource update, so the two
+  // can never again be lost one at a time.
+  // No logging/setLevel call is needed: with no level set for the session,
+  // Server.isMessageIgnored is false, so every level is delivered.
+  const logs = [];
+  A.client.setNotificationHandler(LoggingMessageNotificationSchema, (n) => {
+    logs.push(n.params);
+  });
+
   await A.call('create_identity', { name: 'Alice', expose_local: true, local_auto_accept: true });
   await B.call('create_identity', { name: 'Bob', expose_local: true, local_auto_accept: true });
 
@@ -121,6 +135,7 @@ try {
   // wrong pre-condition; the right one is a baseline count to measure against,
   // which is also what stops the assertion below passing on leftover noise.
   const before = updates.length;
+  const logsBefore = logs.length;
   ok(before > 0 && updates.every((u) => u === wanted),
     `pre-send updates are the known contact_accepted noise, on the same uri (${before} seen)`);
 
@@ -134,6 +149,18 @@ try {
     (got === true ? '' : ` — saw [${updates.join(', ')}]`));
   ok(updates.slice(before).includes(wanted),
     `and it carries ${wanted}`);
+
+  // …and the OTHER half of the same push. The resource update says the inbox
+  // changed; this is the only channel that says WHAT changed, which is what an
+  // MCP client surfaces to a user or an agent.
+  const gotLog = await until('the notifications/message summary to reach client A', async () =>
+    (logs.length > logsBefore ? true : undefined), 30_000);
+  ok(gotLog === true,
+    'client A also received a NEW notifications/message — both pushes fire, not one' +
+    (gotLog === true ? '' : ` — saw ${logs.length} log notification(s) total`));
+  const fresh = logs.slice(logsBefore);
+  ok(fresh.some((p) => p?.logger === 'ours' && p?.level === 'info' && /new message from Bob/.test(String(p?.data ?? ''))),
+    'the summary names the sender, on logger "ours" at level "info" (baseline index.ts:2169 payload)');
 
   // The URI must be the one the resource itself hands back, or a client
   // subscribes to a uri nothing ever updates. inboxResourceUri has exactly two

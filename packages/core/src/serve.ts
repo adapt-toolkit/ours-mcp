@@ -26,6 +26,7 @@ import type { SessionContext } from '@ours.network/sdk';
 
 import { loadConfig } from './config';
 import { createHttpServerTransport, isInitializeRequest } from './mcp/transports.js';
+import { pushInboxNotifications } from './mcp/push.js';
 import { createOursMcpServer } from './mcp/server.js';
 
 const CONFIG = loadConfig();
@@ -66,13 +67,14 @@ function pushNotification(identityName: string, summary: string, boundSessionId:
     process.stderr.write(`ours: [${identityName}] session ${boundSessionId.slice(0, 8)}… has no MCP server registered — no resource update sent\n`);
     return;
   }
-  // Best-effort: a client that has gone away must not turn an inbound message
-  // into an unhandled rejection in the daemon.
-  try {
-    void server.server.sendResourceUpdated({ uri: inboxResourceUri(identityName) });
-  } catch {
-    /* the session is going away; the reaper will collect it */
-  }
+  // BOTH pushes, in the baseline's order (index.ts:2168-2176), and both made
+  // best-effort against a synchronous throw AND an asynchronous rejection. What
+  // used to stand here sent only the resource update, inside a try/catch that
+  // could not see a rejection anyway — see the header of ./mcp/push.ts for why
+  // each half was invisible on its own.
+  pushInboxNotifications(server, inboxResourceUri(identityName), summary, (what, err) => {
+    process.stderr.write(`ours: [${identityName}] ${what} failed: ${String(err)}\n`);
+  });
 }
 
 export async function serve(version: string): Promise<DaemonHandle> {
@@ -119,6 +121,28 @@ export async function serve(version: string): Promise<DaemonHandle> {
  * The stdio front door. One fixed session id, transport connected BEFORE the
  * wrapper boots so the initialize handshake does not time out while identities
  * load — unchanged from `index.ts:5158-5181`.
+ *
+ * ⚠ THIS PATH HAS NO DAEMON LIFECYCLE, AND THAT IS A KNOWN GAP, NOT AN OVERSIGHT.
+ * `bootWrapper()` starts the engine and nothing else: the notify hook, the
+ * message GC timer with the contact-restore / capability-reconcile / e2e-recovery
+ * sweeps, and the SIGINT/SIGTERM handler that saves every identity's state all
+ * live INSIDE the SDK's `startDaemon`, which is the HTTP daemon. Baseline
+ * `index.ts:5157-5182` armed the GC timer and the signal flush here, and its
+ * `pushNotification` was module-level so stdio got inbox pushes too; none of that
+ * survives the split. Tracked at adapt-toolkit/ours-sdk#18.
+ *
+ * NOT partially restored on purpose. The notify half alone IS reachable from
+ * here (`setDaemonEventHandler('notification', …)` is on the SDK's root barrel),
+ * but the GC arm is NOT — the SDK's exports map has three entries and no
+ * wildcard, so `@ours.network/sdk/gc` cannot be imported at all. Wiring the one
+ * reachable half would make this path look like it had lifecycle parity while
+ * the sweeps and the shutdown save stayed missing, which is a worse failure than
+ * an absence you can read about here.
+ *
+ * Non-blocking today because stdio is dev-only: `npm run dev:stdio` is its only
+ * caller, no test drives it, and `.mcp.json` and all three plugins launch
+ * `dist/cli.js proxy` (HTTP). Anything that makes stdio a shipped surface has to
+ * close the gap first.
  */
 export async function serveStdio(version: string): Promise<void> {
   const ctx: SessionContext = {

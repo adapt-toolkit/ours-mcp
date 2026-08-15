@@ -151,6 +151,16 @@ await build({
   outfile: resolve(dist, 'contacts.js'),
 });
 
+// The two inbox notification pushes. serve.ts inlines this via './mcp/push.js';
+// the standalone output is what lets test/inbox-push.test.mjs drive the REAL
+// shipped function against fake servers — including the rejection path, which
+// cannot be provoked deterministically from a live client.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/mcp/push.ts')],
+  outfile: resolve(dist, 'push.js'),
+});
+
 // Ship ONLY the compiled MUFL packet (*.muflo) — never the .mu/.mm/.mufl source.
 // The MCP server loads the .muflo at runtime from dist/mufl_code/ by hash.
 const muflSrc = resolve(root, 'mufl_code');
