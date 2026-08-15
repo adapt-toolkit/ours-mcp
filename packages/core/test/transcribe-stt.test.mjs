@@ -3,7 +3,7 @@
 // delivery lines. No daemon boot needed.
 import { createServer } from 'node:http';
 import {
-  sttStatus, transcribeVoice, voiceDeliveryLine, textAtPath, baseMime,
+  sttStatus, transcribeVoice, voiceDeliveryLine, structuredVoiceOutcome, textAtPath, baseMime,
 } from '../dist/transcribe.js';
 
 let pass = 0, fail = 0;
@@ -176,6 +176,25 @@ const FNAME = 'voice-message-20260711-193210.m4a';
   ok(u.includes('cannot transcribe') && u.includes("Tell the user you can't listen to voice messages") && u.includes('audio saved →'), 'unconfigured line: agent-tells-user instruction + saved path');
   const f = voiceDeliveryLine(args, { kind: 'failed', error: 'STT HTTP 401' });
   ok(f.includes('transcription failed (STT HTTP 401)') && f.includes('Tell the user') && f.includes('audio saved →'), 'failed line: never silent, reason + saved path');
+}
+
+// ---- stable structured outcomes (no provider diagnostics/secrets) -----------
+{
+  const assoc = { audioPath: '/safe/W1-v.m4a', wireId: 'W1' };
+  const ready = sttStatus({ provider: 'deepgram', apiKey: 'secret' });
+  const success = structuredVoiceOutcome(ready, { kind: 'transcript', text: 'machine text' }, assoc);
+  ok(success.status === 'succeeded' && success.configured && success.attempted && success.provider === 'deepgram'
+    && success.text === 'machine text' && success.audio_path === assoc.audioPath && success.file_wire_id === 'W1',
+  'structured transcript: success/provider/text/audio association');
+  const failure = structuredVoiceOutcome(ready, { kind: 'failed', error: 'STT HTTP 401: secret provider detail' }, assoc);
+  ok(failure.status === 'failed' && failure.error_category === 'provider_http' && failure.text === null
+    && !JSON.stringify(failure).includes('secret provider detail'),
+  'structured transcript: categorized failure omits provider diagnostics/secrets');
+  const unavailableStatus = sttStatus(undefined);
+  const unavailable = structuredVoiceOutcome(unavailableStatus, { kind: 'unconfigured', reason: unavailableStatus.reason }, assoc);
+  ok(unavailable.status === 'unavailable' && !unavailable.configured && !unavailable.attempted
+    && unavailable.provider === null && unavailable.error_category === 'not_configured',
+  'structured transcript: explicit unconfigured fallback');
 }
 
 // ---- helpers ------------------------------------------------------------------

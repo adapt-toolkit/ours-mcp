@@ -47,7 +47,18 @@ import {
   type OursConfig,
   type ApiVisibility,
 } from './config';
-import { runProxy } from './proxy';
+import { runProxy } from '@ours.network/sdk/connector';
+
+import { connectorTransports } from './mcp/transports';
+import { annotateResultFrame, canRead } from './mcp/format';
+
+// proxy.ts:104-106, verbatim. The connector moved to the SDK; this flag did not
+// move with it, and passing `annotateResultFrame` bare would silently fall back
+// to the default probe and lose the override — which is exactly what
+// test/file-save-stream.test.mjs:206 spawns `OURS_FILES_ALWAYS_PROMPT=1` to catch.
+const FILES_ALWAYS_PROMPT = ['1', 'true', 'yes', 'on'].includes(
+  (process.env.OURS_FILES_ALWAYS_PROMPT ?? '').trim().toLowerCase(),
+);
 import { sttStatus } from './transcribe';
 import { linuxProcHasExited } from './process-state';
 import { runVoiceSetup, VOICE_SETUP_HELP } from './voice-setup';
@@ -1341,6 +1352,14 @@ async function main(): Promise<void> {
         ensureDaemon: CONFIG.autoStart ? ensureDaemonRunning : undefined,
         stateDir: STATE_DIR,
         apiToken: resolveApiToken(CONFIG, { generate: false })?.token,
+        // The SDK owns the connector; ours-mcp owns what MCP looks like. These
+        // two options are the entire boundary between them.
+        transports: connectorTransports,
+        // NOT `annotateGetFilesResult` directly: the SDK hands this hook the whole
+        // JSON-RPC frame, where proxy.ts unwrapped `.result` before calling the
+        // annotator. Passing the annotator straight in silently annotates nothing.
+        // See THE FRAME CONTRACT in ./mcp/format.ts.
+        annotateResult: (msg) => annotateResultFrame(msg, FILES_ALWAYS_PROMPT ? () => false : canRead),
       });
       break;
     case 'install-service':

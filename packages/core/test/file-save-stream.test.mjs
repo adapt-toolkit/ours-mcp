@@ -25,7 +25,7 @@
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync, symlinkSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,7 +45,12 @@ console.log('file-save-stream\n');
 const port = await freePort();
 const stateDir = mkdtempSync(join(tmpdir(), 'ours-savestream-'));
 const daemon = spawn(process.execPath, [CLI, 'serve'], {
-  env: { ...process.env, OURS_TRANSPORT: 'http', OURS_PORT: String(port), OURS_STATE_DIR: stateDir, OURS_GC_INTERVAL_MS: '3600000', OURS_BROKER_URL: 'ws://127.0.0.1:59997/nobroker' },
+  env: {
+    ...process.env,
+    OURS_CONFIG: join(stateDir, 'test-config-does-not-exist.json'),
+    OURS_TRANSPORT: 'http', OURS_PORT: String(port), OURS_STATE_DIR: stateDir,
+    OURS_GC_INTERVAL_MS: '3600000', OURS_BROKER_URL: 'ws://127.0.0.1:59997/nobroker',
+  },
   stdio: 'ignore', detached: true,
 });
 
@@ -73,6 +78,7 @@ const txt = (r) => (r.content ?? []).map((p) => p.type === 'text' ? p.text : `[$
 const call = async (c, name, args = {}) => { const r = await c.callTool({ name, arguments: args }); return { isError: r.isError, text: txt(r), content: r.content ?? [], structured: r.structuredContent }; };
 
 const SECRET = Buffer.from('BEGIN OPENSSH PRIVATE KEY \x00\x01\x02 ' + 'k'.repeat(500) + ' END', 'utf8');
+const SECOND = Buffer.from('second approved-later file', 'utf8');
 
 try {
   const deadline = Date.now() + 20_000; let up = false;
@@ -87,26 +93,75 @@ try {
   await call(setup, 'create_identity', { name: 'Alice' });
   await call(setup, 'create_identity', { name: 'Bob' });
   await call(setup, 'create_identity', { name: 'Carol' });
-  await call(setup, 'choose_identity', { name: 'Alice', force: true });
+  const aliceIdentity = await call(setup, 'choose_identity', { name: 'Alice', force: true });
+  const aliceCid = aliceIdentity.text.match(/\(([A-Fa-f0-9]{64})\)/)?.[1];
+  ok(!!aliceCid, 'Alice authenticated CID is available');
   ok(!(await call(setup, 'send_message', { contact: 'Bob', text: 'file incoming' })).isError, 'Alice connects to Bob (sibling)');
   const sent = await call(setup, 'send_file', { contact: 'Bob', data_base64: SECRET.toString('base64'), filename: 'id_ed25519' });
   const wire = sent.text.match(/wire_id ([A-Fa-f0-9]+)/)?.[1];
   ok(!sent.isError && !!wire, 'Alice send_file to Bob');
+  const sentSecond = await call(setup, 'send_file', {
+    contact: 'Bob', data_base64: SECOND.toString('base64'), filename: '../../approved-later.txt', mime: 'text/plain',
+  });
+  const wireSecond = sentSecond.text.match(/wire_id ([A-Fa-f0-9]+)/)?.[1];
+  ok(!sentSecond.isError && !!wireSecond, 'Alice sends a second independently selectable file to Bob');
   await call(setup, 'send_message', { contact: 'Carol', text: 'file incoming' });
   const sentC = await call(setup, 'send_file', { contact: 'Carol', data_base64: SECRET.toString('base64'), filename: 'id_ed25519' });
   const wireC = sentC.text.match(/wire_id ([A-Fa-f0-9]+)/)?.[1];
   ok(!sentC.isError && !!wireC, 'Alice send_file to Carol');
+  const sentVoice = await call(setup, 'send_file', {
+    contact: 'Carol', data_base64: Buffer.from('fake-voice').toString('base64'),
+    filename: 'voice-message-20260803.ogg', mime: 'audio/ogg; x-ours-kind=voice-message',
+  });
+  const wireVoice = sentVoice.text.match(/wire_id ([A-Fa-f0-9]+)/)?.[1];
+  ok(!sentVoice.isError && !!wireVoice, 'Alice sends a marked voice file to Carol');
   await sleep(400);
+  const bobWakeEvents = readFileSync(join(stateDir, 'Bob', 'notifications.log'), 'utf8')
+    .trim().split('\n').map((line) => JSON.parse(line)).filter((event) => event.event === 'file_received');
+  ok(bobWakeEvents.length === 2 && bobWakeEvents.every((event) => event.sender_id === aliceCid)
+    && bobWakeEvents.some((event) => event.wire_id === wire) && bobWakeEvents.some((event) => event.wire_id === wireSecond)
+    && bobWakeEvents.every((event) => event.file_id && event.bytes && event.date),
+  'body-free file wake metadata carries authenticated sender CID, stable IDs, byte count, and date');
 
   // ── get_files returns a PATH + metadata, never bytes ─────────────────────
   const bob = await mkProxy('sess-bob');
   ok((await bob.listTools()).tools.some((t) => t.name === 'save_file'), 'save_file tool is advertised');
   await call(bob, 'choose_identity', { name: 'Bob', force: true });
-  const gf = await call(bob, 'get_files');
+  const listed = await call(bob, 'list_incoming_files');
+  const listedFiles = listed.structured?.files;
+  ok(!listed.isError && listed.structured?.count === 2 && Array.isArray(listedFiles),
+    'list_incoming_files returns stable structured metadata without retrieving bytes');
+  const listedFirst = listedFiles?.find((f) => f.wire_id === wire);
+  ok(listedFirst?.from?.id === aliceCid && listedFirst?.from?.name === 'Alice'
+    && listedFirst?.file_id > 0 && listedFirst?.size === SECRET.length && listedFirst?.status === 'unread'
+    && listedFirst?.sha256 === null && listedFirst?.date,
+  'preauthorization metadata separates authenticated sender CID from untrusted display name and carries IDs/size/status/date');
+  ok(!existsSync(join(stateDir, 'Bob', 'files')), 'metadata inspection writes zero received-file bytes');
+
+  const malformed = await call(bob, 'get_files', { wire_ids: ['not-a-wire-id'] });
+  ok(malformed.isError && malformed.structured?.error?.category === 'malformed_id', 'malformed selection fails closed');
+  const duplicate = await call(bob, 'get_files', { wire_ids: [wire, wire] });
+  ok(duplicate.isError && duplicate.structured?.error?.category === 'duplicate_id', 'duplicate selection fails closed');
+  const overCap = await call(bob, 'get_files', { wire_ids: Array.from({ length: 33 }, (_, i) => i.toString(16).padStart(64, '0')) });
+  ok(overCap.isError && overCap.structured?.error?.category === 'invalid_selection', 'selection cap fails closed');
+  const unknown = await call(bob, 'get_files', { wire_ids: ['F'.repeat(64)] });
+  ok(unknown.isError && unknown.structured?.error?.category === 'unknown_or_stale_id'
+    && unknown.structured?.selection?.items?.[0]?.status === 'error',
+  'unknown selection fails closed atomically with a structured per-item result');
+  ok(!existsSync(join(stateDir, 'Bob', 'files')), 'invalid selections retrieve/write zero bytes');
+
+  const bobFilesDir = join(stateDir, 'Bob', 'files');
+  const onDisk = join(bobFilesDir, `${wire}-id_ed25519`);
+  const symlinkVictim = join(stateDir, 'symlink-victim');
+  mkdirSync(bobFilesDir, { recursive: true });
+  writeFileSync(symlinkVictim, 'do-not-overwrite');
+  symlinkSync(symlinkVictim, onDisk);
+  const gf = await call(bob, 'get_files', { wire_ids: [wire] });
   ok(!gf.isError, 'Bob get_files succeeds');
   ok(!partTypes(gf.content).includes('resource'), 'get_files returns NO embedded-resource/bytes part');
-  const onDisk = join(stateDir, 'Bob', 'files', `${wire}-id_ed25519`);
   ok(existsSync(onDisk) && readFileSync(onDisk).equals(SECRET), 'get_files wrote the file to the per-identity folder (byte-exact)');
+  ok(readFileSync(symlinkVictim, 'utf8') === 'do-not-overwrite' && !lstatSync(onDisk).isSymbolicLink(),
+    'safe atomic write replaces the destination entry without following a symlink');
   ok(gf.text.includes(onDisk), 'get_files result carries the on-disk PATH');
   ok(/sha256 [a-f0-9]{64}/.test(gf.text) && new RegExp(`${SECRET.length} B`).test(gf.text), 'get_files result carries sha256 + size metadata');
   // The proxy probed the path as THIS OS user, found it readable, and passed the
@@ -115,7 +170,24 @@ try {
   ok(Array.isArray(gfFiles) && gfFiles.length === 1 && gfFiles[0].path === onDisk && gfFiles[0].wire_id === wire,
     'get_files carries structuredContent records (wire_id + path) for the proxy to probe');
   ok(gfFiles?.[0]?.readable === true, 'proxy marked the readable path readable and did NOT rewrite the result');
+  ok(gfFiles?.[0]?.from?.id === aliceCid && gfFiles?.[0]?.status === 'processed' && gfFiles?.[0]?.file_id === listedFirst.file_id,
+    'selected retrieval result preserves authenticated provenance, stable ids, and processed status');
   ok(!/NOT readable by your OS user/.test(gf.text), 'readable case is a transparent passthrough (no destination prompt)');
+  const secondOnDisk = join(stateDir, 'Bob', 'files', `${wireSecond}-approved-later.txt`);
+  ok(!existsSync(secondOnDisk), 'selective retrieval does not write the unselected unread file');
+  const afterSelected = await call(bob, 'list_incoming_files');
+  ok(afterSelected.structured?.files?.find((f) => f.wire_id === wire)?.status === 'processed'
+    && afterSelected.structured?.files?.find((f) => f.wire_id === wireSecond)?.status === 'unread',
+  'selective retrieval leaves the other file unread');
+
+  const stale = await call(bob, 'get_files', { wire_ids: [wire] });
+  ok(stale.isError && stale.structured?.error?.category === 'unknown_or_stale_id', 'already-processed selection is rejected as stale');
+  const bulk = await call(bob, 'get_files');
+  ok(!bulk.isError && bulk.structured?.selection?.mode === 'all_unread'
+    && bulk.structured?.files?.length === 1 && bulk.structured.files[0].wire_id === wireSecond,
+  'no-argument get_files preserves legacy bulk retrieval behavior');
+  ok(existsSync(secondOnDisk) && readFileSync(secondOnDisk).equals(SECOND),
+    'legacy bulk retrieval writes the remaining unread file with a traversal-safe basename');
 
   // ── save_file streams the bytes to an agent-chosen dest via the proxy ─────
   const dest = join(stateDir, 'agent-home', 'saved_key');
@@ -153,6 +225,15 @@ try {
   ok(!partTypes(gfC.content).includes('resource') && !/[A-Za-z0-9+/]{200,}={0,2}/.test(gfC.text),
     'the prompt carries no bytes / no base64 blob');
   ok(gfC.structured?.files?.[0]?.readable === false, 'structured record is marked unreadable');
+  const voiceRecord = gfC.structured?.files?.find((f) => f.wire_id === wireVoice);
+  ok(voiceRecord?.kind === 'voice_message' && voiceRecord?.transcription?.status === 'unavailable'
+    && voiceRecord.transcription.configured === false && voiceRecord.transcription.attempted === false
+    && voiceRecord.transcription.error_category === 'not_configured'
+    && voiceRecord.transcription.audio_path === voiceRecord.path
+    && voiceRecord.transcription.file_wire_id === wireVoice,
+  'voice fallback is structured with explicit configuration/attempt/status and audio association');
+  ok(/cannot transcribe/.test(gfC.text) && gfC.text.includes(`{${wireVoice}}`),
+    'voice fallback preserves the existing human-readable delivery line');
   // …the agent answers with a path, and save_file completes the delivery.
   const carolDest = join(stateDir, 'agent-home', 'carol-chosen', 'key.pem');
   const sfC = await call(carol, 'save_file', { wire_id: wireC, dest_path: carolDest });

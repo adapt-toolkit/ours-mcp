@@ -9,13 +9,30 @@ The server **is** the node: on startup it boots a single ADAPT packet (a MUFL
 messenger), restores prior state from the state dir, connects to the broker, and
 exposes the messaging tools — each a thin wrapper over one MUFL user transaction:
 
-- `generate_invite` — invite to share out-of-band (optionally named)
+- `generate_invite` — invite to share out-of-band (optionally named; `mode`
+  `"one_time"` default or `"public"` for a reusable open-posting invite)
+- `list_invites` / `revoke_invite` — outstanding invites; revocation is the only
+  way to close a public invite (idempotent)
 - `add_contact` — add a contact from an invite blob (TOFU)
 - `list_contacts`
+- `remove_contact` — contacts-layer forget + one best-effort authenticated
+  "remove me" notice to the peer (fire-and-forget; remote removal NOT guaranteed)
+- `create_temporary_identity` / `close_temporary_identity` — session-scoped
+  identity owned by exactly one session lease: on close/session end, contacts get
+  one best-effort remove-me notice, then ALL local state is deleted (stale ones —
+  owner process dead — are swept automatically; permanent identities never are)
 - `send_message` — end-to-end encrypted; optional `reply_to_wire_id` (+ `reply_to_sentence`) to reply to a specific message
 - `get_messages` — return unread messages (bodies, each with its `wire_id` + any `reply_to`) + mark read; delivered exactly once
 - `mark_processed` / `defer_messages` — remove handled messages, or re-queue read ones for another session
 - `list_incoming_messages` — full inbox with ids + status (read-only)
+- `list_incoming_files` — byte-free structured preauthorization metadata, including authenticated sender CID (`from.id`), separate display name, stable IDs, size/date/status, filename and MIME
+- `get_files({ wire_ids? })` — atomically retrieve only approved unread wire IDs; omitting `wire_ids` preserves legacy all-unread retrieval. Results include safe local paths, actual size/hash, provenance/status, and structured voice transcription outcomes
+
+File wake events are content-free but correlation-complete: authenticated `sender_id`,
+`file_id`, `wire_id`, display name, filename, MIME, byte count, and received date. A caller
+must authorize against `sender_id`, never the untrusted display label. Selected IDs are
+unique 64-hex wire IDs (maximum 32); malformed, duplicate, unknown, or stale selections
+fail atomically without retrieving or writing any file.
 
 ## Configuration
 
@@ -46,7 +63,10 @@ The supported providers are `openai-compatible` (explicit base URL + model),
 a file and is transcribed only when its real `audio/*` MIME also carries
 `x-ours-kind=voice-message` (or its legacy filename starts `voice-message-`). The original
 bytes are saved whether transcription succeeds, is unconfigured, exceeds the size cap, or
-the provider fails. Provider error text is scrubbed if it echoes the configured key.
+the provider fails. `get_files` preserves the human transcript/fallback line and also returns
+a secret-free structured outcome (`configured`, `attempted`, `status`, `provider`, `text`,
+`error_category`, `audio_path`, and `file_wire_id`). Provider error text is scrubbed if it
+echoes the configured key and raw provider diagnostics are not copied into structured output.
 
 Telegram fallback preserves its original OGG/Opus bytes and `.ogg` filename and advertises
 `audio/ogg; x-ours-kind=voice-message`; the connector's v2 message envelope correlates the

@@ -34,7 +34,7 @@ jobs:
   gates:
     runs-on: ubuntu-latest
     name: Gates (typecheck · build · test)
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       # The packet compiles from packages/core/mufl_code/ incl. the core/
       # submodule (public repo; if it ever goes private, checkout needs an

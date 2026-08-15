@@ -118,13 +118,24 @@ try {
     //    nobody. A hang silently converted into data loss.
     //    Requests are therefore no longer replayed; they fail back and the caller
     //    decides whether repeating is safe. Only the caller knows that.
-    let firstCallFailed = false;
+    //    WHAT THE OUTCOME ACTUALLY WAS IS RECORDED, not just whether it matched.
+    //    This assertion collapsed three different outcomes into one `false`: the
+    //    call SUCCEEDED (contract broken), it threw the WRONG error (contract
+    //    broken differently), or it threw the right one. Under full-chain load
+    //    this went red once and the log said only "expected fail-back" — which
+    //    is not enough to tell a regression from a race, and cost a re-run to
+    //    find out. Whatever happens, the message now names it.
+    let firstOutcome;
     try {
-      await call('get_messages');
+      const r = await call('get_messages');
+      firstOutcome = `SUCCEEDED (no fail-back): ${text(r).slice(0, 120)}`;
     } catch (e) {
-      firstCallFailed = /NOT retried/i.test(String(e?.message ?? e));
+      const msg = String(e?.message ?? e);
+      firstOutcome = /NOT retried/i.test(msg) ? null : `threw the WRONG error: ${msg.slice(0, 160)}`;
     }
-    assert(firstCallFailed, '(3a) first call after restart FAILS BACK instead of being silently replayed — the caller is told, and told it was not retried');
+    assert(firstOutcome === null,
+      '(3a) first call after restart FAILS BACK instead of being silently replayed — the caller is ' +
+      `told, and told it was not retried${firstOutcome ? ` [actual: ${firstOutcome}]` : ''}`);
 
     // 9. …and the retry succeeds WITHOUT any explicit choose_identity from the
     //    test, which is what proves the silent re-bind actually happened.

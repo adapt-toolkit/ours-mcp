@@ -328,6 +328,52 @@ export type VoiceOutcome =
   | { kind: 'unconfigured'; reason: string }
   | { kind: 'failed'; error: string };
 
+export type StructuredVoiceOutcome = {
+  configured: boolean;
+  attempted: boolean;
+  status: 'succeeded' | 'failed' | 'unavailable';
+  provider: SttProvider | null;
+  text: string | null;
+  error_category: 'not_configured' | 'size_limit' | 'timeout' | 'provider_http' | 'invalid_response' | 'provider_error' | null;
+  audio_path: string;
+  file_wire_id: string;
+};
+
+function voiceErrorCategory(error: string): Exclude<StructuredVoiceOutcome['error_category'], 'not_configured' | null> {
+  if (/limit|over .* bytes/i.test(error)) return 'size_limit';
+  if (/timeout/i.test(error)) return 'timeout';
+  if (/HTTP \d+/i.test(error)) return 'provider_http';
+  if (/missing|no text|no transcript/i.test(error)) return 'invalid_response';
+  return 'provider_error';
+}
+
+/** Stable, secret-free machine view paired with the existing human delivery line. */
+export function structuredVoiceOutcome(
+  readiness: SttStatus,
+  outcome: VoiceOutcome,
+  association: { audioPath: string; wireId: string },
+): StructuredVoiceOutcome {
+  if (!readiness.ready || outcome.kind === 'unconfigured') {
+    return {
+      configured: false, attempted: false, status: 'unavailable', provider: null,
+      text: null, error_category: 'not_configured', audio_path: association.audioPath,
+      file_wire_id: association.wireId,
+    };
+  }
+  if (outcome.kind === 'transcript') {
+    return {
+      configured: true, attempted: true, status: 'succeeded', provider: readiness.provider,
+      text: outcome.text, error_category: null, audio_path: association.audioPath,
+      file_wire_id: association.wireId,
+    };
+  }
+  return {
+    configured: true, attempted: true, status: 'failed', provider: readiness.provider,
+    text: null, error_category: voiceErrorCategory(outcome.error), audio_path: association.audioPath,
+    file_wire_id: association.wireId,
+  };
+}
+
 export function voiceDeliveryLine(
   args: { sender: string; wire: string; savedPath: string; sizeBytes: number },
   outcome: VoiceOutcome,
