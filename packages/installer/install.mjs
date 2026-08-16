@@ -20,21 +20,24 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir, userInfo, platform as osPlatform, release as osRelease } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { banner, heading, ok, info, warn, c, box, withSpinner, openTty, makeWriter, closeSync } from './lib/ui.mjs';
 import { askLine, askYesNo, isCancel } from './lib/prompt.mjs';
 import {
   suggestPort, parsePort, validateBroker, mergeConfig, parseVersion, parseStatus,
   detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
-  voiceSetupStatus,
+  voiceSetupStatus, resolveSharedBroker, tgConfigPath, planTgDaemonConfig, daemonEndpoint,
   DEFAULT_PORT, resolveChannel, pkgSpec,
 } from './lib/logic.mjs';
 import { atomicWriteConfig } from './lib/config.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
 // Release channel: OURS_CHANNEL=nightly installs @nightly for mcp/tg-connector/plugin
-// launchers but keeps @ours.network/fleet at @latest (fleet has no nightly). Default: latest.
-const CHANNEL = resolveChannel(process.env.OURS_CHANNEL || process.env.OURS_INSTALL_CHANNEL);
+// launchers but keeps @ours.network/fleet at @latest (fleet has no nightly). With no
+// explicit selection the installer follows its OWN channel, so a nightly installer
+// builds a nightly stack instead of silently mixing tags across the connector's
+// architecture boundary (see resolveChannel).
+const CHANNEL = resolveChannel(process.env.OURS_CHANNEL || process.env.OURS_INSTALL_CHANNEL, pkgVersion());
 const spec = (pkgKey) => pkgSpec(pkgKey, CHANNEL); // → "@ours.network/<key>@<tag>"
 let DRY = !!process.env.OURS_INSTALL_DRY_RUN;
 const SELFHOST_URL = 'ours.network';
@@ -107,6 +110,18 @@ function writeConfigPatch(patch) {
   const p = configPath();
   atomicWriteConfig(p, mergeConfig(readConfigObject(), patch));
   return p;
+}
+
+// The daemon's state directory, resolved exactly the way packages/core/src/config.ts
+// resolves it (env > config file > ~/.ours). The Telegram connector needs the ABSOLUTE
+// path: the SDK reads the daemon's API token from it and refuses to send that token to
+// a separately-chosen endpoint unless the state dir was chosen just as deliberately.
+function daemonStateDir() {
+  const fromEnv = process.env.OURS_STATE_DIR?.trim();
+  if (fromEnv) return resolve(fromEnv);
+  const fromFile = readConfigObject().stateDir;
+  if (typeof fromFile === 'string' && fromFile.trim()) return resolve(fromFile.trim());
+  return join(homedir(), '.ours');
 }
 
 function daemonVoiceCapability() {
@@ -439,10 +454,24 @@ async function main() {
     const voice = offerVoiceSetup({ readinessAfterStart: true });
     const started = await act(`ours-mcp start (port ${chosenPort})`, async () => run('ours-mcp', ['start']));
     const svc = await act('ours-mcp install-service (survives reboot)', async () => run('ours-mcp', ['install-service']));
-    if (started.ok) line(ok(`ours core ready — running on port ${chosenPort}. No problems.`));
+    // `ours-mcp install-service` STOPS the daemon before it writes the unit (core's
+    // cmdInstallService), then exits non-zero if `systemctl --user enable --now` fails —
+    // no linger, no user bus, a container, WSL without systemd. Left alone that turns a
+    // WORKING daemon into no daemon at all, while the line below still said "ready": the
+    // human identity and every MCP client then fail against a port nothing is listening
+    // on. Put the one shared daemon back up and report what is actually true.
+    let running = started.ok;
+    if (!DRY && !svc.ok) {
+      running = daemonRunning();
+      if (!running) {
+        line(info('the boot-service step stopped the daemon before it failed — restarting it.'));
+        running = run('ours-mcp', ['start']).ok || daemonRunning();
+      }
+    }
+    if (running) line(ok(`ours core ready — running on port ${chosenPort}. No problems.`));
     else line(warn(`could not auto-start — run '${c.cyan('ours-mcp start')}' to bring it up.`));
     if (!svc.ok && !svc.dry) line(warn(`boot-service not installed — retry '${c.cyan('ours-mcp install-service')}' later.`));
-    if (voice.setupRan && !DRY && started.ok) {
+    if (voice.setupRan && !DRY && running) {
       const verified = daemonVoiceCapability();
       if (verified?.ready) {
         line(ok(`Voice transcription readiness confirmed (${verified.provider}) after the first start.`));
@@ -455,7 +484,13 @@ async function main() {
         }
       }
     }
-    record({ key: 'core', label: 'ours core (daemon)', state: started.ok ? 'installed' : 'failed', version: parseVersion(daemonVersionLine()), note: 'starts on boot' });
+    record({
+      key: 'core',
+      label: 'ours core (daemon)',
+      state: running ? 'installed' : 'failed',
+      version: parseVersion(daemonVersionLine()),
+      note: svc.ok ? 'starts on boot' : 'running; no boot service',
+    });
   } else {
     // Installed: offer an update; never re-ask config; reuse the running port everywhere.
     const daemonState = daemonLifecycleState();
@@ -639,6 +674,39 @@ async function main() {
   }
   cont(goFleet);
 
+  // Give the Telegram connector the ONE daemon this install just built: its loopback
+  // endpoint, the state directory that endpoint's API token belongs to, and — for a
+  // pre-0.3.3 connector that still meets the daemon at a broker instead — that broker.
+  // Idempotent: an unchanged selection writes nothing. Returns { changed, hadPrevious }
+  // so the caller can warn about a service unit that froze an older selection.
+  async function writeTgDaemonConfig({ chosenPort, chosenBroker, status0 }) {
+    const path = tgConfigPath(process.env, homedir());
+    const stateDir = daemonStateDir();
+    const desired = {
+      daemonUrl: daemonEndpoint(chosenPort),
+      daemonStateDir: stateDir,
+      brokerUrl: resolveSharedBroker({
+        chosenBroker,
+        statusBroker: status0.broker,
+        configBroker: readConfigObject().brokerUrl,
+      }),
+    };
+    let existing = {};
+    try { existing = JSON.parse(readFileSync(path, 'utf8')); } catch { /* absent or unreadable */ }
+    const plan = planTgDaemonConfig(existing, desired);
+    const hadPrevious = !!(plan.previous.daemonUrl || plan.previous.brokerUrl);
+    if (!plan.changed) {
+      line(ok(`Telegram connector already points at this daemon (${desired.daemonUrl}) — no change.`));
+      return { changed: false, hadPrevious };
+    }
+    await act(`write ${path} (daemon ${desired.daemonUrl}, state ${stateDir})`, async () => {
+      atomicWriteConfig(path, plan.text);
+      return { ok: true };
+    });
+    line(ok(`Telegram connector configured to use this daemon (${desired.daemonUrl}).`));
+    return { changed: true, hadPrevious };
+  }
+
   // ============================================================================================
   // STEP 4 / 4 — Telegram connector. Install-only (no bot tokens here). Then: run as a service?
   // ============================================================================================
@@ -648,15 +716,28 @@ async function main() {
   const goTg = yes('  Install it?', false);
   if (goTg) {
     await actSpin(`installing ${spec('tg-connector')}…`, `npm i -g ${spec('tg-connector')}`, () => runAsync(NPM, ['i', '-g', spec('tg-connector')]));
+    // POINT IT AT THE ONE DAEMON — BEFORE it is started or installed as a service.
+    // The connector never inherits ~/.ours/config.json (its SDK reports configPath:
+    // null unless told otherwise), and `install-service` bakes whatever it resolves
+    // into the unit as environment variables that outrank the file from then on. So
+    // the daemon's identity has to be in its config BEFORE either happens. See
+    // planTgDaemonConfig for why all three keys are written.
+    const tgConfigured = await writeTgDaemonConfig({ chosenPort, chosenBroker, status0 });
     const asService = yes('  Keep it running in the background so it starts automatically on boot?', true);
     if (asService) {
       const svc = await act('ours-tg-connector install-service (starts on boot)', async () => run('ours-tg-connector', ['install-service']));
-      if (svc.ok) line(ok('Telegram connector installed and running as a service (starts on boot). No problems.'));
+      if (svc.ok) line(ok(`Telegram connector installed and running as a service (starts on boot), pointed at the daemon on port ${chosenPort}. No problems.`));
       else line(warn(`connector installed, but the service didn't start — retry '${c.cyan('ours-tg-connector install-service')}'.`));
-      record({ key: 'telegram', label: 'Telegram connector', state: 'installed', version: globalVersion('@ours.network/tg-connector'), note: 'service (boot)' });
+      record({ key: 'telegram', label: 'Telegram connector', state: 'installed', version: globalVersion('@ours.network/tg-connector'), note: `service (boot) · daemon ${chosenPort}` });
     } else {
-      line(ok(`Telegram connector installed. Start it any time with '${c.cyan('ours-tg-connector start')}'. No problems.`));
-      record({ key: 'telegram', label: 'Telegram connector', state: 'installed', version: globalVersion('@ours.network/tg-connector'), note: 'start on demand' });
+      line(ok(`Telegram connector installed, pointed at the daemon on port ${chosenPort}. Start it any time with '${c.cyan('ours-tg-connector start')}'. No problems.`));
+      // A connector already installed as a service froze its OLD daemon selection into
+      // the unit's environment, which outranks the file we just wrote. Config alone
+      // cannot repair that — say so plainly rather than let it look fixed.
+      if (tgConfigured.changed && tgConfigured.hadPrevious) {
+        line(warn(`if you previously ran '${c.cyan('ours-tg-connector install-service')}', re-run it — the old service froze the previous daemon selection in its unit.`));
+      }
+      record({ key: 'telegram', label: 'Telegram connector', state: 'installed', version: globalVersion('@ours.network/tg-connector'), note: `start on demand · daemon ${chosenPort}` });
     }
   } else {
     line(info('skipped cleanly.'));

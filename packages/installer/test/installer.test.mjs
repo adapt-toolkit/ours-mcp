@@ -6,10 +6,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync, mkdirSync, statSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync, mkdirSync, statSync, symlinkSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveChannel } from '../lib/logic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG = dirname(HERE);
@@ -27,6 +28,9 @@ const INSTALL_SH = join(PKG, 'install.sh');
 //   opts.voiceRestartTrace : model the canonical voice command's one restart in the call log
 //   opts.voiceRecoveryFailure : canonical setup exits 2 after its traced restart/rollback attempt
 //   opts.hermesPresent : create <HOME>/.hermes so Hermes is detected (config-dir based, handled in runInstall)
+//   opts.serviceFails  : `ours-mcp install-service` STOPS the daemon and then fails, exactly as
+//                        core's cmdInstallService does when `systemctl --user enable --now` cannot
+//                        reach a user bus. With it, `status`/`create-root` track real up/down state.
 function fakeBins(dir, opts = {}) {
   const daemonInstalled = opts.daemon !== 'absent';
   const daemonState = opts.daemonState || 'managed';
@@ -43,16 +47,29 @@ function fakeBins(dir, opts = {}) {
     : `[ "$1" = "--version" ] && { [ -f "$CALLLOG.mcpinstalled" ] && { echo "ours-mcp v9.9.9"; exit 0; } || exit 1; }\n`;
   const createRoot = opts.rootExists
     ? `[ "$1" = "create-root" ] && { echo 'create-root: a root identity already exists ("${opts.rootExists}") — nothing to do.'; exit 0; }\n`
-    : `[ "$1" = "create-root" ] && { echo "created root identity"; exit 0; }\n`;
+    : `[ "$1" = "create-root" ] && { ${opts.serviceFails ? '[ -f "$CALLLOG.up" ] || { echo "create-root: the daemon is not running" >&2; exit 1; }; ' : ''}echo "created root identity"; exit 0; }\n`;
+  // serviceFails models core's cmdInstallService faithfully: stop first, THEN fail. The
+  // $CALLLOG.up marker is the daemon's real liveness, so status/create-root cannot claim
+  // a daemon the install-service step just took down.
+  const lifecycle = opts.serviceFails
+    ? `[ "$1" = "start" ] && { touch "$CALLLOG.up"; echo "ours-mcp is up"; exit 0; }\n` +
+      `[ "$1" = "install-service" ] && { rm -f "$CALLLOG.up"; echo "failed to enable/start the service via systemctl --user." >&2; exit 1; }\n`
+    : '';
+  // The port a real daemon reports is the one it was configured with, so a re-run sees the port
+  // the previous run persisted (which is probe-dependent — 3050 may be busy on the test machine).
+  // Read it back from the config when there is one, exactly as the daemon would.
+  const resolvePort = `P=$(grep -o '"port"[^,}]*' "\${OURS_CONFIG:-/nonexistent}" 2>/dev/null | grep -oE '[0-9]+' | head -1); P=\${P:-${port}};`;
+  const statusBody = opts.serviceFails
+    ? `${resolvePort} if [ -f "$CALLLOG.up" ]; then echo "ours-mcp: running"; echo "  pid:    4242"; echo "  url:    http://localhost:$P/mcp (reachable)"; exit 0; else echo "ours-mcp: stopped"; exit 1; fi;`
+    : daemonState === 'stopped'
+      ? 'echo "ours-mcp: stopped"; exit 1;'
+      : daemonState === 'external'
+        ? `${resolvePort} echo "ours-mcp: running (no pidfile — external launcher)"; echo "  url:    http://localhost:$P/mcp (reachable)"; exit 0;`
+        : `${resolvePort} echo "ours-mcp: running"; echo "  pid:    4242"; echo "  url:    http://localhost:$P/mcp (reachable)"; exit 0;`;
   write('ours-mcp',
     mcpVersion +
-    `[ "$1" = "status" ] && { ${
-      daemonState === 'stopped'
-        ? 'echo "ours-mcp: stopped"; exit 1;'
-        : daemonState === 'external'
-          ? `echo "ours-mcp: running (no pidfile — external launcher)"; echo "  url:    http://localhost:${port}/mcp (reachable)"; exit 0;`
-          : `echo "ours-mcp: running"; echo "  pid:    4242"; echo "  url:    http://localhost:${port}/mcp (reachable)"; exit 0;`
-    } }\n` +
+    lifecycle +
+    `[ "$1" = "status" ] && { ${statusBody} }\n` +
     `[ "$1" = "voice-status" ] && { if [ -f "$CALLLOG.voice-ready" ]; then echo '{"ready":true,"provider":"deepgram","apiKey":"configured","keySource":"config"}'; exit 0; else exit 1; fi; }\n` +
     `[ "$1" = "voice-setup" ] && { ${opts.voiceRestartTrace
       ? `echo "voice-provider-selected" >> "$CALLLOG"; echo "voice-config-written" >> "$CALLLOG"; echo "ours-mcp restart (voice-setup)" >> "$CALLLOG";`
@@ -76,7 +93,11 @@ function fakeBins(dir, opts = {}) {
     }
   }
   write('ours-fleet', `[ "$1" = "--version" ] && { echo "0.7.0"; exit 0; }\nexit 0\n`);
-  write('ours-tg-connector', `exit 0\n`);
+  // Snapshot the connector's config AS IT STANDS when install-service runs. `install-service`
+  // bakes what it resolves into the service unit, so a config written afterwards would be too
+  // late — the snapshot is what proves the installer configured it FIRST.
+  write('ours-tg-connector',
+    `[ "$1" = "install-service" ] && { cp "$HOME/.ours-telegram/config.json" "$CALLLOG.tgsnapshot" 2>/dev/null; exit 0; }\nexit 0\n`);
   // Hermes plugin front-door: logs its argv (so we can assert --skip-daemon) and succeeds.
   write('ours-hermes-install', `exit 0\n`);
 }
@@ -603,6 +624,206 @@ test('declined or already-ready voice preserves one normal update restart',
       `${mode} flow does not invoke the voice transaction restart`);
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// ===============================================================================================
+// ONE SHARED DAEMON — the Telegram connector must be handed THIS install's daemon.
+//
+// The connector keeps its own config file and never inherits ~/.ours/config.json: with no
+// overrides its SDK reports configPath: null and falls back to the built-in 127.0.0.1:3050, so a
+// daemon on any other port is missed entirely. Pointing it with an endpoint ALONE is refused
+// (INCOHERENT_SELECTION: "the endpoint was selected … but the state directory is the built-in
+// default") because the daemon's API token belongs to a state directory. Endpoint AND state dir
+// together is the only selection the SDK accepts — verified directly against the published
+// @ours.network/sdk 0.1.2 that tg-connector 0.3.3-nightly.1 pins.
+//
+// These run on a FRESH isolated config/state root (HOME + OURS_CONFIG under a fresh mkdtemp) and
+// answer Yes to Telegram, which the non-interactive path cannot do (its default is No).
+// ===============================================================================================
+const PTY_TELEGRAM = `
+import os, pty, sys, time, select
+env=dict(os.environ); env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None); env.pop("OURS_INSTALL_DRY_RUN",None)
+broker=os.environ.get("ANSWER_BROKER","")
+pid,fd=pty.fork()
+if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
+buf=b""; pending=b""; last=time.time(); st=None
+for _ in range(1500):
+    try: w,s=os.waitpid(pid,os.WNOHANG)
+    except ChildProcessError: st="reaped"; break
+    if w: st=s; break
+    r,_,_=select.select([fd],[],[],0.25)
+    if r:
+        try: d=os.read(fd,4096)
+        except OSError: break
+        if not d: break
+        buf+=d; pending+=d; last=time.time()
+        if pending.endswith((b"] ", b": ")):
+            tail=pending[-800:]
+            if b"custom broker address?" in tail and broker: reply=b"y\\n"
+            elif b"Enter the broker address" in tail and broker: reply=broker.encode()+b"\\n"
+            elif b"Install it?" in tail and b"Telegram connector" in buf[-2500:]: reply=b"y\\n"
+            elif b"starts automatically on boot" in tail: reply=b"y\\n"
+            else: reply=b"\\n"
+            os.write(fd,reply); pending=b""
+    elif time.time()-last>10: break
+if st is None:
+    for _ in range(60):
+        try: w,s=os.waitpid(pid,os.WNOHANG)
+        except ChildProcessError: st="reaped"; break
+        if w: st=s; break
+        time.sleep(0.05)
+sys.stdout.write(buf.decode(errors="replace"))
+print("\\n---EXIT", (os.WEXITSTATUS(st) if isinstance(st,int) and os.WIFEXITED(st) else st))
+`;
+
+// A fresh isolated root: its own HOME, its own OURS_CONFIG, its own fake bins. Returns a
+// `run()` that can be called repeatedly against the SAME root (for idempotency).
+function isolatedRoot(opts = {}, extraEnv = {}) {
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-tg-'));
+  const bin = join(tmp, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const log = join(tmp, 'calls.log');
+  writeFileSync(log, '');
+  fakeBins(bin, opts);
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith('OURS_') && key !== 'ANSWER_BROKER'),
+  );
+  const env = {
+    ...inherited,
+    PATH: `${bin}:${process.env.PATH}`,
+    CALLLOG: log,
+    HOME: tmp,
+    SHELL: '/bin/bash',
+    OURS_CONFIG: join(tmp, '.ours', 'config.json'),
+    OURS_STATE_DIR: join(tmp, '.ours'),
+    ...extraEnv,
+  };
+  const run = (installer = INSTALL_MJS) => ({
+    out: execFileSync('python3', ['-c', PTY_TELEGRAM, installer], { encoding: 'utf8', timeout: 180_000, env }),
+    calls: readFileSync(log, 'utf8'),
+  });
+  return { tmp, bin, log, env, run };
+}
+
+const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
+
+test('fresh isolated root: the Telegram connector is pointed at THIS daemon before its service is installed',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const root = isolatedRoot({ daemon: 'absent' }, { ANSWER_BROKER: 'wss://broker.example.test' });
+  const { out, calls } = root.run();
+  assert.match(out, /---EXIT 0/, 'the run completes cleanly');
+
+  // The daemon this install actually built (the port is probe-dependent, so read it back).
+  const daemonCfg = readJson(join(root.tmp, '.ours', 'config.json'));
+  assert.ok(Number.isInteger(daemonCfg.port), 'daemon config carries a numeric port');
+  assert.equal(daemonCfg.brokerUrl, 'wss://broker.example.test', 'daemon took the custom broker');
+
+  // The connector's OWN config now names that exact daemon.
+  const tgPath = join(root.tmp, '.ours-telegram', 'config.json');
+  assert.ok(existsSync(tgPath), 'the installer writes the connector config it would otherwise never get');
+  const tg = readJson(tgPath);
+  assert.equal(tg.daemonUrl, `http://127.0.0.1:${daemonCfg.port}`,
+    'connector points at THIS daemon, not the SDK built-in 127.0.0.1:3050');
+  assert.equal(tg.daemonStateDir, join(root.tmp, '.ours'),
+    'the state directory is selected too — an endpoint alone is refused by the SDK guard');
+  assert.equal(tg.brokerUrl, 'wss://broker.example.test',
+    'a pre-0.3.3 connector, which meets the daemon at a broker instead, gets the same broker');
+  assert.equal(statSync(tgPath).mode & 0o777, 0o600, 'written 0600 like every other ours config');
+
+  // ORDERING: install-service bakes what it resolves into the unit, so the config had to exist
+  // BEFORE it ran. The fake snapshots the file at that moment.
+  assert.match(calls, /ours-tg-connector install-service/, 'the connector service was installed');
+  const snapshot = `${root.log}.tgsnapshot`;
+  assert.ok(existsSync(snapshot), 'the connector config already existed when install-service ran');
+  assert.deepEqual(readJson(snapshot), tg, 'install-service saw the final daemon selection, not a later one');
+
+  // Still exactly ONE daemon: nothing in the run starts a second one.
+  assert.equal(calls.match(/^ours-mcp start$/gm)?.length, 1, 'the daemon is started exactly once');
+  assert.doesNotMatch(calls, /ours-tg-connector (start|serve)/, 'the connector never starts a daemon of its own');
+  rmSync(root.tmp, { recursive: true, force: true });
+});
+
+test('idempotent re-run: an unchanged daemon selection rewrites nothing',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const root = isolatedRoot({ daemon: 'absent' });
+  root.run();
+  const tgPath = join(root.tmp, '.ours-telegram', 'config.json');
+  const first = readFileSync(tgPath, 'utf8');
+  // Keep a user-added key to prove a re-run preserves what it does not own.
+  writeFileSync(tgPath, JSON.stringify({ ...JSON.parse(first), sttModel: 'user-chosen' }, null, 2) + '\n', { mode: 0o600 });
+  const second = root.run();
+  assert.match(second.out, /already points at this daemon/, 'the re-run reports no change instead of rewriting');
+  const after = readJson(tgPath);
+  assert.equal(after.sttModel, 'user-chosen', 'keys the installer does not own survive a re-run');
+  assert.equal(after.daemonUrl, JSON.parse(first).daemonUrl, 'the daemon selection is unchanged');
+  rmSync(root.tmp, { recursive: true, force: true });
+});
+
+test('a failed boot-service never leaves the deployment without its one daemon', () => {
+  const { out, calls, tmp } = runInstall({ daemon: 'absent', serviceFails: true });
+  // install-service stops the daemon first, then fails — the installer must put it back.
+  const serviceAt = calls.indexOf('ours-mcp install-service');
+  assert.ok(serviceAt >= 0, 'the boot-service step ran');
+  const startsAfter = calls.slice(serviceAt).match(/^ours-mcp start$/gm)?.length ?? 0;
+  assert.equal(startsAfter, 1, 'the daemon is restarted after the failed boot-service step');
+  assert.match(out, /boot-service not installed/, 'the boot-service failure is still reported honestly');
+  assert.match(out, /ours core ready/, 'and the daemon is genuinely ready again');
+  // The proof it is really up: create-root only succeeds against a running daemon.
+  assert.match(out, /Your human identity/, 'the identity step runs');
+  assert.doesNotMatch(out, /daemon isn't reachable/, 'the daemon is reachable for the identity step');
+  assert.match(out, /running; no boot service/, 'the summary states exactly what was and was not achieved');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+// --- channel: a nightly installer must build a nightly stack, a stable one must not ------------
+// tg-connector's nightly is not merely newer — 0.3.2 hosts its own ADAPT wrapper while
+// 0.3.3-nightly.1 attaches to the shared daemon over /api/v1, which only the SDK-based daemon
+// serves. Mixing tags across that boundary is a split-brain deployment.
+test('channel follows the installer\'s own version unless the environment says otherwise', () => {
+  const nightlyPkg = { version: '0.17.0-nightly.1' };
+  const stablePkg = { version: '0.17.0' };
+  // Same rule the installer applies to its own package.json version.
+  assert.equal(resolveChannel('', nightlyPkg.version), 'nightly', 'a nightly build installs nightlies');
+  assert.equal(resolveChannel('', stablePkg.version), 'latest', 'a stable build never consumes a nightly');
+  assert.equal(resolveChannel('latest', nightlyPkg.version), 'latest', 'the environment can pin a nightly installer to stable');
+  assert.equal(resolveChannel('nightly', stablePkg.version), 'nightly', 'and can opt a stable installer into nightlies');
+});
+
+test('a packaged nightly installer installs the nightly Telegram connector and daemon', () => {
+  // Build the artifact the way the nightly publish does: the same files, with the -nightly.N
+  // version the bump script stamps into package.json before `npm publish --tag nightly`.
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-pkg-'));
+  const stage = join(tmp, 'pkg');
+  mkdirSync(stage, { recursive: true });
+  cpSync(join(PKG, 'lib'), join(stage, 'lib'), { recursive: true });
+  cpSync(INSTALL_MJS, join(stage, 'install.mjs'));
+  const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'));
+  writeFileSync(join(stage, 'package.json'), JSON.stringify({ ...pkg, version: '0.17.0-nightly.1' }, null, 2));
+
+  const bin = join(tmp, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const log = join(tmp, 'calls.log');
+  writeFileSync(log, '');
+  fakeBins(bin, { daemon: 'absent' });
+  const out = execFileSync('node', [join(stage, 'install.mjs')], {
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      CALLLOG: log,
+      HOME: tmp,
+      SHELL: '/bin/bash',
+      OURS_ASSUME_YES: '1',
+      NO_COLOR: '1',
+      OURS_CONFIG: join(tmp, '.ours', 'config.json'),
+    },
+    encoding: 'utf8',
+  });
+  const calls = readFileSync(log, 'utf8');
+  assert.match(calls, /npm i -g @ours\.network\/mcp@nightly/, 'the nightly installer installs the nightly daemon');
+  assert.match(calls, /npm i -g @ours\.network\/codex@nightly/, 'and the nightly harness launcher');
+  assert.match(calls, /npm i -g @ours\.network\/fleet@latest/, 'but fleet stays @latest — it publishes no nightly');
+  assert.doesNotMatch(calls, /@ours\.network\/mcp@latest/, 'no stable/nightly mixing within the suite');
+  assert.ok(out.length > 0, 'the packaged installer runs from its own files');
+  rmSync(tmp, { recursive: true, force: true });
 });
 
 // --- packaging: publishable standalone @ours.network/install (bin ships + zero external deps) ---

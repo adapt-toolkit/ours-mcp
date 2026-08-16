@@ -42,11 +42,29 @@ const CHANNEL_TRACKING_PKGS = new Set(['mcp', 'tg-connector', 'claude-code', 'co
 const STABLE_ONLY_PKGS = new Set(['fleet']);
 
 // Normalize a raw channel selection to 'latest' | 'nightly'. Anything unrecognized
-// (incl. undefined/'') falls back to the safe default 'latest' — never guesses a tag.
-export function resolveChannel(raw) {
+// (incl. undefined/'') falls back to the installer's OWN channel — never guesses a tag.
+//
+// WHY THE INSTALLER'S OWN VERSION IS A CHANNEL SIGNAL. `@ours.network/install` is
+// published on both dist-tags from the same lockstep bump (.github/workflows/scripts/
+// bump-versions.sh), so a nightly build carries a `-nightly.N` version and a stable
+// build does not. Without this, `npm i -g @ours.network/install@nightly && ours-install`
+// installed the nightly INSTALLER but @latest for everything it installs — which since
+// tg-connector 0.3.3-nightly.1 is not merely older but a DIFFERENT ARCHITECTURE (0.3.2
+// hosts its own ADAPT wrapper; the nightly attaches to the shared daemon over /api/v1,
+// which only the SDK-based daemon serves). Mixing the two tags across that boundary is
+// exactly the split-brain deployment this must not produce. A stable installer stays on
+// @latest and can never consume a nightly; an explicit OURS_CHANNEL always wins over both.
+export function resolveChannel(raw, selfVersion = '') {
   const v = String(raw || '').trim().toLowerCase();
   if (v === 'nightly' || v === 'prerelease' || v === 'next') return 'nightly';
-  return DEFAULT_CHANNEL; // 'latest' and everything else
+  if (v === 'latest' || v === 'stable') return DEFAULT_CHANNEL;
+  if (v) return DEFAULT_CHANNEL; // unrecognized: never guess, never inherit
+  return isNightlyVersion(selfVersion) ? 'nightly' : DEFAULT_CHANNEL;
+}
+
+// A published nightly carries the `-nightly.N` prerelease suffix the bump script writes.
+export function isNightlyVersion(version) {
+  return /-nightly\.\d+/.test(String(version || ''));
 }
 
 // The npm dist-tag to install for one package key under a channel. fleet is ALWAYS
@@ -69,6 +87,79 @@ export function pkgSpec(pkgKey, channel = DEFAULT_CHANNEL) {
 export const RESERVED_PORTS = [3051];
 export const DEFAULT_PORT = 3050;
 export const DEFAULT_BROKER = 'wss://broker1.ours.network';
+
+// ── Handing the Telegram connector the ONE shared daemon ───────────────────────
+// The connector has its OWN config file and never inherits the daemon's. Two
+// generations of it are in the wild and the installer must satisfy BOTH, because
+// which one gets installed is a channel decision (see pkgTag):
+//
+//   @nightly (>=0.3.3-nightly.1) — SDK-based. It ATTACHES to an already-running
+//     ours daemon over /api/v1 and has NO broker at all. It selects the daemon
+//     through @ours.network/sdk's resolveDaemonConfig, whose behaviour we verified
+//     against the published SDK 0.1.2 (the version the nightly pins):
+//       · with no overrides it reports configPath: null — the daemon's
+//         ~/.ours/config.json is NEVER read implicitly, so a daemon on any port
+//         other than the built-in 3050 is simply MISSED.
+//       · pointing OURS_CONFIG at that file, or passing an endpoint alone, throws
+//         INCOHERENT_SELECTION: "the endpoint was selected … but the state
+//         directory is the built-in default" — a deliberate credential-disclosure
+//         guard that refuses BEFORE any token is read.
+//       · endpoint AND state dir together resolve cleanly.
+//     So the ONLY correct contract is to give it BOTH daemonUrl and daemonStateDir.
+//
+//   @latest (<=0.3.2) — the older self-hosting ADAPT wrapper. It ignores
+//     daemonUrl/daemonStateDir and meets the daemon at a BROKER instead, so its
+//     brokerUrl must match the daemon's or the two can never see each other.
+//
+// Writing all three keys satisfies whichever generation is installed: each reads
+// only the keys it understands and ignores the rest. This matters at INSTALL time
+// specifically, because `ours-tg-connector install-service` BAKES its resolved
+// values into the service unit as environment variables, and env outranks the
+// config file forever after — a divergence created here can never be repaired by
+// editing that file.
+
+// The daemon's loopback endpoint. The daemon always binds 127.0.0.1 (never a
+// hostname), so this is the address the connector must be given.
+export function daemonEndpoint(port) {
+  return `http://127.0.0.1:${port}`;
+}
+
+// The broker the whole deployment shares, for a <=0.3.2 connector.
+// Precedence: what the user chose in THIS run > what the running daemon actually
+// resolved (`ours-mcp status`, which already accounts for OURS_BROKER_URL) > what
+// the daemon's config file says > the built-in default (identical to the daemon's
+// DEFAULT_CONFIG.brokerUrl, so "no answer anywhere" still agrees).
+export function resolveSharedBroker({ chosenBroker, statusBroker, configBroker } = {}) {
+  for (const candidate of [chosenBroker, statusBroker, configBroker]) {
+    const v = validateBroker(candidate ?? '');
+    if (!v.empty && v.ok) return v.value;
+  }
+  return DEFAULT_BROKER;
+}
+
+// The Telegram connector's own config file (mirrors its src/config.ts: OURS_TG_CONFIG,
+// else <home>/.ours-telegram/config.json — a FIXED location, independent of its stateDir).
+export function tgConfigPath(env = {}, home = '') {
+  return env.OURS_TG_CONFIG || `${home}/.ours-telegram/config.json`;
+}
+
+// Decide whether the connector's config needs a write, and what to write. Returns
+// { changed, text, previous } — `changed` is false when the file already names this
+// exact daemon and broker, so an idempotent re-run touches nothing. Unrelated keys
+// the user or the connector added (bot tokens, STT settings) are preserved.
+export function planTgDaemonConfig(existing, { daemonUrl, daemonStateDir, brokerUrl } = {}) {
+  const base = existing && typeof existing === 'object' ? existing : {};
+  const str = (v) => (typeof v === 'string' ? v : '');
+  const previous = {
+    daemonUrl: str(base.daemonUrl),
+    daemonStateDir: str(base.daemonStateDir),
+    brokerUrl: str(base.brokerUrl),
+  };
+  const next = { daemonUrl, daemonStateDir, brokerUrl };
+  const changed = Object.entries(next).some(([k, v]) => v !== undefined && previous[k] !== v);
+  if (!changed) return { changed: false, text: '', previous };
+  return { changed: true, text: mergeConfig(base, next), previous };
+}
 
 // suggestPort: pick a usable HTTP port. If `desired` is free and not reserved, keep it. Otherwise
 // scan upward from 3060 (the brief's suggested alternate band) for the first free, non-reserved

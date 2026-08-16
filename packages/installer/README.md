@@ -64,8 +64,8 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
      prints the exact manual commands and continues — it **never dead-ends**.
    - **3/4 ours-fleet** — makes your harnesses persistent, always-online agent teams that survive
      a reboot; runs `ours-fleet init`. Default **Yes**.
-   - **4/4 Telegram connector** — install-only (no bot tokens here), then optionally as a
-     boot service.
+   - **4/4 Telegram connector** — install-only (no bot tokens here), **pointed at the daemon
+     step 1 just built**, then optionally as a boot service.
 4. **Summary + hand-off** — a recap (skipped/failed rows call out the fix), then a **literal
    copy-paste prompt** (root identity + fleet + Telegram) with the steps for any skipped/failed
    component dropped out. Copied to the clipboard where supported.
@@ -73,6 +73,48 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
 The human identity is created idempotently after the daemon becomes reachable. Because
 `curl … | bash` gives the script its input over the pipe, every prompt is read from the
 controlling terminal (`/dev/tty`), so the flow still works piped.
+
+## One daemon, and everything pointed at it
+
+A clean deployment installs, configures and starts **one** ours daemon first, then wires every
+client to that same daemon. What that takes differs per client:
+
+- **The harness plugins** need nothing extra: each is `ours-mcp proxy`, which reads the daemon's
+  own config (`OURS_CONFIG`, else `~/.ours/config.json`). `autoStart` is off by default, so a proxy
+  whose daemon is down reports it rather than quietly starting a second one.
+- **The Telegram connector keeps its own config file** and never inherits the daemon's, so the
+  installer writes `~/.ours-telegram/config.json` (honouring `OURS_TG_CONFIG`) **before** the
+  connector is started or installed as a service — `install-service` bakes whatever it resolves
+  into the service unit as environment variables, and those outrank the file from then on.
+  Three keys are written, so whichever connector generation is installed finds what it reads:
+  - `daemonUrl` + `daemonStateDir` — for `>=0.3.3-nightly.1`, which attaches to the running daemon
+    over `/api/v1`. **Both** are required: with neither, its SDK never reads `~/.ours/config.json`
+    and falls back to the built-in `127.0.0.1:3050`, missing a daemon on any other port; with the
+    endpoint alone it refuses outright (`INCOHERENT_SELECTION` — the daemon's API token belongs to
+    a state directory, so selecting an endpoint without one would disclose that token).
+  - `brokerUrl` — for `<=0.3.2`, which hosts its own ADAPT wrapper and meets the daemon at a broker
+    instead. It must match the daemon's or the two can never see each other.
+
+  A re-run that changes nothing rewrites nothing, and keys the installer does not own are preserved.
+
+If `ours-mcp install-service` fails (no systemd user bus, no linger, a container, WSL without
+systemd) it has already **stopped** the daemon it was about to supervise. The installer restarts it
+and says plainly that the boot service is missing — a clean deployment never ends with no daemon
+while the summary claims success.
+
+## Release channel
+
+`OURS_CHANNEL=nightly` (or `OURS_INSTALL_CHANNEL`) installs the `nightly` dist-tag for the packages
+that publish one — `mcp`, `tg-connector`, and the `claude-code` / `codex` / `hermes` launchers —
+while `@ours.network/fleet` stays `@latest` always (it publishes no nightly).
+
+**With no explicit selection the installer follows its own version.** A published nightly build
+carries the `-nightly.N` suffix the release bump stamps, so `npm i -g @ours.network/install@nightly`
+builds a nightly stack, and a stable installer can never consume a nightly. This is load-bearing
+rather than cosmetic: across `tg-connector` 0.3.2 → 0.3.3-nightly.1 the connector stopped hosting
+its own ADAPT wrapper and became a client of the shared daemon, so mixing tags across that boundary
+pairs a connector that needs `/api/v1` with a daemon that does not serve it. `OURS_CHANNEL` still
+overrides in both directions.
 
 ## Non-interactive / CI / safe dry-run
 
@@ -96,6 +138,9 @@ is reported and left unchanged.
 | `OURS_INSTALL_DRY_RUN` | walk the flow without installing or changing anything |
 | `OURS_NPM` | npm binary to use (default `npm`) |
 | `OURS_CONFIG` | daemon config file location (default `~/.ours/config.json`) |
+| `OURS_STATE_DIR` | daemon state directory (default `~/.ours`) — also what the Telegram connector is told to expect |
+| `OURS_TG_CONFIG` | Telegram connector config file location (default `~/.ours-telegram/config.json`) |
+| `OURS_CHANNEL` | `nightly` or `latest`; unset follows the installer's own version |
 
 ## Uninstall
 
@@ -142,5 +187,6 @@ OURS_UNINSTALL_DAEMON=yes \
   published components.
 - **Idempotent + safe to re-run.** A re-run adds a skipped piece, re-points the plugins, or (only
   when you say yes) updates a component; an already-current daemon is left untouched, its running
-  port and complete voice setup are reused everywhere. Bot tokens and fleet roles remain in the
+  port and complete voice setup are reused everywhere — and the Telegram connector's daemon
+  selection is rewritten only if it actually changed. Bot tokens and fleet roles remain in the
   copy-paste hand-off; provider keys never enter that prompt or agent chat.
