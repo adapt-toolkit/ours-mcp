@@ -159,6 +159,7 @@ platforms:
     const cfg = readFileSync(join(H, 'config.yaml'), 'utf8');
     assert.doesNotMatch(cfg, /ours-wake|ours_wake|platforms:|deadbeefsecret|secret:/, 'no connector wake-route/secret left');
     assert.match(cfg, /command: "ours-mcp"/, 'current mcp server block present');
+    assert.match(cfg, /args: \["proxy", "--application", "hermes"\]/, 'managed block carries the durable Hermes association');
     assert.equal((cfg.match(/# >>> ours\.network plugin/g) || []).length, 1, 'exactly one managed block');
   } finally {
     rmSync(D, { recursive: true, force: true });

@@ -19,7 +19,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { banner, heading, c, openTty, makeWriter, closeSync } from './lib/ui.mjs';
 import { askLine, checkboxSelect } from './lib/prompt.mjs';
-import { canonHarnesses } from './lib/logic.mjs';
+import { canonHarnesses, resolveChannel } from './lib/logic.mjs';
+import { runNightlyUninstaller } from './lib/nightly-uninstall.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
 const HOME = homedir();
@@ -28,6 +29,11 @@ const CODEX_DIR = process.env.CODEX_DIR || join(HOME, '.codex');
 const SKILLS_DIR = process.env.SKILLS_DIR || join(HOME, '.agents', 'skills');
 const OURS_STATE_DIR = process.env.OURS_STATE_DIR || join(HOME, '.ours');
 const ASSUME_YES = !!process.env.OURS_ASSUME_YES;
+const packageVersion = (() => {
+  try { return JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version || ''; }
+  catch { return ''; }
+})();
+const CHANNEL = resolveChannel(process.env.OURS_CHANNEL || process.env.OURS_INSTALL_CHANNEL, packageVersion);
 
 const say = (s) => process.stdout.write(`ours: ${s}\n`);
 const line = (s = '') => process.stdout.write(`${s}\n`);
@@ -38,7 +44,10 @@ const YAML_END = '# <<< ours.network plugin';
 const MD_START = '<!-- >>> ours.network plugin (managed block) -->';
 const MD_END = '<!-- <<< ours.network plugin -->';
 
-const run = (bin, args) => spawnSync(bin, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const run = (bin, args, { env } = {}) => spawnSync(bin, args, {
+  encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  env: env ? { ...process.env, ...env } : process.env,
+});
 
 // --- safe removal helpers ----------------------------------------------------------------------
 function rmDir(d) { if (d && existsSync(d)) { rmSync(d, { recursive: true, force: true }); say(`  removed ${d}`); } }
@@ -114,6 +123,10 @@ function main() {
   line(banner());
   line(c.bold('  ours.network uninstaller'));
   say('Removes only what the ours installers created. Nothing is removed until you confirm.');
+
+  if (CHANNEL === 'nightly') {
+    return runNightlyUninstaller({ ttyFd, write, run, npm: NPM, assumeYes: ASSUME_YES, finish });
+  }
 
   // --- 1) choose what to remove ----------------------------------------------------------------
   let selected = [];

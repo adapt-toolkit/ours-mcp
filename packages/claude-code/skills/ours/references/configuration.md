@@ -1,8 +1,9 @@
 # ours configuration & self-service
 
-The daemon is a **shared, host-wide singleton** reachable only on `127.0.0.1`
-(loopback — there is no host knob, by design). Configuration is resolved
-**env var > `~/.ours/config.json` > built-in default**:
+Each daemon is local-only on `127.0.0.1`. Nightly can host multiple isolated
+profiles when each has a distinct port, state directory, config, and service.
+The Claude proxy and hooks resolve **explicit env > Claude's Nightly registry
+association > `~/.ours/config.json` > built-in default**:
 
 | Setting | Env | config.json | Default |
 |---|---|---|---|
@@ -12,9 +13,10 @@ The daemon is a **shared, host-wide singleton** reachable only on `127.0.0.1`
 | GC interval (ms) | `OURS_GC_INTERVAL_MS` | `gcIntervalMs` | `3600000` |
 | Auto-start daemon | `OURS_AUTOSTART` | `autoStart` | `false` |
 
-**The port is shared.** The connector dials `127.0.0.1:<OURS_PORT>` and the
-daemon binds the same port — both read `OURS_PORT`/`config.json`. Change it
-**once in shared config**, never per-side, or the connector won't find the daemon.
+The shipped proxy passes `--application claude-code`; do not add a second ours MCP
+registration. Registry drift or authentication failure is an error with rerun-Nightly
+guidance, never a fallback to another daemon. Explicit `OURS_CONFIG`, `OURS_PORT`,
+and `OURS_STATE_DIR` retain precedence.
 
 **Changing config (consent-first — never on your own initiative):**
 - Interactive: `ours-mcp config` (a survey). It needs a TTY, so ask the **user**

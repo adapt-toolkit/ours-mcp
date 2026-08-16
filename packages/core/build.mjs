@@ -133,6 +133,14 @@ await build({
   outfile: resolve(dist, 'service-instance.js'),
 });
 
+// Nightly installer profile association parsing/validation. cli.ts inlines it;
+// the standalone output is used by focused fail-closed resolver tests.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/association.ts')],
+  outfile: resolve(dist, 'association.js'),
+});
+
 // Structured daemon-startup progress + bounded wait helpers. index.ts and
 // cli.ts inline these, while the standalone output keeps the deterministic
 // timeout/rendering contract directly unit-testable.

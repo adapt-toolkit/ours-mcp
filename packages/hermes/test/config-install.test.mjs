@@ -22,9 +22,12 @@ test('config without our top-level keys -> append', () => {
   assert.equal(planConfigInstall(cfg).action, 'append');
 });
 
-test('already-installed config (sentinel present) -> noop', () => {
-  const cfg = `model:\n  provider: nous\n\n${SENTINEL}\nmcp_servers:\n  ours:\n    command: ours-mcp\n`;
-  assert.equal(planConfigInstall(cfg).action, 'noop');
+test('already-associated managed block is idempotent; legacy block is migrated', () => {
+  assert.equal(planConfigInstall(BLOCK).action, 'noop');
+  const legacy = BLOCK.replace(', "--application", "hermes"', '');
+  assert.equal(planConfigInstall(legacy).action, 'replace');
+  const incomplete = `model:\n  provider: nous\n\n${SENTINEL}\nmcp_servers:\n`;
+  assert.equal(planConfigInstall(incomplete).action, 'manual');
 });
 
 test('existing mcp_servers: top-level -> manual (never corrupt)', () => {
@@ -37,7 +40,7 @@ test('rendered block wires the MCP server + sentinel, and NO webhook/route/secre
   assert.match(BLOCK, /mcp_servers:/);
   // MCP server points directly at the globally-installed daemon proxy
   assert.match(BLOCK, /ours:\s*\n\s*command:\s*["']?ours-mcp["']?/);
-  assert.match(BLOCK, /args:\s*\[\s*["']proxy["']\s*\]/);
+  assert.match(BLOCK, /args:\s*\[\s*["']proxy["']\s*,\s*["']--application["']\s*,\s*["']hermes["']\s*\]/);
   // the connector/gateway approach is gone — no webhook platform, route, or secret in the block
   assert.doesNotMatch(BLOCK, /platforms:/);
   assert.doesNotMatch(BLOCK, /ours-wake/);

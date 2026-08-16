@@ -42,6 +42,19 @@ fail atomically without retrieving or writing any file.
 | `OURS_BROKER_URL` | `wss://broker1.ours.network` | The ADAPT broker to connect through. Set to `ws://localhost:9000` for a local broker. |
 | `OURS_SERVICE_NAME` | *(none)* | Boot-service instance name (also `serviceName` in `config.json`). See below. |
 
+Nightly installers can associate a client application with one local daemon profile in
+`~/.ours/installer-profiles.json`. Platform shims pass `--application claude-code`, `codex`, or
+`hermes` only to the client commands `proxy` and `watch`; lifecycle commands reject the flag.
+Explicit `OURS_CONFIG`, `OURS_PORT`, or `OURS_STATE_DIR` wins. Otherwise the association selects
+the config before the historical `~/.ours/config.json` / `3050` fallback.
+
+An associated client fails closed: the selected config must still resolve the registered port and
+state directory; unauthenticated `/info` must report that state directory before the protected API
+is probed; and authentication must succeed. Drift, an unreachable daemon, or a 401/403 instructs
+the operator to rerun the Nightly installer—there is no silent fallback. Token precedence remains
+`OURS_API_TOKEN` → selected config `apiToken` → selected state directory `daemon-token`; tokens are
+never read from or written to the registry. Installed associations force client auto-start off.
+
 ### Running more than one daemon on a host
 
 `install-service` bakes the resolved port, broker and state directory into a single boot
@@ -55,6 +68,10 @@ Give a daemon an instance name and it gets its own definition instead:
 OURS_CONFIG=~/.ours-tg/config.json OURS_SERVICE_NAME=tg ours-mcp install-service
 # → ours-tg.service  /  solutions.adaptframework.ours.tg
 ```
+
+Named definitions also persist that exact `OURS_CONFIG` path. This is required because visibility,
+API-token source, transcription, GC, and other config-only settings must resolve from the same file
+after reboot; persisting only port/state/broker would not preserve an auth-isolated profile.
 
 With no name — the default, and every existing deployment — the unit and label are exactly what
 they always were. A name must be 1–32 characters of letters, digits, hyphen or underscore,

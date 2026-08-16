@@ -87,6 +87,56 @@ The human identity is created idempotently after the daemon becomes reachable. B
 `curl … | bash` gives the script its input over the pipe, every prompt is read from the
 controlling terminal (`/dev/tty`), so the flow still works piped.
 
+## Nightly-only profile flow
+
+The `nightly` channel uses a topology-first flow. This is a hard release boundary: `latest`
+keeps the five-step behavior, prompts, package tags, files, service names, and uninstall output
+described above and never reads the profile registry.
+
+Nightly first discovers only configured local candidates: the registry, the historical default
+config, known `~/.ours-tg` / `~/.ours-rooms` configs, Telegram and Rooms daemon blocks, known ours
+systemd/launchd definitions, and an exact manual entry. It never scans a port range. Hosts are
+limited to `localhost` / `127.0.0.1` (stored as `127.0.0.1`); remote names, URLs, credentials,
+`0.0.0.0`, IPv6 loopback, and HTTPS are rejected. A candidate is deduplicated only when both its
+endpoint and canonical state directory agree. Port, state, service, or config collisions stop the
+plan before mutation.
+
+The durable registry is `~/.ours/installer-profiles.json` (schema v1, atomic mode `0600`):
+
+```json
+{
+  "version": 1,
+  "profiles": {
+    "default": {
+      "label": "Default ours daemon",
+      "host": "127.0.0.1",
+      "port": 3050,
+      "configPath": "/home/me/.ours/config.json",
+      "stateDir": "/home/me/.ours",
+      "serviceName": "",
+      "ownership": { "config": true, "service": true, "state": true }
+    }
+  },
+  "harnessAssociations": { "codex": "default" }
+}
+```
+
+It stores topology and explicit installer ownership only—never tokens, token sources, status,
+PIDs, versions, or running state. `OURS_INSTALL_PROFILES` is a test/operator override. Telegram
+and Rooms remain authoritative in their own configs; their associations are reverse-indexed from
+those real daemon blocks rather than copied into the registry.
+
+After selecting or creating one profile, Nightly selects Claude Code, Codex/`ours-codex`, Hermes,
+Telegram, and Rooms for that exact daemon, shows one review, and confirms once. A harness already
+associated elsewhere requires explicit reassignment. The global `@ours.network/mcp@nightly`
+package is installed/updated at most once; only the selected installer-owned daemon is restarted.
+Snapshotted connector/registry config bytes roll back if validation or service apply fails. Npm changes and
+new identity state are intentionally not destroyed during rollback.
+
+`OURS_ASSUME_YES=1` selects or creates only the historical `3050` / `~/.ours` default, preserves
+existing harness assignments, assigns otherwise-unassociated detected harnesses to it, keeps the
+current harness/fleet defaults, and skips Telegram and Rooms.
+
 ## Daemon topology
 
 A clean deployment installs, configures and starts **one shared** ours daemon first, then wires
@@ -244,6 +294,17 @@ directory (`~/.ours`), and the `ours-mcp` daemon. It removes **only** what the i
 created, and guards the two destructive items — the data directory and the daemon — behind
 an explicit typed `yes`.
 
+On Nightly, uninstall is profile-aware. Removing a harness removes only its one association and
+managed plugin artifacts. A daemon/profile cannot be forgotten or removed while any harness,
+Telegram, or Rooms still depends on it. A dependent connector can be explicitly detached (stop its
+service and remove only its daemon target), uninstalled, or reassigned to a different retained
+profile; connector secrets and unrelated settings are preserved. These connector changes roll back
+if exact daemon removal or the registry commit fails. Only a profile with `ownership.service: true`
+may have its exact named service uninstalled; external profiles are forgotten as metadata only.
+Data removal is a separate confirmation that requires typing the exact state path and explicitly
+warns about identity/key loss. The global MCP package is retained while any profile/application
+still needs it.
+
 Headless (no terminal), drive it with environment variables:
 
 ```sh
@@ -258,6 +319,10 @@ OURS_UNINSTALL_DAEMON=yes \
 | `OURS_UNINSTALL` | harnesses to remove (space/comma list of `claude-code codex hermes`, or `all`) |
 | `OURS_UNINSTALL_DATA` | `yes` — remove the ours data directory (`~/.ours`) |
 | `OURS_UNINSTALL_DAEMON` | `yes` — remove the `ours-mcp` daemon |
+| `OURS_UNINSTALL_PROFILE` | Nightly profile id to forget/remove |
+| `OURS_UNINSTALL_FORGET_PROFILE` | Nightly `yes` — forget external/profile metadata only |
+| `OURS_UNINSTALL_TELEGRAM` | Nightly dependency action: `detach`, `uninstall`, or `reassign:<profile-id>` |
+| `OURS_UNINSTALL_ROOMS` | Nightly dependency action: `detach`, `uninstall`, or `reassign:<profile-id>` |
 
 ## Notes
 

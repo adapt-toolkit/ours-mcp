@@ -40,6 +40,7 @@ import {
   coworkSupportsExternalDaemon, COWORK_EXTERNAL_MIN_VERSION,
 } from './lib/logic.mjs';
 import { atomicWriteConfig } from './lib/config.mjs';
+import { runNightlyInstaller } from './lib/nightly-install.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
 // Release channel: OURS_CHANNEL=nightly installs each package's PRERELEASE dist-tag —
@@ -304,6 +305,16 @@ async function main() {
     line(warn('No Claude Code, Codex, or Hermes found on this machine.'));
     line(info('Install one of them first, then re-run ours-install to wire it up.'));
     finish(ttyFd); return;
+  }
+
+  // HARD RELEASE BOUNDARY. Nightly owns the topology-first profile flow. The
+  // latest/stable consumer-first implementation below remains untouched and
+  // never reads or writes installer-profiles.json or emits --application.
+  if (CHANNEL === 'nightly') {
+    return runNightlyInstaller({
+      harnesses, ttyFd, interactive, write, yes, ask, cont, dry: DRY,
+      npm: NPM, run, runAsync, act, actSpin, finish,
+    });
   }
 
   // Daemon state up front (decides first-install vs update, and whether Step 0 runs at all).

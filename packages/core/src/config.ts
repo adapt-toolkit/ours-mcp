@@ -9,6 +9,13 @@ import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve, join, dirname, basename } from 'node:path';
 import type { SttUserConfig, SttCustomTemplate } from './transcribe';
+import {
+  resolveRuntimeAssociation,
+  type AssociatedApplication,
+} from './association';
+import {
+  DEFAULT_RUNTIME_PORT, defaultRuntimeStateDir, finiteConfigNumber, stringConfigValue,
+} from './runtime-config-values';
 
 // How reachable the daemon's local HTTP surface (the messaging + notification
 // endpoints) is to OTHER local OS users. The port always binds 127.0.0.1, so
@@ -51,21 +58,27 @@ export interface OursConfig {
 
 export const DEFAULT_CONFIG: OursConfig = {
   brokerUrl: 'wss://broker1.ours.network',
-  port: 3050,
-  stateDir: resolve(homedir(), '.ours'),
+  port: DEFAULT_RUNTIME_PORT,
+  stateDir: defaultRuntimeStateDir(),
   gcIntervalMs: 3_600_000,
   autoStart: false,
   apiVisibility: 'owner',
 };
 
-export function configPath(): string {
-  return process.env.OURS_CONFIG ?? join(homedir(), '.ours', 'config.json');
+export interface LoadConfigOptions {
+  application?: AssociatedApplication;
 }
 
-function readFileConfig(): Partial<OursConfig> {
+export function configPath(options: LoadConfigOptions = {}): string {
+  if (process.env.OURS_CONFIG) return process.env.OURS_CONFIG;
+  const association = resolveRuntimeAssociation(options.application);
+  return association?.profile.configPath ?? join(homedir(), '.ours', 'config.json');
+}
+
+function readFileConfig(path = configPath()): Partial<OursConfig> {
   let raw: string;
   try {
-    raw = fs.readFileSync(configPath(), 'utf8');
+    raw = fs.readFileSync(path, 'utf8');
   } catch {
     return {};
   }
@@ -77,8 +90,10 @@ function readFileConfig(): Partial<OursConfig> {
   }
   const out: Partial<OursConfig> = {};
   if (typeof parsed.brokerUrl === 'string') out.brokerUrl = parsed.brokerUrl;
-  if (typeof parsed.port === 'number' && Number.isFinite(parsed.port)) out.port = parsed.port;
-  if (typeof parsed.stateDir === 'string') out.stateDir = resolve(parsed.stateDir);
+  const port = finiteConfigNumber(parsed.port);
+  if (port !== undefined) out.port = port;
+  const stateDir = stringConfigValue(parsed.stateDir);
+  if (stateDir !== undefined) out.stateDir = resolve(stateDir);
   if (typeof parsed.gcIntervalMs === 'number' && Number.isFinite(parsed.gcIntervalMs)) {
     out.gcIntervalMs = parsed.gcIntervalMs;
   }
@@ -122,14 +137,16 @@ function envInt(name: string): number | undefined {
   return Number.isNaN(n) ? undefined : n;
 }
 
-export function loadConfig(): OursConfig {
-  const file = readFileConfig();
+export function loadConfig(options: LoadConfigOptions = {}): OursConfig {
+  const association = resolveRuntimeAssociation(options.application);
+  const file = readFileConfig(association?.profile.configPath ?? configPath());
   return {
     brokerUrl: process.env.OURS_BROKER_URL ?? file.brokerUrl ?? DEFAULT_CONFIG.brokerUrl,
     port: envInt('OURS_PORT') ?? file.port ?? DEFAULT_CONFIG.port,
     stateDir: resolve(process.env.OURS_STATE_DIR ?? file.stateDir ?? DEFAULT_CONFIG.stateDir),
     gcIntervalMs: envInt('OURS_GC_INTERVAL_MS') ?? file.gcIntervalMs ?? DEFAULT_CONFIG.gcIntervalMs,
-    autoStart: envBool('OURS_AUTOSTART') ?? file.autoStart ?? DEFAULT_CONFIG.autoStart,
+    // An installed association is a client binding, never permission to start a daemon.
+    autoStart: association ? false : (envBool('OURS_AUTOSTART') ?? file.autoStart ?? DEFAULT_CONFIG.autoStart),
     apiVisibility: envVisibility() ?? file.apiVisibility ?? DEFAULT_CONFIG.apiVisibility,
     apiToken: process.env.OURS_API_TOKEN?.trim() || file.apiToken,
     serviceName: process.env.OURS_SERVICE_NAME?.trim() || file.serviceName,

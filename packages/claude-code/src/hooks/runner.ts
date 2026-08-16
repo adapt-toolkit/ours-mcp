@@ -21,10 +21,51 @@ import { resolve, join, dirname } from 'node:path';
 
 type HookKind = 'session-start' | 'user-prompt-submit';
 
-// Same resolution as the server (src/index.ts) so both read the same dir.
-const STATE_DIR = resolve(
-  process.env.OURS_STATE_DIR ?? resolve(homedir(), '.ours'),
-);
+function readJsonObject(path: string): Record<string, unknown> {
+  const value = JSON.parse(fs.readFileSync(path, 'utf8')) as unknown;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${path} must contain an object`);
+  return value as Record<string, unknown>;
+}
+
+// Hooks read body-free metadata directly, so they must resolve the same durable
+// application association as the proxy. Explicit state/config still wins.
+function hookStateDir(): string {
+  if (process.env.OURS_STATE_DIR) return resolve(process.env.OURS_STATE_DIR);
+  const home = homedir();
+  if (process.env.OURS_CONFIG) {
+    const config = readJsonObject(process.env.OURS_CONFIG);
+    return resolve(typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'));
+  }
+  if (!process.env.OURS_PORT) {
+    const registryPath = process.env.OURS_INSTALL_PROFILES ?? join(home, '.ours', 'installer-profiles.json');
+    if (fs.existsSync(registryPath)) {
+      const registry = readJsonObject(registryPath);
+      if (registry.version !== 1) throw new Error('unsupported installer profile registry version');
+      const associations = registry.harnessAssociations as Record<string, unknown> | undefined;
+      const profiles = registry.profiles as Record<string, unknown> | undefined;
+      const profileId = associations?.['claude-code'];
+      if (profileId !== undefined) {
+        if (typeof profileId !== 'string' || !profiles?.[profileId]) throw new Error('claude-code association names a missing profile');
+        const profile = profiles[profileId] as Record<string, unknown>;
+        if (profile.host !== '127.0.0.1' && profile.host !== 'localhost') throw new Error('claude-code association is not loopback');
+        if (typeof profile.configPath !== 'string' || typeof profile.stateDir !== 'string') throw new Error('claude-code association paths are invalid');
+        const config = readJsonObject(profile.configPath);
+        const configuredPort = Number(config.port ?? 3050);
+        const configuredState = resolve(typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'));
+        if (configuredPort !== Number(profile.port) || configuredState !== resolve(profile.stateDir)) {
+          throw new Error('claude-code association drifted from its selected config');
+        }
+        return resolve(profile.stateDir);
+      }
+    }
+  }
+  return resolve(home, '.ours');
+}
+
+const STATE_DIR: string | null = (() => {
+  try { return hookStateDir(); }
+  catch { return null; } // corrupt/drifted association: fail closed with a benign hook no-op
+})();
 
 // A workspace can pin itself to an identity by dropping this file at the repo
 // root (NOT under .claude/ — keeping it top-level lets users gitignore it by its
@@ -79,6 +120,7 @@ function readUnreadSnapshot(dir: string): Unread | null {
 }
 
 function collectUnread(): Unread[] {
+  if (!STATE_DIR) return [];
   let names: string[];
   try {
     names = fs
@@ -167,6 +209,7 @@ function findPinnedIdentity(start: string): IdentityPin | null {
 // An identity is "known" once the daemon has a state dir for it. Lets us tell
 // the agent whether to choose_identity (exists) or create_identity (new).
 function identityExists(name: string): boolean {
+  if (!STATE_DIR) return false;
   try {
     return fs.statSync(join(STATE_DIR, name)).isDirectory();
   } catch {
@@ -184,6 +227,7 @@ function identityExists(name: string): boolean {
 // (Tradeoff: bindings are daemon-global, so a concurrent session's binding also
 // suppresses it; the session-start directive still covers that session.)
 function anyIdentityBound(): boolean {
+  if (!STATE_DIR) return false;
   let snap: { pid?: unknown; bound?: unknown };
   try {
     snap = JSON.parse(fs.readFileSync(join(STATE_DIR, 'bindings.json'), 'utf8'));

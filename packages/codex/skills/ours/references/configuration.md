@@ -18,6 +18,11 @@ queries `/info`, verifies the authenticated notification API, and propagates tha
 profile to the plugin, hooks, and watcher. It never starts or changes the daemon. A stopped
 or incompatible selected daemon is an error.
 
+With no explicit `--ours-port`, `OURS_PORT`, `OURS_CONFIG`, or `OURS_STATE_DIR`, both standard
+Codex and `ours-codex` use Codex's association in `~/.ours/installer-profiles.json` before the
+historical default config. The selected config and daemon `/info.stateDir` must match the
+registry; drift/auth failures stop with rerun-Nightly guidance. The registry never stores tokens.
+
 Changing daemon configuration is separate operator work. Explain the impact and obtain
 explicit consent before editing or restarting anything. A changed state directory selects a
 different identity store. Use a distinct `OURS_CONFIG`, port, and state directory for a

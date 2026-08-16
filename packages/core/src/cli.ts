@@ -75,6 +75,14 @@ import {
   waitForStartup,
   type StartupWaitFailure,
 } from './startup-progress';
+import {
+  parseApplicationArgs,
+  assertApplicationCommand,
+  resolveRuntimeAssociation,
+  verifyRuntimeAssociation,
+  type AssociatedApplication,
+  type RuntimeAssociation,
+} from './association';
 
 // systemctl/journalctl --user (install-service / uninstall-service) locate the
 // user bus via $XDG_RUNTIME_DIR/bus. sudo/su shells run inside the CALLING
@@ -89,7 +97,23 @@ if (!process.env.XDG_RUNTIME_DIR && typeof process.getuid === 'function') {
   if (fs.existsSync(runDir)) process.env.XDG_RUNTIME_DIR = runDir;
 }
 
-const CONFIG = loadConfig();
+let CLI_APPLICATION: AssociatedApplication | undefined;
+let CLI_PARSE_ERROR: Error | null = null;
+try {
+  const parsed = parseApplicationArgs(process.argv.slice(2));
+  CLI_APPLICATION = parsed.application;
+  process.argv.splice(2, process.argv.length - 2, ...parsed.argv);
+} catch (error) {
+  CLI_PARSE_ERROR = error as Error;
+}
+const INITIAL_COMMAND = process.argv[2] ?? 'help';
+const CLIENT_COMMAND = INITIAL_COMMAND === 'proxy' || INITIAL_COMMAND === 'watch';
+// Lifecycle commands deliberately do not even read association state. They reject
+// --application in main(), before performing an action.
+const ACTIVE_ASSOCIATION: RuntimeAssociation | null = CLIENT_COMMAND
+  ? resolveRuntimeAssociation(CLI_APPLICATION)
+  : null;
+const CONFIG = loadConfig({ application: CLIENT_COMMAND ? CLI_APPLICATION : undefined });
 const STATE_DIR = CONFIG.stateDir;
 const PORT = CONFIG.port;
 // Bearer token for the daemon HTTP surface (Part B). Resolve it per request:
@@ -1074,6 +1098,11 @@ async function probeNotifApi(): Promise<'api' | 'file'> {
 }
 
 async function cmdWatch(which?: string): Promise<void> {
+  await verifyRuntimeAssociation(
+    ACTIVE_ASSOCIATION,
+    CONFIG,
+    resolveApiToken(CONFIG, { generate: false })?.token,
+  );
   const stop = () => process.exit(0);
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
@@ -1131,6 +1160,7 @@ function installSystemd(): void {
   fs.mkdirSync(dirname(unitPath), { recursive: true });
   const unit = buildSystemdUnit({
     instance: SERVICE_INSTANCE,
+    configPath: SERVICE_INSTANCE ? configPath() : undefined,
     port: PORT,
     brokerUrl: BROKER_URL,
     stateDir: STATE_DIR,
@@ -1190,6 +1220,7 @@ function installLaunchd(): void {
   fs.mkdirSync(dirname(plistPath), { recursive: true });
   const plist = buildLaunchdPlist({
     instance: SERVICE_INSTANCE,
+    configPath: SERVICE_INSTANCE ? configPath() : undefined,
     port: PORT,
     brokerUrl: BROKER_URL,
     stateDir: STATE_DIR,
@@ -1255,8 +1286,8 @@ function usage(): void {
   out('  voice-setup [--dry-run]  securely choose a provider and configure its hidden API key');
   out('  voice-status [--json]  check voice-transcription readiness (never prints the API key)');
   out('  serve     run in the foreground (used by start; handy for debugging)');
-  out('  watch [identity]  stream one line per new inbound message (wake source for a Monitor)');
-  out('  proxy     per-session stdio shim → daemon (stable binding; for the MCP client config)');
+  out('  watch [--application claude-code|codex|hermes] [identity]  stream new inbound wake lines');
+  out('  proxy [--application claude-code|codex|hermes]  per-session stdio shim → daemon');
   out('');
   out('  create-root "<name>"   create THE root human identity (one per host) via the running');
   out('                         daemon — quiet no-op if a root already exists (installer seam)');
@@ -1273,13 +1304,16 @@ function usage(): void {
   out('     so an isolated second daemon never overwrites the shared one. Default: shared.');
   out('');
   out('Config precedence (per field): env var > config.json > default.');
+  out('  Client --application: explicit env > Nightly registry association > legacy config/default.');
   out('  config.json: OURS_CONFIG, else ~/.ours/config.json — edit with `setup`.');
   out('  env: OURS_BROKER_URL, OURS_PORT (3050), OURS_STATE_DIR (~/.ours), OURS_GC_INTERVAL_MS (3600000), OURS_AUTOSTART (off), OURS_SERVICE_NAME (none)');
   out('(install-service bakes the resolved config values into the service definition.)');
 }
 
 async function main(): Promise<void> {
+  if (CLI_PARSE_ERROR) throw CLI_PARSE_ERROR;
   const cmd = process.argv[2] ?? 'help';
+  assertApplicationCommand(CLI_APPLICATION, cmd);
   switch (cmd) {
     case 'serve':
     case 'run':
@@ -1356,6 +1390,11 @@ async function main(): Promise<void> {
       // install-service). With autoStart off (the default) an unreachable
       // daemon is a hard startup error; with it on, the proxy spawns the
       // daemon on demand before each connect attempt.
+      await verifyRuntimeAssociation(
+        ACTIVE_ASSOCIATION,
+        CONFIG,
+        resolveApiToken(CONFIG, { generate: false })?.token,
+      );
       if (!CONFIG.autoStart && !(await portOpen(PORT))) {
         err(`ours-mcp daemon is not running on port ${PORT} — start it with \`ours-mcp start\`.`);
         err('(or enable auto-start: `ours-mcp setup` → autoStart, or OURS_AUTOSTART=1)');

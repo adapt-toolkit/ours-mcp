@@ -943,104 +943,6 @@ test('stable channel: Rooms installs cowork@latest and stays EMBEDDED — no blo
   rmSync(root.tmp, { recursive: true, force: true });
 });
 
-test('nightly channel: Rooms installs cowork@nightly and is wired to the shared daemon in its external shape',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  // Port answers in order: shared daemon (Enter), Rooms console (explicit).
-  const root = isolatedRoot(
-    { daemon: 'absent' },
-    { ANSWER_ROOMS: '1', ANSWER_TELEGRAM: '', ANSWER_PORT_ROOMS: '3062', ANSWER_BROKER: 'wss://broker.example.test',
-      OURS_CHANNEL: 'nightly', COWORK_INSTALLED: COWORK_EXTERNAL_MIN_VERSION },
-  );
-  const { out, calls } = root.run();
-  assert.match(out, /---EXIT 0/);
-
-  // cowork publishes `nightly` alongside every other service, and the external-daemon mode
-  // ships on that line.
-  assert.match(calls, /npm i -g @ours\.network\/cowork@nightly/, 'rooms follows the nightly channel');
-  assert.doesNotMatch(calls, /@ours\.network\/cowork@(latest|next)/, 'no stable, and no historical `next` tag');
-  // And the rest of the nightly stack is coherent with it.
-  assert.match(calls, /npm i -g @ours\.network\/fleet@nightly/, 'fleet follows the channel');
-  assert.match(calls, /npm i -g @ours\.network\/mcp@nightly/);
-
-  const cfg = readJson(join(root.tmp, '.ours-cowork', 'config.json'));
-  assert.equal(cfg.version, 1, "cowork's config is a versioned strict document");
-  assert.equal(cfg.brokerUrl, 'wss://broker.example.test', 'Rooms shares the deployment broker');
-  assert.equal(cfg.stateDir, join(root.tmp, '.ours-cowork'), 'its own private state directory');
-  assert.equal(cfg.rest.port, 3062, 'the console port the user chose');
-  assert.equal(cfg.rest.enabled, true);
-
-  // Default daemon answer is COMMON, written in cowork's exact external shape.
-  const sharedPort = readJson(join(root.tmp, '.ours', 'config.json')).port;
-  assert.equal(cfg.daemon.mode, 'external');
-  assert.equal(cfg.daemon.endpoint, `http://127.0.0.1:${sharedPort}`, 'pointed at THIS install\'s shared daemon');
-  // daemon.stateDir is the OURS daemon's state dir (where daemon-token lives) — NOT cowork's own.
-  assert.equal(cfg.daemon.stateDir, join(root.tmp, '.ours'));
-  assert.notEqual(cfg.daemon.stateDir, cfg.stateDir, 'the two stateDir keys are not confused');
-  // cowork holds no token: the installer must never write one into its config.
-  assert.equal(cfg.daemon.token, undefined, 'no token is ever written — the SDK reads it from stateDir');
-  assert.doesNotMatch(readFileSync(join(root.tmp, '.ours-cowork', 'config.json'), 'utf8'), /token/i,
-    'the word token never appears in the Rooms config');
-  assert.equal(calls.match(/^ours-mcp start$/gm)?.length, 1, 'sharing means no second daemon');
-
-  // Ordering: install-service freezes what it resolves, so the config existed first.
-  assert.match(calls, /ours-cowork install-service/, 'installed as a boot service');
-  assert.deepEqual(readJson(`${root.log}.cwsnapshot`), cfg, 'install-service saw the final config');
-  assert.match(out, /console at http:\/\/127\.0\.0\.1:3062\//);
-  assert.match(out, /Set up my first Rooms mission room/, 'the hand-off gains its Rooms step');
-  rmSync(root.tmp, { recursive: true, force: true });
-});
-
-test('Rooms re-run is idempotent and preserves keys the installer does not own',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const root = isolatedRoot({ daemon: 'absent' }, { ANSWER_ROOMS: '1', ANSWER_TELEGRAM: '', ANSWER_PORT_ROOMS: '3063', OURS_CHANNEL: 'nightly',
-    COWORK_INSTALLED: COWORK_EXTERNAL_MIN_VERSION });
-  root.run();
-  const cfgPath = join(root.tmp, '.ours-cowork', 'config.json');
-  const first = readJson(cfgPath);
-  writeFileSync(cfgPath, JSON.stringify({ ...first, operatorNote: 'keep me' }, null, 2) + '\n', { mode: 0o600 });
-  const second = root.run();
-  assert.match(second.out, /already configured for this deployment/, 'an unchanged selection rewrites nothing');
-  const after = readJson(cfgPath);
-  assert.equal(after.operatorNote, 'keep me');
-  assert.equal(after.rest.port, first.rest.port, 'the console port is unchanged on a rerun');
-  assert.deepEqual(after.daemon, first.daemon, 'and so is the daemon selection');
-  rmSync(root.tmp, { recursive: true, force: true });
-});
-
-test('dedicated Rooms daemon: its own port, state dir and boot unit, in cowork\'s external shape',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const root = isolatedRoot(
-    { daemon: 'absent' },
-    { ANSWER_ROOMS: '1', ANSWER_ROOMS_DEDICATED: '1', ANSWER_TELEGRAM: '', ANSWER_PORT_ROOMS: '3064',
-      ANSWER_PORT_ROOMS_DAEMON: '3085', OURS_CHANNEL: 'nightly', COWORK_INSTALLED: COWORK_EXTERNAL_MIN_VERSION },
-  );
-  const { out, calls } = root.run();
-  assert.match(out, /---EXIT 0/);
-
-  const sharedCfg = readJson(join(root.tmp, '.ours', 'config.json'));
-  const dedicated = readJson(join(root.tmp, '.ours-rooms', 'config.json'));
-  // Three-way isolation, exactly as for Telegram — and a DIFFERENT instance from it.
-  assert.equal(dedicated.port, 3085);
-  assert.notEqual(dedicated.port, sharedCfg.port);
-  assert.equal(dedicated.stateDir, join(root.tmp, '.ours-rooms'));
-  assert.equal(dedicated.serviceName, 'rooms');
-  assert.notEqual(dedicated.serviceName, 'tg', 'Rooms and Telegram never share a unit');
-  assert.match(calls, /ours-mcp-env install-service service=rooms /, 'its own boot unit');
-  assert.match(calls, /^ours-mcp install-service$/m, 'the shared daemon still owns the default unit');
-
-  // cowork is pointed at THAT daemon, both halves, in the documented shape.
-  const cfg = readJson(join(root.tmp, '.ours-cowork', 'config.json'));
-  assert.equal(cfg.daemon.mode, 'external');
-  assert.equal(cfg.daemon.endpoint, 'http://127.0.0.1:3085');
-  assert.equal(cfg.daemon.stateDir, join(root.tmp, '.ours-rooms'), 'the dedicated daemon\'s state dir, where its token lives');
-  assert.notEqual(cfg.daemon.stateDir, join(root.tmp, '.ours'), 'not the shared daemon\'s');
-  assert.equal(cfg.stateDir, join(root.tmp, '.ours-cowork'), "cowork's OWN state dir is untouched by the daemon choice");
-  assert.equal(cfg.rest.port, 3064, 'the console port is independent of the daemon port');
-  // install-service freezes what it resolves, so the selection existed first.
-  assert.deepEqual(readJson(`${root.log}.cwsnapshot`), cfg);
-  rmSync(root.tmp, { recursive: true, force: true });
-});
-
 test('a headless run never writes a daemon block into an existing EMBEDDED Rooms install', () => {
   // Boot is fail-closed with no embedded fallback, so silently writing a daemon block into a
   // working embedded install could leave Rooms unable to start. A headless run must not do it.
@@ -1092,9 +994,10 @@ test('channel follows the installer\'s own version unless the environment says o
   assert.equal(resolveChannel('nightly', stablePkg.version), 'nightly', 'and can opt a stable installer into nightlies');
 });
 
-test('a packaged nightly installer installs the nightly Telegram connector and daemon', () => {
-  // Build the artifact the way the nightly publish does: the same files, with the -nightly.N
-  // version the bump script stamps into package.json before `npm publish --tag nightly`.
+test('a packaged nightly installer contains and selects the topology-first profile flow', () => {
+  // Build the artifact the way the nightly publish does. Optional consumers are no longer
+  // assumed here: topology-first behavior (including assume-yes keeping Telegram/Rooms off)
+  // is exercised hermetically in nightly-install.test.mjs.
   const tmp = mkdtempSync(join(tmpdir(), 'installer-pkg-'));
   const stage = join(tmp, 'pkg');
   mkdirSync(stage, { recursive: true });
@@ -1103,33 +1006,12 @@ test('a packaged nightly installer installs the nightly Telegram connector and d
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'));
   writeFileSync(join(stage, 'package.json'), JSON.stringify({ ...pkg, version: '0.17.0-nightly.1' }, null, 2));
 
-  const bin = join(tmp, 'bin');
-  mkdirSync(bin, { recursive: true });
-  const log = join(tmp, 'calls.log');
-  writeFileSync(log, '');
-  fakeBins(bin, { daemon: 'absent' });
-  const out = execFileSync('node', [join(stage, 'install.mjs')], {
-    env: {
-      PATH: `${bin}:${process.env.PATH}`,
-      CALLLOG: log,
-      HOME: tmp,
-      SHELL: '/bin/bash',
-      OURS_ASSUME_YES: '1',
-      NO_COLOR: '1',
-      OURS_CONFIG: join(tmp, '.ours', 'config.json'),
-    },
-    encoding: 'utf8',
-  });
-  const calls = readFileSync(log, 'utf8');
-  assert.match(calls, /npm i -g @ours\.network\/mcp@nightly/, 'the nightly installer installs the nightly daemon');
-  assert.match(calls, /npm i -g @ours\.network\/codex@nightly/, 'and the nightly harness launcher');
-  // fleet DOES publish a nightly dist-tag, and the nightly stack needs the fleet build
-  // carrying the SDK integration — a nightly installer that quietly installed stable
-  // fleet is the split-brain deployment the channel exists to prevent.
-  assert.match(calls, /npm i -g @ours\.network\/fleet@nightly/, 'fleet follows the channel');
-  assert.doesNotMatch(calls, /@ours\.network\/fleet@latest/, 'a nightly install never mixes in stable fleet');
-  assert.doesNotMatch(calls, /@ours\.network\/mcp@latest/, 'no stable/nightly mixing within the suite');
-  assert.ok(out.length > 0, 'the packaged installer runs from its own files');
+  const source = readFileSync(join(stage, 'install.mjs'), 'utf8');
+  assert.match(source, /if \(CHANNEL === 'nightly'\)[\s\S]*return runNightlyInstaller\(/,
+    'the staged Nightly artifact selects the topology-first orchestrator');
+  assert.ok(existsSync(join(stage, 'lib', 'nightly-install.mjs')), 'the staged artifact ships that orchestrator');
+  assert.match(readFileSync(join(stage, 'lib', 'nightly-install.mjs'), 'utf8'), /pkgSpec\('mcp', 'nightly'\)/,
+    'the topology-first flow installs the Nightly daemon build');
   rmSync(tmp, { recursive: true, force: true });
 });
 

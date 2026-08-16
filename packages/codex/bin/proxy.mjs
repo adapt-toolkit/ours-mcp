@@ -24,8 +24,7 @@ const env = { ...process.env };
 if (env.OURS_CODEX_LIVE === '1') env.OURS_AUTOSTART = '0';
 if (process.ppid > 1) env.OURS_CLIENT_PID = String(process.ppid);
 const child = cliPath
-  ? spawn(process.execPath, [cliPath, 'proxy', ...process.argv.slice(2)], { stdio: 'inherit', env })
-  : spawn('ours-mcp', ['proxy', ...process.argv.slice(2)], { stdio: 'inherit', env });
+  ? spawn(process.execPath, [cliPath, 'proxy', '--application', 'codex', ...process.argv.slice(2)], { stdio: 'inherit', env })
+  : spawn('ours-mcp', ['proxy', '--application', 'codex', ...process.argv.slice(2)], { stdio: 'inherit', env });
 child.on('error', (error) => { process.stderr.write(`ours: cannot launch @ours.network/mcp proxy: ${error.message}\n`); process.exit(1); });
 child.on('exit', (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 0); });
-
