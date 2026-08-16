@@ -95,6 +95,57 @@ test('registry association sits below explicit env/config and fails closed on co
   }), (error) => /expects stateDir.*Nightly installer/.test(error.message) && !error.message.includes('never-print-me'));
 });
 
+test('file config uses core port/state types and defaults without fetching a coerced port', async () => {
+  const calls = [];
+  const profile = await resolveDaemonProfile({
+    argv: [], env: {}, readConfig: async () => ({ port: '4012', stateDir: { path: '/wrong' } }),
+    fetch: async (url) => {
+      calls.push(String(url));
+      return String(url).endsWith('/info')
+        ? Response.json({ name: 'ours', protocol: 1, stateDir: '/runtime' })
+        : Response.json({ identities: [] });
+    },
+  });
+  assert.equal(profile.port, 3050);
+  assert.ok(calls.every((url) => url.startsWith('http://127.0.0.1:3050/')),
+    'wrong-typed config never selects or fetches a coerced port');
+});
+
+test('associated wrong-typed port and stateDir return structured drift before any fetch', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'ours-profile-runtime-types-'));
+  const stateDir = join(home, '.ours-blue');
+  const configPath = join(stateDir, 'config.json');
+  const registryPath = join(home, '.ours', 'installer-profiles.json');
+  await mkdir(join(home, '.ours'), { recursive: true });
+  await mkdir(stateDir, { recursive: true });
+  const registry = {
+    version: 1,
+    profiles: { blue: {
+      label: 'Blue', host: '127.0.0.1', port: 4060, configPath, stateDir, serviceName: 'blue',
+      ownership: { config: true, service: true, state: true },
+    } },
+    harnessAssociations: { codex: 'blue' },
+  };
+  await writeFile(registryPath, JSON.stringify(registry));
+  for (const [label, config] of [
+    ['string port', { port: '4060', stateDir }],
+    ['object stateDir', { port: 4060, stateDir: { path: stateDir } }],
+  ]) {
+    await writeFile(configPath, JSON.stringify(config));
+    let fetches = 0;
+    await assert.rejects(
+      () => resolveDaemonProfile({
+        argv: [], env: { HOME: home },
+        fetch: async () => { fetches += 1; return Response.json({}); },
+      }),
+      (error) => error.name === 'AssociationError' && error.code === 'CONFIG_DRIFT'
+        && /Nightly installer/.test(error.message),
+      `${label} is reported as association drift`,
+    );
+    assert.equal(fetches, 0, `${label} fails before fetching any daemon port`);
+  }
+});
+
 test('rejects malformed flags, unreachable and incompatible daemons', async () => {
   assert.throws(() => parseOursArgs(['--ours-port', '0']), /valid TCP port/);
   assert.throws(() => parseOursArgs(['--ours-port']), /requires a value/);

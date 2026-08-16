@@ -57,7 +57,15 @@ async function readOwnerToken(stateDir) {
   try { return (await readFile(join(stateDir, 'daemon-token'), 'utf8')).trim() || null; } catch { return null; }
 }
 
-const rerun = (message) => new Error(`ours profile association: ${message}. Re-run the Nightly installer to repair this association`);
+export class AssociationError extends Error {
+  constructor(message, code = 'INVALID_ASSOCIATION') {
+    super(`ours profile association: ${message}. Re-run the Nightly installer to repair this association`);
+    this.name = 'AssociationError';
+    this.code = code;
+  }
+}
+
+const rerun = (message, code) => new AssociationError(message, code);
 const PROFILE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,30}[A-Za-z0-9])?$/;
 const APPLICATIONS = ['claude-code', 'codex', 'hermes'];
 
@@ -79,6 +87,7 @@ function validateProfile(profileId, value) {
   if (typeof value.label !== 'string' || !value.label.trim()) throw rerun(`profile ${profileId} has no label`);
   const host = String(value.host || '').toLowerCase();
   if (host !== 'localhost' && host !== '127.0.0.1') throw rerun(`profile ${profileId} uses non-loopback host ${JSON.stringify(value.host)}`);
+  if (typeof value.port !== 'number') throw rerun(`profile ${profileId} has invalid port`);
   let port;
   try { port = validPort(value.port); }
   catch { throw rerun(`profile ${profileId} has invalid port`); }
@@ -154,11 +163,14 @@ export async function resolveDaemonProfile({ argv = [], env = process.env, readC
     : readJson(configPath));
   let source = 'default';
   let port = DEFAULT_PORT;
-  if (config?.port != null) { port = validPort(config.port); source = env.OURS_CONFIG ? 'OURS_CONFIG' : association ? 'registry' : 'config'; }
+  if (typeof config?.port === 'number' && Number.isFinite(config.port)) {
+    port = validPort(config.port);
+    source = env.OURS_CONFIG ? 'OURS_CONFIG' : association ? 'registry' : 'config';
+  }
   if (association) {
-    const configState = resolve(config?.stateDir || join(home, '.ours'));
+    const configState = resolve(typeof config?.stateDir === 'string' ? config.stateDir : join(home, '.ours'));
     if (port !== association.port || configState !== resolve(association.stateDir)) {
-      throw rerun(`profile ${association.profileId} disagrees with ${configPath} on port/stateDir`);
+      throw rerun(`profile ${association.profileId} disagrees with ${configPath} on port/stateDir`, 'CONFIG_DRIFT');
     }
   }
   if (env.OURS_PORT != null && env.OURS_PORT !== '') { port = validPort(env.OURS_PORT); source = 'OURS_PORT'; }

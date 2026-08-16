@@ -45,6 +45,26 @@ async function withHome(fn) {
   }
 }
 
+const xmlText = (value) => String(value).replace(/[&<>"']/g, (character) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;',
+})[character]);
+
+function namedPlist({ id, configPath, port, stateDir }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OURS_PORT</key><string>${port}</string>
+    <key>OURS_STATE_DIR</key><string>${xmlText(stateDir)}</string>
+    <key>OURS_CONFIG</key><string>${xmlText(configPath)}</string>
+    <key>OURS_SERVICE_NAME</key><string>${id}</string>
+  </dict>
+</dict>
+</plist>
+`;
+}
+
 test('assume-yes default-creates historical topology, associates detected harnesses, and updates global mcp once', async () => withHome(async (home) => {
   process.env.OURS_ASSUME_YES = '1';
   const stateDir = join(home, '.ours');
@@ -175,6 +195,113 @@ test('manual existing selection applies runtime config types and defaults before
     assert.equal(calls.length, 0,
       `${label}: no package, marketplace/plugin, service, identity, or registry mutation starts`);
   }
+}));
+
+test('default and legacy discovery mirror runtime types and historical defaults', async () => {
+  for (const { id, directory } of [
+    { id: 'default', directory: '.ours' },
+    { id: 'tg', directory: '.ours-tg' },
+  ]) {
+    await withHome(async (home) => {
+      const configDir = join(home, directory);
+      mkdirSync(configDir, { recursive: true });
+      writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+        port: '3060',
+        stateDir: { path: configDir },
+      }) + '\n');
+      const probed = [];
+      const { deps, calls } = makeDeps({
+        probe: async (candidate) => {
+          probed.push(candidate);
+          return { ...candidate, reachable: true, compatible: false, error: 'stop after discovery' };
+        },
+      });
+      await runNightlyInstaller(deps);
+      const candidate = probed.find((value) => value.id === id);
+      assert.ok(candidate, `${id} config is retained as a deterministic candidate`);
+      assert.equal(candidate.port, 3050, `${id} ignores a string file port like core/src/config.ts`);
+      assert.equal(candidate.stateDir, join(home, '.ours'), `${id} ignores a non-string stateDir and uses the runtime default`);
+      assert.equal(calls.length, 0, `${id} discovery validation performs no mutation`);
+    });
+  }
+});
+
+test('a discovered registry profile with runtime-ignored config values rejects drift before mutation', async () => withHome(async (home) => {
+  const stateDir = join(home, '.ours-tg');
+  const configPath = join(stateDir, 'config.json');
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(configPath, JSON.stringify({ port: '3060', stateDir: { path: stateDir } }) + '\n');
+  const registryPath = profilesPath(process.env, home);
+  writeRegistry(registryPath, {
+    version: 1,
+    profiles: { tg: {
+      label: 'Legacy tg daemon', host: '127.0.0.1', port: 3060, configPath, stateDir, serviceName: 'tg',
+      ownership: { config: false, service: false, state: false },
+    } },
+    harnessAssociations: {},
+  });
+  const before = readFileSync(registryPath, 'utf8');
+  const { deps, calls } = makeDeps({
+    ask: (prompt, def) => prompt.includes('Choose profile') ? '1' : def,
+    probe: async (candidate) => ({ ...candidate, reachable: true, compatible: true }),
+    fetch: async (url) => String(url).endsWith('/info')
+      ? Response.json({ name: 'ours', stateDir })
+      : String(url).endsWith('/version')
+        ? Response.json({ version: '0.16.0-nightly' })
+        : Response.json({ identities: [] }),
+  });
+  await runNightlyInstaller(deps);
+  assert.equal(calls.length, 0, 'package, marketplace/plugin, service, identity, and registry mutation never starts');
+  assert.equal(readFileSync(registryPath, 'utf8'), before, 'profile registry bytes remain unchanged');
+}));
+
+test('generated named launchd values XML-decode exactly and rediscovery is idempotent', async () => withHome(async (home) => {
+  const id = 'special';
+  const stateDir = join(home, `.ours-${id}&state<nightly>"quote"'apostrophe`);
+  const configPath = join(stateDir, `config&auth<nightly>"quote"'apostrophe.json`);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(configPath, JSON.stringify({ port: 3063, stateDir }) + '\n');
+  const launchAgents = join(home, 'Library', 'LaunchAgents');
+  mkdirSync(launchAgents, { recursive: true });
+  writeFileSync(join(launchAgents, `solutions.adaptframework.ours.${id}.plist`), namedPlist({
+    id, configPath, port: 3063, stateDir,
+  }));
+  const discoveries = [];
+  for (let rerun = 0; rerun < 2; rerun += 1) {
+    const probed = [];
+    const { deps, calls } = makeDeps({
+      probe: async (candidate) => {
+        probed.push(candidate);
+        return { ...candidate, reachable: true, compatible: false, error: 'stop after discovery' };
+      },
+    });
+    await runNightlyInstaller(deps);
+    const candidate = probed.find((value) => value.id === id);
+    assert.ok(candidate, 'generated named plist is rediscovered');
+    assert.equal(candidate.configPath, configPath);
+    assert.equal(candidate.stateDir, stateDir);
+    assert.equal(candidate.port, 3063);
+    assert.equal(calls.length, 0, 'rediscovery performs no mutation');
+    discoveries.push(candidate);
+  }
+  assert.deepEqual(discoveries[1], discoveries[0], 'same generated plist yields the same candidate on rerun');
+}));
+
+test('launchd discovery fails closed on malformed XML entities before probing or mutation', async () => withHome(async (home) => {
+  const launchAgents = join(home, 'Library', 'LaunchAgents');
+  mkdirSync(launchAgents, { recursive: true });
+  const plist = namedPlist({
+    id: 'broken', configPath: join(home, '.ours-broken', 'config.json'), port: 3064,
+    stateDir: join(home, '.ours-broken'),
+  }).replace('.ours-broken', '.ours&bogus;-broken');
+  writeFileSync(join(launchAgents, 'solutions.adaptframework.ours.broken.plist'), plist);
+  let probes = 0;
+  const { deps, calls } = makeDeps({
+    probe: async (candidate) => { probes += 1; return candidate; },
+  });
+  await runNightlyInstaller(deps);
+  assert.equal(probes, 0, 'malformed entity aborts discovery instead of becoming literal path bytes');
+  assert.equal(calls.length, 0, 'malformed plist performs no mutation');
 }));
 
 test('new-profile service failure transactionally records retained config/service/state ownership without associations', async () => withHome(async (home) => {

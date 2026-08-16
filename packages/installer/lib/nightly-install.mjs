@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { heading, ok, info, warn, c } from './ui.mjs';
 import {
   DEFAULT_BROKER, DEFAULT_PORT, COWORK_DEFAULT_PORT, COWORK_EXTERNAL_MIN_VERSION,
@@ -51,11 +51,13 @@ function assertClientConfigMatchesProfile(profile, config, home) {
   }
 }
 
-function candidateFromConfig(id, label, configPath, { serviceName = '', ownership } = {}) {
+function candidateFromConfig(id, label, configPath, home, { serviceName = '', ownership } = {}) {
   if (!existsSync(configPath)) return null;
   const config = readObject(configPath);
-  const stateDir = resolve(typeof config.stateDir === 'string' ? config.stateDir : dirname(configPath));
-  const port = Number(config.port ?? DEFAULT_PORT);
+  // Mirror core/src/config.ts: wrong-typed file values are ignored before the
+  // historical runtime defaults are applied.
+  const stateDir = resolve(typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'));
+  const port = typeof config.port === 'number' && Number.isFinite(config.port) ? config.port : DEFAULT_PORT;
   return {
     id, label, host: '127.0.0.1', port, configPath: resolve(configPath), stateDir,
     serviceName: typeof config.serviceName === 'string' ? config.serviceName : serviceName,
@@ -99,6 +101,20 @@ function parseServiceFile(path, id, home) {
   try { text = readFileSync(path, 'utf8'); } catch { return null; }
   const env = {};
   for (const key of ['OURS_CONFIG', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_SERVICE_NAME']) {
+    if (path.endsWith('.plist')) {
+      const marker = `<key>${key}</key>`;
+      if (!text.includes(marker)) continue;
+      const match = text.match(new RegExp(`<key>${key}<\\/key>\\s*<string>([^<]*)<\\/string>`));
+      if (!match) throw new Error(`${path} has malformed XML text for ${key}`);
+      const undecoded = match[1];
+      if (undecoded.replace(/&(?:amp|lt|gt|quot|apos);/g, '').includes('&')) {
+        throw new Error(`${path} has malformed XML entity in ${key}`);
+      }
+      env[key] = undecoded.replace(/&(?:amp|lt|gt|quot|apos);/g, (entity) => ({
+        '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'",
+      })[entity]);
+      continue;
+    }
     const match = text.match(new RegExp(`(?:Environment=|<key>)${key}(?:=|<\\/key>\\s*<string>)([^\\n<]+)`));
     if (match) env[key] = match[1].replace(/^['"]|['"]$/g, '').trim();
   }
@@ -138,10 +154,10 @@ function knownServiceCandidates(home) {
 
 function discoveryInputs(registry, home, env) {
   const defaultPath = join(home, '.ours', 'config.json');
-  const defaultCandidate = candidateFromConfig('default', 'Default ours daemon', defaultPath);
+  const defaultCandidate = candidateFromConfig('default', 'Default ours daemon', defaultPath, home);
   const legacyCandidates = [];
   for (const [id, dir] of [['tg', '.ours-tg'], ['rooms', '.ours-rooms']]) {
-    const candidate = candidateFromConfig(id, `Legacy ${id} daemon`, join(home, dir, 'config.json'), { serviceName: id });
+    const candidate = candidateFromConfig(id, `Legacy ${id} daemon`, join(home, dir, 'config.json'), home, { serviceName: id });
     if (candidate) legacyCandidates.push(candidate);
   }
   const connectorCandidates = [];
@@ -405,11 +421,11 @@ export async function runNightlyInstaller(deps) {
     line(warn(`Cannot use that daemon profile: ${error.message}`)); finish(ttyFd); return;
   }
 
-  if (selection.kind === 'manual' && !selection.clientConfigNeeded) {
+  if ((selection.kind === 'manual' || selection.kind === 'existing') && !selection.clientConfigNeeded) {
     try {
       assertClientConfigMatchesProfile(selection.profile, readObject(selection.profile.configPath), home);
     } catch (error) {
-      line(warn(`Manual client config does not match the selected daemon: ${error.message}`));
+      line(warn(`Selected client config does not match the selected daemon: ${error.message}`));
       line(info('No package, service, harness, identity, or registry changes were made.'));
       finish(ttyFd); return;
     }
