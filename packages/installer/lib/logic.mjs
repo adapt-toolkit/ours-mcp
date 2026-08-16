@@ -28,18 +28,61 @@ export function canonHarnesses(raw) {
 
 // ── Release CHANNEL / npm dist-tag selection (owner 2026-07-17) ─────────────────
 // The installer normally installs everything at @latest (stable). Setting
-// OURS_CHANNEL=nightly (or OURS_INSTALL_CHANNEL) makes it install the NIGHTLY tag
-// for the packages that HAVE a nightly (mcp, tg-connector, and the harness-plugin
-// launchers claude-code/codex/hermes — all lockstep-published to the `nightly` tag),
-// but keep @ours.network/fleet at @latest ALWAYS: ours-fleet lives in its own repo
-// and publishes NO nightly tag, so `@nightly` there would 404 the whole install.
+// OURS_CHANNEL=nightly (or OURS_INSTALL_CHANNEL) makes it install each package's
+// PRERELEASE dist-tag instead — for the packages that publish one.
+//
+// The prerelease tag is NOT the same string everywhere, which is why this is a
+// per-package map rather than one global tag:
+//   · mcp, tg-connector, claude-code, codex, hermes  → `nightly` (lockstep-published
+//     from this repo by .github/workflows/scripts/bump-versions.sh)
+//   · fleet                                          → `nightly` (its own repo,
+//     adapt-toolkit/ours-fleet, publishes a nightly dist-tag of its own)
+//   · cowork (rooms)                                 → `nightly` (owner decision
+//     2026-08-16: cowork aligns with every other service rather than keeping its
+//     historical `next` tag)
+//
+// WHY FLEET FOLLOWS THE CHANNEL NOW. It used to be pinned to @latest with the note
+// "ours-fleet publishes no nightly tag". It does publish one, and the nightly stack
+// needs the fleet build carrying the SDK integration — the same architecture
+// boundary that made a mixed tg-connector fatal applies here. A nightly installer
+// that silently installs stable fleet is exactly the split-brain deployment the
+// channel exists to prevent.
+//
+// WHY COWORK STILL NEEDS ITS OWN ENTRY. It historically published its prerelease
+// line as `next`; the owner's decision on 2026-08-16 is that it aligns with every
+// other service and publishes `nightly` instead. The entry stays because the map,
+// not a hardcoded string, is what makes such a change one line — and because an
+// UNMAPPED package deliberately falls back to `latest` rather than a guessed tag.
+//
+// The nightly channel MUST reach cowork's prerelease line: the external-daemon
+// mode the Rooms step configures ships there (cowork PR #9), so a nightly
+// installer taking `latest` would pair a config carrying a `daemon` block with a
+// build that predates it — the same architecture-boundary mismatch this whole
+// mechanism exists to prevent, pointed at Rooms instead of Telegram.
+//
+// SEQUENCING — load-bearing, and not yet satisfied. As of 2026-08-16 cowork
+// publishes NO `nightly` dist-tag at all (its tags are latest=0.4.0 and
+// next=0.3.7-nightly.20260815.80ea770). `npm i -g @ours.network/cowork@nightly`
+// therefore 404s today, and a 404 fails the WHOLE install. So the nightly
+// installer must not be published until cowork's release flow has actually
+// published a `nightly` artifact carrying PR #9. Verify the tag exists AND that
+// the tarball contains the implementation — never trust the tag alone. See
+// coworkSupportsExternalDaemon for the guard that keeps a build without the mode
+// from ever being handed a daemon block.
 export const DEFAULT_CHANNEL = 'latest';
 
-// Packages that follow the selected channel (nightly ⇒ @nightly). Short keys map to
-// the @ours.network/<key> npm name. NOTE fleet is deliberately ABSENT — it is pinned.
-const CHANNEL_TRACKING_PKGS = new Set(['mcp', 'tg-connector', 'claude-code', 'codex', 'hermes']);
-// Packages ALWAYS pinned to @latest regardless of channel (no nightly tag exists).
-const STABLE_ONLY_PKGS = new Set(['fleet']);
+// Per-package dist-tag by channel. A package absent from this map, or missing a
+// key for the selected channel, installs @latest — this never guesses a tag that
+// might not exist, because a 404 fails the WHOLE install.
+const PKG_CHANNEL_TAGS = {
+  mcp: { nightly: 'nightly' },
+  'tg-connector': { nightly: 'nightly' },
+  'claude-code': { nightly: 'nightly' },
+  codex: { nightly: 'nightly' },
+  hermes: { nightly: 'nightly' },
+  fleet: { nightly: 'nightly' },
+  cowork: { nightly: 'nightly' }, // aligned with every other service (owner, 2026-08-16)
+};
 
 // Normalize a raw channel selection to 'latest' | 'nightly'. Anything unrecognized
 // (incl. undefined/'') falls back to the installer's OWN channel — never guesses a tag.
@@ -67,14 +110,14 @@ export function isNightlyVersion(version) {
   return /-nightly\.\d+/.test(String(version || ''));
 }
 
-// The npm dist-tag to install for one package key under a channel. fleet is ALWAYS
-// 'latest'; channel-tracking packages take the channel; anything else defaults to 'latest'.
+// The npm dist-tag to install for one package key under a channel. Looks the key
+// up in PKG_CHANNEL_TAGS; anything unmapped — including an unknown package —
+// falls back to 'latest' rather than inventing a tag that would 404.
 export function pkgTag(pkgKey, channel = DEFAULT_CHANNEL) {
   const key = String(pkgKey || '').replace(/^@ours\.network\//, '');
-  if (STABLE_ONLY_PKGS.has(key)) return 'latest';
   const ch = resolveChannel(channel);
-  if (ch === 'nightly' && CHANNEL_TRACKING_PKGS.has(key)) return 'nightly';
-  return 'latest';
+  if (ch === DEFAULT_CHANNEL) return 'latest';
+  return PKG_CHANNEL_TAGS[key]?.[ch] ?? 'latest';
 }
 
 // Full `@ours.network/<key>@<tag>` spec for `npm i -g`, honoring the channel.
@@ -83,10 +126,87 @@ export function pkgSpec(pkgKey, channel = DEFAULT_CHANNEL) {
   return `@ours.network/${key}@${pkgTag(key, channel)}`;
 }
 
-// The Telegram connector owns 3051 — the installer must never hand a daemon that port.
-export const RESERVED_PORTS = [3051];
+// Ports other components in the stack own, which the installer must never hand a
+// daemon: 3051 is the Telegram connector's, 3052 is ours-cowork's loopback console
+// (its config default; see COWORK_DEFAULT_PORT).
+export const RESERVED_PORTS = [3051, 3052];
 export const DEFAULT_PORT = 3050;
 export const DEFAULT_BROKER = 'wss://broker1.ours.network';
+
+// ── Daemon topology: one COMMON daemon, plus optional DEDICATED ones ───────────
+// Every consumer defaults to the common daemon on the common port — that is the
+// backward-compatible answer and what Enter / non-interactive mode picks. A
+// consumer may instead be given its OWN daemon, which needs three things to be
+// genuinely isolated and not merely differently-addressed:
+//   · its own PORT              (nothing else may bind it)
+//   · its own STATE DIRECTORY   (the daemon's API token lives there; sharing one
+//                                state dir between two daemons corrupts both)
+//   · its own SERVICE NAME      (ours-mcp's boot unit — without a distinct name,
+//                                `install-service` overwrites the common daemon's
+//                                unit; see packages/core/src/service-instance.ts)
+// The config file is separate too, since ours-mcp resolves port + stateDir from
+// whatever OURS_CONFIG points at.
+export const DAEMON_MODES = ['common', 'dedicated'];
+
+// Fixed instance names, one per consumer that can own a daemon. These are what
+// core validates and turns into `ours-<name>.service`, so they must satisfy its
+// rules (alphanumeric, no separators at the ends).
+export const DEDICATED_INSTANCES = { telegram: 'tg', rooms: 'rooms' };
+
+// Where a dedicated daemon's private config + state live. Derived from the
+// instance name so two consumers can never be handed the same directory.
+export function dedicatedDaemonPaths(home, instance) {
+  const name = String(instance || '').trim();
+  const stateDir = `${home}/.ours-${name}`;
+  return { stateDir, configPath: `${stateDir}/config.json`, serviceName: name };
+}
+
+// Normalize a daemon-mode answer. Anything unrecognized (including empty and
+// non-interactive) is 'common' — the backward-compatible default.
+export function resolveDaemonMode(raw) {
+  const v = String(raw || '').trim().toLowerCase();
+  return v === 'dedicated' || v === 'own' || v === 'separate' ? 'dedicated' : 'common';
+}
+
+// Validate a port the user picked for a daemon, against the reserved list AND
+// every port this install has already committed to. `isTaken(port)` probes a real
+// bind; `taken` is the set of ports already chosen in THIS run, which a live probe
+// cannot see (nothing is listening on them yet). Returns
+// { ok, port, reason } — ok=false means "ask again", never "silently substitute".
+export function validateDaemonPort(input, { fallback = DEFAULT_PORT, isTaken = () => false, taken = [], reserved = RESERVED_PORTS } = {}) {
+  // Stricter than parsePort on purpose: this answer becomes a persisted listen port,
+  // so "3.5.1" must be a question repeated, not silently accepted as port 3.
+  if (!/^\d+$/.test(String(input ?? '').trim())) {
+    return { ok: false, port: fallback, reason: 'that is not a port number between 1 and 65535' };
+  }
+  const parsed = parsePort(input, fallback);
+  if (!parsed.ok) return { ok: false, port: fallback, reason: 'that is not a port number between 1 and 65535' };
+  const port = parsed.port;
+  if (reserved.includes(port)) {
+    return { ok: false, port, reason: `port ${port} is reserved by another part of the stack` };
+  }
+  if (taken.includes(port)) {
+    return { ok: false, port, reason: `port ${port} is already being used by another daemon in this install` };
+  }
+  if (isTaken(port)) {
+    return { ok: false, port, reason: `port ${port} is already in use on this machine` };
+  }
+  return { ok: true, port, reason: '' };
+}
+
+// The whole install's port plan, checked as a set. Returns { ok, duplicates } so
+// the caller can refuse a topology where two daemons would fight over one port
+// even though each looked fine on its own.
+export function planPorts(entries = []) {
+  const seen = new Map();
+  const duplicates = [];
+  for (const { label, port } of entries) {
+    if (!Number.isInteger(port)) continue;
+    if (seen.has(port)) duplicates.push({ port, labels: [seen.get(port), label] });
+    else seen.set(port, label);
+  }
+  return { ok: duplicates.length === 0, duplicates };
+}
 
 // ── Handing the Telegram connector the ONE shared daemon ───────────────────────
 // The connector has its OWN config file and never inherits the daemon's. Two
@@ -159,6 +279,186 @@ export function planTgDaemonConfig(existing, { daemonUrl, daemonStateDir, broker
   const changed = Object.entries(next).some(([k, v]) => v !== undefined && previous[k] !== v);
   if (!changed) return { changed: false, text: '', previous };
   return { changed: true, text: mergeConfig(base, next), previous };
+}
+
+// ── Rooms / ours-cowork ────────────────────────────────────────────────────────
+// ours-cowork was a purely standalone daemon: its shipped 0.4.0 bundle has no
+// daemonUrl / daemonStateDir / /api/v1 anywhere and its docs said it "has no
+// dependency on another agent daemon". ours-cowork PR #9 (head 030b71df…) adds an
+// EXTERNAL daemon mode, so Rooms can now answer the same common-vs-dedicated
+// question the Telegram connector does. Its exact contract, as reported:
+//
+//   ~/.ours-cowork/config.json carries an OPTIONAL `daemon` block.
+//     absent  ⇒ EMBEDDED — cowork hosts its own daemon (what every install
+//               before PR #9 does, and still the safe answer for one already
+//               running that way).
+//     present ⇒ { mode: 'external', endpoint: 'http://127.0.0.1:<port>',
+//                 stateDir: '<absolute ours-daemon state dir>' }
+//   External REQUIRES both endpoint and stateDir. cowork never stores or asks for
+//   a token — its SDK reads <stateDir>/daemon-token, which is why the state
+//   directory is part of the selection rather than derivable from the endpoint.
+//   Env equivalents: OURS_COWORK_DAEMON_MODE / _ENDPOINT / _STATE_DIR, and the
+//   service unit carries only those — never a token.
+//   Boot is FAIL-CLOSED: an unavailable endpoint, a non-ours daemon, or a
+//   stateDir that does not match it aborts startup. There is no embedded
+//   fallback, so writing this block is a real commitment and must never be done
+//   to an install that did not ask for it.
+//
+// NOTE the two different `stateDir` keys. The TOP-LEVEL one is cowork's own
+// private state. `daemon.stateDir` is the OURS daemon's state directory, where
+// that daemon's API token lives. Confusing them fails closed at boot.
+export const COWORK_DEFAULT_PORT = 3052;
+export const COWORK_DAEMON_MODES = ['embedded', 'external'];
+
+// Which cowork builds understand the `daemon` block. Its config is a STRICT
+// document, so handing an unknown key to a build that predates PR #9 is not a
+// harmless no-op — and cowork's boot is fail-closed, so the failure surfaces as a
+// Rooms daemon that will not start rather than a warning.
+//
+// The FIRST published cowork that implements the external-daemon mode. Verified
+// against the registry rather than taken on trust:
+//   @ours.network/cowork@nightly = 0.4.1-nightly.20260816.4aaf940
+//   gitHead 4aaf9406016098704d06b52352f7a38adc2ef160
+//   dist.shasum 5a6422409b1203a9bcc6aca33965fe47e9a5c17c
+//   depends on @ours.network/sdk 1.3.1; `latest` still 0.4.0
+// and the packed tarball really carries it — dist/daemon.js and dist/cli.js
+// contain the mode enum ["embedded","external"], the endpoint+stateDir pairing
+// check, OURS_COWORK_DAEMON_MODE/_ENDPOINT/_STATE_DIR, and the daemon-token read.
+export const COWORK_EXTERNAL_MIN_VERSION = '0.4.1-nightly.20260816.4aaf940';
+
+// Does the cowork build actually on this machine support an external daemon?
+//
+// This is deliberately a VERSION check and not a channel check. A channel gate
+// would answer "yes" for any nightly install, including one made before this
+// version was published — and a `daemon` block handed to a build without the mode
+// meets a strict config and a fail-closed boot, i.e. Rooms that will not start.
+// The version is read after the install, so it describes what is really there.
+// An unreadable version yields -1 below and therefore "no", which keeps Rooms
+// embedded rather than guessing.
+export function coworkSupportsExternalDaemon(installedVersion = '', minVersion = COWORK_EXTERNAL_MIN_VERSION) {
+  if (!minVersion) return false;   // no published build supports it yet
+  return compareVersions(String(installedVersion || ''), minVersion) >= 0;
+}
+
+// Semver precedence, enough for a published-release floor: x.y.z numerically,
+// then prerelease rules — a release outranks a prerelease of the same core
+// version, and two prereleases compare identifier by identifier (numeric parts
+// numerically, so nightly.20260815 < nightly.20260816). Returns -1 / 0 / 1, and
+// -1 for anything unparseable, so garbage NEVER claims to be new enough.
+export function compareVersions(a, b) {
+  const split = (v) => {
+    const m = String(v ?? '').match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
+    return m ? { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? null } : null;
+  };
+  const x = split(a);
+  const y = split(b);
+  if (!x || !y) return -1;
+  for (let i = 0; i < 3; i++) {
+    if (x.core[i] !== y.core[i]) return x.core[i] > y.core[i] ? 1 : -1;
+  }
+  if (x.pre === null && y.pre === null) return 0;
+  if (x.pre === null) return 1;   // 1.0.0 outranks 1.0.0-nightly.1
+  if (y.pre === null) return -1;
+  const xs = x.pre.split('.');
+  const ys = y.pre.split('.');
+  for (let i = 0; i < Math.max(xs.length, ys.length); i++) {
+    const xi = xs[i];
+    const yi = ys[i];
+    if (xi === undefined) return -1;         // a shorter identifier set is lower
+    if (yi === undefined) return 1;
+    const xn = /^\d+$/.test(xi);
+    const yn = /^\d+$/.test(yi);
+    if (xn && yn) {
+      if (Number(xi) !== Number(yi)) return Number(xi) > Number(yi) ? 1 : -1;
+    } else if (xn !== yn) {
+      return xn ? -1 : 1;                    // numeric identifiers rank below alphanumeric
+    } else if (xi !== yi) {
+      return xi > yi ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+// Which daemon an existing cowork config is set up for. No block ⇒ embedded.
+export function coworkDaemonMode(existing) {
+  const block = existing && typeof existing === 'object' ? existing.daemon : null;
+  if (!block || typeof block !== 'object') return 'embedded';
+  return block.mode === 'external' ? 'external' : 'embedded';
+}
+
+// Build the external `daemon` block. Returns { ok, block, reason } — external is
+// refused without BOTH halves rather than written half-formed, because a partial
+// block fails closed at cowork's boot and the user would only find out then.
+export function coworkDaemonBlock({ endpoint, stateDir } = {}) {
+  const e = String(endpoint || '').trim();
+  const s = String(stateDir || '').trim();
+  if (!e || !s) {
+    return { ok: false, block: null, reason: 'an external daemon needs BOTH an endpoint and its state directory' };
+  }
+  return { ok: true, block: { mode: 'external', endpoint: e, stateDir: s }, reason: '' };
+}
+
+// The cowork config file (mirrors its docs/03-configuration.md: OURS_COWORK_CONFIG,
+// else <home>/.ours-cowork/config.json).
+export function coworkConfigPath(env = {}, home = '') {
+  return env.OURS_COWORK_CONFIG || `${home}/.ours-cowork/config.json`;
+}
+
+// Decide whether cowork's config needs a write, and what to write. Same contract
+// as planTgDaemonConfig: { changed, text, previous }, unchanged ⇒ nothing written,
+// so a re-run is a no-op. Its `rest` block is merged rather than replaced, so an
+// operator's explicit `rest.enabled: false` survives a port update.
+// `daemon` is three-valued on purpose:
+//   undefined — do not touch the daemon selection at all (an existing embedded
+//               install this run was not asked to migrate)
+//   null      — EMBEDDED: remove any block, cowork hosts its own daemon again
+//   {endpoint, stateDir} — EXTERNAL: point it at that ours daemon
+export function planCoworkConfig(existing, { brokerUrl, stateDir, restPort, daemon } = {}) {
+  const base = existing && typeof existing === 'object' ? existing : {};
+  const baseRest = base.rest && typeof base.rest === 'object' ? base.rest : {};
+  const previous = {
+    brokerUrl: typeof base.brokerUrl === 'string' ? base.brokerUrl : '',
+    stateDir: typeof base.stateDir === 'string' ? base.stateDir : '',
+    restPort: Number.isInteger(baseRest.port) ? baseRest.port : null,
+    daemonMode: coworkDaemonMode(base),
+    daemonEndpoint: base.daemon?.endpoint ?? '',
+    daemonStateDir: base.daemon?.stateDir ?? '',
+  };
+
+  let nextDaemon;                       // undefined ⇒ leave the block alone
+  let daemonChanged = false;
+  if (daemon === null) {
+    nextDaemon = null;
+    daemonChanged = previous.daemonMode !== 'embedded';
+  } else if (daemon !== undefined) {
+    const built = coworkDaemonBlock(daemon);
+    if (!built.ok) return { changed: false, text: '', previous, error: built.reason };
+    nextDaemon = built.block;
+    daemonChanged = previous.daemonMode !== 'external'
+      || previous.daemonEndpoint !== built.block.endpoint
+      || previous.daemonStateDir !== built.block.stateDir;
+  }
+
+  const changed = daemonChanged
+    || (brokerUrl !== undefined && previous.brokerUrl !== brokerUrl)
+    || (stateDir !== undefined && previous.stateDir !== stateDir)
+    || (restPort !== undefined && previous.restPort !== restPort);
+  if (!changed) return { changed: false, text: '', previous };
+
+  const patch = { version: 1 };
+  if (brokerUrl !== undefined) patch.brokerUrl = brokerUrl;
+  if (stateDir !== undefined) patch.stateDir = stateDir;
+  if (restPort !== undefined) patch.rest = { ...baseRest, enabled: baseRest.enabled ?? true, port: restPort };
+  if (nextDaemon !== undefined) patch.daemon = nextDaemon;
+  const merged = mergeConfig(base, patch);
+  // mergeConfig keeps every key it is handed; an EMBEDDED selection has to drop
+  // the block outright, since `daemon: null` is not the same as no block.
+  if (nextDaemon === null) {
+    const obj = JSON.parse(merged);
+    delete obj.daemon;
+    return { changed: true, text: JSON.stringify(obj, null, 2) + '\n', previous };
+  }
+  return { changed: true, text: merged, previous };
 }
 
 // suggestPort: pick a usable HTTP port. If `desired` is free and not reserved, keep it. Otherwise
@@ -365,7 +665,7 @@ export function harnessAvailable(status) { return status === 'ok'; }
 // instruction for a piece they don't have. The human identity is normally created DURING install,
 // so its step is included ONLY as a fallback (identity: true) when in-install creation was skipped
 // or failed. Returns { text, empty } — empty is true when there is nothing left to finish.
-export function buildHandoffPrompt({ identity = false, fleet = false, telegram = false } = {}) {
+export function buildHandoffPrompt({ identity = false, fleet = false, telegram = false, rooms = false } = {}) {
   const steps = [];
   if (identity) {
     steps.push(
@@ -385,6 +685,13 @@ export function buildHandoffPrompt({ identity = false, fleet = false, telegram =
       'Set up my Telegram bot: ask me for my bot\'s name and its token from\n' +
       '   @BotFather, register the bot, create a chat↔agent connection, and\n' +
       '   give me the invite link to send.',
+    );
+  }
+  if (rooms) {
+    steps.push(
+      'Set up my first Rooms mission room: ask me what the room is for and what\n' +
+      '   to call it, create it, then walk me through inviting the people and\n' +
+      '   agents who should have a seat.',
     );
   }
   if (steps.length === 0) return { text: '', empty: true };

@@ -124,6 +124,15 @@ await build({
   outfile: resolve(dist, 'voice-setup.js'),
 });
 
+// Boot-service instance naming + validation. cli.ts inlines it; the standalone
+// output lets test/service-instance.test.mjs assert the REAL naming rules that
+// keep an isolated second daemon from overwriting the shared unit.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/service-instance.ts')],
+  outfile: resolve(dist, 'service-instance.js'),
+});
+
 // Structured daemon-startup progress + bounded wait helpers. index.ts and
 // cli.ts inline these, while the standalone output keeps the deterministic
 // timeout/rendering contract directly unit-testable.
