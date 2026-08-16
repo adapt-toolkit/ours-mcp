@@ -8,6 +8,8 @@ import {
   DEFAULT_PORT, DEFAULT_BROKER, RESERVED_PORTS,
   resolveChannel, pkgTag, pkgSpec, DEFAULT_CHANNEL,
   isNightlyVersion, daemonEndpoint, resolveSharedBroker, tgConfigPath, planTgDaemonConfig,
+  validateDaemonPort, planPorts, resolveDaemonMode, dedicatedDaemonPaths, DEDICATED_INSTANCES,
+  coworkConfigPath, planCoworkConfig, COWORK_DEFAULT_PORT,
 } from '../lib/logic.mjs';
 
 test('resolveChannel: nightly synonyms → nightly; everything else → latest', () => {
@@ -115,30 +117,45 @@ test('planTgDaemonConfig: writes both selections, preserves the rest, no-ops whe
   assert.equal(planTgDaemonConfig('nonsense', desired).changed, true);
 });
 
-test('pkgTag: nightly channel tags mcp/tg/plugins @nightly but fleet ALWAYS @latest', () => {
-  // Nightly channel → nightly for the channel-tracking packages.
+test('pkgTag: the nightly channel takes each package\'s OWN prerelease tag', () => {
+  // Everything published from this repo on the lockstep `nightly` tag.
   assert.equal(pkgTag('mcp', 'nightly'), 'nightly');
   assert.equal(pkgTag('tg-connector', 'nightly'), 'nightly');
   assert.equal(pkgTag('claude-code', 'nightly'), 'nightly');
   assert.equal(pkgTag('codex', 'nightly'), 'nightly');
   assert.equal(pkgTag('hermes', 'nightly'), 'nightly');
-  // fleet is pinned — it has no nightly tag.
-  assert.equal(pkgTag('fleet', 'nightly'), 'latest', 'fleet stays stable even in nightly');
+  // fleet publishes its own nightly dist-tag and MUST follow the channel: the nightly
+  // stack needs the fleet build with the SDK integration, and a stable fleet against a
+  // nightly daemon is the split-brain deployment the channel exists to prevent.
+  assert.equal(pkgTag('fleet', 'nightly'), 'nightly', 'fleet follows the channel');
+  // cowork's prerelease tag is `next`, not `nightly`, and `next` is currently OLDER than
+  // `latest` (0.3.7-nightly.* vs 0.4.0). Following it would knowingly downgrade rooms,
+  // so it is pinned to latest on both channels until `next` catches up.
+  assert.equal(pkgTag('cowork', 'nightly'), 'latest', 'cowork is pinned — never a knowing downgrade');
   // Latest channel → everything latest.
   assert.equal(pkgTag('mcp', 'latest'), 'latest');
   assert.equal(pkgTag('fleet', 'latest'), 'latest');
+  assert.equal(pkgTag('cowork', 'latest'), 'latest');
+  // An unknown package never gets a guessed tag — a 404 fails the WHOLE install.
+  assert.equal(pkgTag('not-a-real-package', 'nightly'), 'latest');
   // Accepts the fully-qualified name too.
   assert.equal(pkgTag('@ours.network/mcp', 'nightly'), 'nightly');
-  assert.equal(pkgTag('@ours.network/fleet', 'nightly'), 'latest');
+  assert.equal(pkgTag('@ours.network/fleet', 'nightly'), 'nightly');
+  assert.equal(pkgTag('@ours.network/cowork', 'nightly'), 'latest');
 });
 
-test('pkgSpec: builds the full npm spec honoring the channel + fleet pin', () => {
+test('pkgSpec: builds the full npm spec honoring each package\'s channel mapping', () => {
   assert.equal(pkgSpec('mcp', 'nightly'), '@ours.network/mcp@nightly');
   assert.equal(pkgSpec('tg-connector', 'nightly'), '@ours.network/tg-connector@nightly');
   assert.equal(pkgSpec('codex', 'nightly'), '@ours.network/codex@nightly');
-  assert.equal(pkgSpec('fleet', 'nightly'), '@ours.network/fleet@latest', 'fleet NEVER @nightly');
+  assert.equal(pkgSpec('fleet', 'nightly'), '@ours.network/fleet@nightly', 'the fix: nightly fleet on the nightly channel');
+  assert.equal(pkgSpec('cowork', 'nightly'), '@ours.network/cowork@latest');
   assert.equal(pkgSpec('mcp', 'latest'), '@ours.network/mcp@latest');
+  assert.equal(pkgSpec('fleet', 'latest'), '@ours.network/fleet@latest', 'stable installs stable fleet');
   assert.equal(pkgSpec('fleet'), '@ours.network/fleet@latest', 'default channel = latest');
+  // An explicit override still wins over the installer's own version, for every package.
+  assert.equal(pkgSpec('fleet', 'stable'), '@ours.network/fleet@latest');
+  assert.equal(pkgSpec('fleet', 'prerelease'), '@ours.network/fleet@nightly');
 });
 
 test('canonHarnesses: names/numbers/all, de-duped and order-preserving; OpenClaw is gone', () => {
@@ -306,4 +323,148 @@ test('buildHandoffPrompt: identity is a fallback step; fleet/telegram drop out; 
   const done = buildHandoffPrompt({});
   assert.equal(done.empty, true);
   assert.equal(done.text, '');
+});
+
+// ── daemon topology: one common daemon, optional dedicated ones ────────────────
+
+test('RESERVED_PORTS covers every port another component in the stack owns', () => {
+  // 3051 is the Telegram connector's, 3052 is the ours-cowork console's default.
+  // A daemon handed either would collide with a component this same installer sets up.
+  assert.ok(RESERVED_PORTS.includes(3051), 'telegram connector port reserved');
+  assert.ok(RESERVED_PORTS.includes(COWORK_DEFAULT_PORT), 'rooms console port reserved');
+  assert.equal(COWORK_DEFAULT_PORT, 3052);
+  assert.ok(!RESERVED_PORTS.includes(DEFAULT_PORT), 'the daemon\'s own default is not reserved against it');
+});
+
+test('resolveDaemonMode: anything unrecognized (incl. empty/headless) means the COMMON daemon', () => {
+  assert.equal(resolveDaemonMode('dedicated'), 'dedicated');
+  assert.equal(resolveDaemonMode('own'), 'dedicated');
+  assert.equal(resolveDaemonMode('separate'), 'dedicated');
+  assert.equal(resolveDaemonMode('DEDICATED'), 'dedicated');
+  assert.equal(resolveDaemonMode('common'), 'common');
+  assert.equal(resolveDaemonMode(''), 'common', 'Enter keeps the shared daemon');
+  assert.equal(resolveDaemonMode(undefined), 'common', 'non-interactive keeps the shared daemon');
+  assert.equal(resolveDaemonMode('yes please'), 'common', 'never guesses isolation from junk');
+});
+
+test('dedicatedDaemonPaths: each consumer gets its own config, state dir and service name', () => {
+  const tg = dedicatedDaemonPaths('/home/u', DEDICATED_INSTANCES.telegram);
+  const rooms = dedicatedDaemonPaths('/home/u', DEDICATED_INSTANCES.rooms);
+  assert.equal(tg.stateDir, '/home/u/.ours-tg');
+  assert.equal(tg.configPath, '/home/u/.ours-tg/config.json');
+  assert.equal(tg.serviceName, 'tg');
+  // Isolation is only real if none of the three is shared with another daemon.
+  assert.notEqual(tg.stateDir, rooms.stateDir);
+  assert.notEqual(tg.configPath, rooms.configPath);
+  assert.notEqual(tg.serviceName, rooms.serviceName);
+  assert.notEqual(tg.stateDir, '/home/u/.ours', 'never the shared daemon\'s state dir');
+  // The instance names must satisfy core's service-name rules (alphanumeric, no separators).
+  for (const name of Object.values(DEDICATED_INSTANCES)) {
+    assert.match(name, /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,30}[A-Za-z0-9])?$/, `${name} is a valid unit name`);
+  }
+});
+
+test('validateDaemonPort: rejects junk, reserved, already-claimed and occupied ports', () => {
+  const free = () => false;
+  // A good port passes through unchanged.
+  assert.deepEqual(validateDaemonPort('3060', { isTaken: free }), { ok: true, port: 3060, reason: '' });
+  // Enter (empty input) takes the fallback rather than failing.
+  assert.equal(validateDaemonPort('', { fallback: 3050, isTaken: free }).ok, false, 'empty is not a number');
+  // Out of range / non-numeric.
+  for (const bad of ['0', '65536', 'abc', '-1', '3.5.1']) {
+    const v = validateDaemonPort(bad, { isTaken: free });
+    assert.equal(v.ok, false, `${bad} rejected`);
+    assert.match(v.reason, /port number/);
+  }
+  // Reserved by another component.
+  const reserved = validateDaemonPort('3051', { isTaken: free });
+  assert.equal(reserved.ok, false);
+  assert.match(reserved.reason, /reserved by another part of the stack/);
+  assert.equal(validateDaemonPort(String(COWORK_DEFAULT_PORT), { isTaken: free }).ok, false, 'rooms console port too');
+  // Already claimed EARLIER IN THIS RUN — nothing is listening yet, so only the
+  // in-run ledger can catch this. This is the duplicate-port case.
+  const dup = validateDaemonPort('3060', { isTaken: free, taken: [3060] });
+  assert.equal(dup.ok, false);
+  assert.match(dup.reason, /already being used by another daemon in this install/);
+  // Occupied on the machine.
+  const busy = validateDaemonPort('3070', { isTaken: (p) => p === 3070 });
+  assert.equal(busy.ok, false);
+  assert.match(busy.reason, /already in use on this machine/);
+  // A caller may drop the reserved list (the rooms console legitimately wants 3052).
+  assert.equal(validateDaemonPort('3052', { isTaken: free, reserved: [] }).ok, true);
+});
+
+test('planPorts: the finished topology is refused when two daemons share a port', () => {
+  const ok = planPorts([
+    { label: 'shared', port: 3050 },
+    { label: 'telegram', port: 3060 },
+    { label: 'rooms', port: 3052 },
+  ]);
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.duplicates, []);
+
+  const clash = planPorts([
+    { label: 'shared', port: 3050 },
+    { label: 'telegram', port: 3050 },
+  ]);
+  assert.equal(clash.ok, false);
+  assert.equal(clash.duplicates.length, 1);
+  assert.equal(clash.duplicates[0].port, 3050);
+  assert.deepEqual(clash.duplicates[0].labels, ['shared', 'telegram']);
+
+  // Rows that own no port (a skipped component) are simply not part of the plan.
+  assert.equal(planPorts([{ label: 'skipped', port: null }, { label: 'shared', port: 3050 }]).ok, true);
+  assert.equal(planPorts([]).ok, true);
+});
+
+// ── Rooms / ours-cowork ───────────────────────────────────────────────────────
+
+test('coworkConfigPath: OURS_COWORK_CONFIG, else <home>/.ours-cowork/config.json', () => {
+  assert.equal(coworkConfigPath({}, '/home/u'), '/home/u/.ours-cowork/config.json');
+  assert.equal(coworkConfigPath({ OURS_COWORK_CONFIG: '/tmp/cw.json' }, '/home/u'), '/tmp/cw.json');
+});
+
+test('planCoworkConfig: writes broker + state + console port, and a rerun writes nothing', () => {
+  const desired = { brokerUrl: 'wss://broker1.ours.network', stateDir: '/home/u/.ours-cowork', restPort: 3052 };
+  const fresh = planCoworkConfig({}, desired);
+  assert.equal(fresh.changed, true);
+  const written = JSON.parse(fresh.text);
+  assert.equal(written.version, 1, 'cowork\'s config is a versioned strict document');
+  assert.equal(written.brokerUrl, 'wss://broker1.ours.network', 'rooms shares the deployment broker');
+  assert.equal(written.stateDir, '/home/u/.ours-cowork');
+  assert.deepEqual(written.rest, { enabled: true, port: 3052 });
+
+  // Idempotent re-run: the same selection is a no-op, so nothing is rewritten.
+  assert.equal(planCoworkConfig(written, desired).changed, false);
+
+  // A changed console port IS a write, and reports what it replaced.
+  const moved = planCoworkConfig(written, { ...desired, restPort: 3062 });
+  assert.equal(moved.changed, true);
+  assert.equal(moved.previous.restPort, 3052);
+  assert.equal(JSON.parse(moved.text).rest.port, 3062);
+
+  // An operator's explicit rest.enabled:false survives a port update — the rest block
+  // is merged, not replaced.
+  const disabled = { ...written, rest: { enabled: false, port: 3052 } };
+  const afterMove = JSON.parse(planCoworkConfig(disabled, { ...desired, restPort: 3062 }).text);
+  assert.equal(afterMove.rest.enabled, false, 'never re-enables a console the operator turned off');
+  assert.equal(afterMove.rest.port, 3062);
+
+  // Unrelated keys the user or cowork itself added are preserved.
+  const extra = planCoworkConfig({ ...written, somethingElse: 'keep me' }, { ...desired, restPort: 3062 });
+  assert.equal(JSON.parse(extra.text).somethingElse, 'keep me');
+
+  // Non-object input (absent/corrupt file) is treated as empty, never thrown on.
+  assert.equal(planCoworkConfig(null, desired).changed, true);
+  assert.equal(planCoworkConfig('nonsense', desired).changed, true);
+});
+
+test('buildHandoffPrompt: Rooms gets its own step, and drops out when Rooms was skipped', () => {
+  const withRooms = buildHandoffPrompt({ fleet: true, telegram: true, rooms: true }).text;
+  assert.match(withRooms, /3\. Set up my first Rooms mission room/);
+  assert.match(withRooms, /inviting the people and\s+agents/);
+  const noRooms = buildHandoffPrompt({ fleet: true, telegram: true }).text;
+  assert.doesNotMatch(noRooms, /Rooms/, 'a skipped Rooms must not appear in the hand-off');
+  const roomsOnly = buildHandoffPrompt({ rooms: true }).text;
+  assert.match(roomsOnly, /1\. Set up my first Rooms mission room/, 'steps renumber');
 });

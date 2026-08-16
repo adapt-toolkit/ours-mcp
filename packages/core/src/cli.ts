@@ -23,6 +23,9 @@
 //   OURS_STATE_DIR       state + pid/log dir (default ~/.ours)
 //   OURS_GC_INTERVAL_MS  message-GC interval in ms (default 3600000)
 //   OURS_AUTOSTART       "1"/"true": proxy auto-spawns the daemon (default off)
+//   OURS_SERVICE_NAME    boot-service instance name (default: none — the single
+//                        shared `ours.service`). A name gives this daemon its own
+//                        unit so an isolated second daemon cannot overwrite it.
 
 import { spawn, spawnSync } from 'node:child_process';
 import { connect } from 'node:net';
@@ -61,6 +64,9 @@ const FILES_ALWAYS_PROMPT = ['1', 'true', 'yes', 'on'].includes(
 );
 import { sttStatus } from './transcribe';
 import { linuxProcHasExited } from './process-state';
+import {
+  systemdUnitName, launchdLabel, normalizeInstanceName, buildSystemdUnit, buildLaunchdPlist,
+} from './service-instance';
 import { runVoiceSetup, VOICE_SETUP_HELP } from './voice-setup';
 import {
   formatStartupProgress,
@@ -1085,8 +1091,27 @@ async function cmdWatch(which?: string): Promise<void> {
   watchViaFileFallback(STATE_DIR, which);
 }
 
-const SYSTEMD_UNIT = 'ours.service';
-const LAUNCHD_LABEL = 'solutions.adaptframework.ours';
+// The boot-service definition this daemon owns. With no instance name (the
+// default, and every deployment that predates named instances) these are exactly
+// the historical `ours.service` / `solutions.adaptframework.ours`. A named
+// instance gets its OWN unit so an isolated second daemon cannot overwrite the
+// shared one — see src/service-instance.ts for the naming and validation rules.
+const SERVICE_INSTANCE = CONFIG.serviceName ?? '';
+const SYSTEMD_UNIT = systemdUnitName(SERVICE_INSTANCE);
+const LAUNCHD_LABEL = launchdLabel(SERVICE_INSTANCE);
+
+// An unusable instance name must FAIL the service commands rather than silently
+// fall back to the shared unit — falling back is precisely the overwrite this
+// feature exists to prevent.
+function requireValidInstance(): string {
+  const v = normalizeInstanceName(SERVICE_INSTANCE);
+  if (!v.ok) {
+    err(`invalid service name ${JSON.stringify(SERVICE_INSTANCE)}: ${v.reason}`);
+    err('  set OURS_SERVICE_NAME (or "serviceName" in config.json) to a valid name, or unset it for the shared daemon.');
+    process.exit(1);
+  }
+  return v.name;
+}
 
 function systemdUnitPath(): string {
   return join(homedir(), '.config', 'systemd', 'user', SYSTEMD_UNIT);
@@ -1104,24 +1129,14 @@ function run(cmd: string, args: string[]): boolean {
 function installSystemd(): void {
   const unitPath = systemdUnitPath();
   fs.mkdirSync(dirname(unitPath), { recursive: true });
-  const unit = `[Unit]
-Description=ours MCP daemon (secure agent-to-agent messaging over ADAPT)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${process.execPath} ${SELF} serve
-Environment=OURS_TRANSPORT=http
-Environment=OURS_PORT=${PORT}
-Environment=OURS_BROKER_URL=${BROKER_URL}
-Environment=OURS_STATE_DIR=${STATE_DIR}
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-`;
+  const unit = buildSystemdUnit({
+    instance: SERVICE_INSTANCE,
+    port: PORT,
+    brokerUrl: BROKER_URL,
+    stateDir: STATE_DIR,
+    execPath: process.execPath,
+    self: SELF,
+  });
   fs.writeFileSync(unitPath, unit);
   out(`wrote ${unitPath}`);
 
@@ -1142,9 +1157,19 @@ WantedBy=default.target
   }
   out('');
   out(`ours-mcp installed as a systemd user service and started.`);
+  if (SERVICE_INSTANCE) out(`  instance: ${SERVICE_INSTANCE} (its own unit — the shared ours.service is untouched)`);
   out(`  status:  systemctl --user status ${SYSTEMD_UNIT}`);
   out(`  logs:    journalctl --user -u ${SYSTEMD_UNIT} -f`);
-  out(`  remove:  ours-mcp uninstall-service`);
+  out(`  remove:  ${removeHint()}`);
+}
+
+// The exact command that removes THIS unit. A named instance is only findable
+// again when the same name is supplied, so spell it out rather than print a
+// command that would target the shared daemon.
+function removeHint(): string {
+  return SERVICE_INSTANCE
+    ? `OURS_SERVICE_NAME=${SERVICE_INSTANCE} ours-mcp uninstall-service`
+    : 'ours-mcp uninstall-service';
 }
 
 function uninstallSystemd(): void {
@@ -1157,37 +1182,21 @@ function uninstallSystemd(): void {
     err(`failed to remove ${unitPath}: ${String(e)}`);
   }
   run('systemctl', ['--user', 'daemon-reload']);
-  out('ours-mcp service uninstalled.');
+  out(`ours-mcp service uninstalled (${SYSTEMD_UNIT}).`);
 }
 
 function installLaunchd(): void {
   const plistPath = launchdPlistPath();
   fs.mkdirSync(dirname(plistPath), { recursive: true });
-  const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${LAUNCHD_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${process.execPath}</string>
-    <string>${SELF}</string>
-    <string>serve</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>OURS_TRANSPORT</key><string>http</string>
-    <key>OURS_PORT</key><string>${PORT}</string>
-    <key>OURS_BROKER_URL</key><string>${BROKER_URL}</string>
-    <key>OURS_STATE_DIR</key><string>${STATE_DIR}</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${LOG_PATH}</string>
-  <key>StandardErrorPath</key><string>${LOG_PATH}</string>
-</dict>
-</plist>
-`;
+  const plist = buildLaunchdPlist({
+    instance: SERVICE_INSTANCE,
+    port: PORT,
+    brokerUrl: BROKER_URL,
+    stateDir: STATE_DIR,
+    execPath: process.execPath,
+    self: SELF,
+    logPath: LOG_PATH,
+  });
   fs.writeFileSync(plistPath, plist);
   out(`wrote ${plistPath}`);
 
@@ -1199,7 +1208,8 @@ function installLaunchd(): void {
   }
   out('');
   out('ours-mcp installed as a launchd agent and started.');
-  out(`  remove:  ours-mcp uninstall-service`);
+  if (SERVICE_INSTANCE) out(`  instance: ${SERVICE_INSTANCE} (label ${LAUNCHD_LABEL} — the shared agent is untouched)`);
+  out(`  remove:  ${removeHint()}`);
 }
 
 function uninstallLaunchd(): void {
@@ -1212,10 +1222,11 @@ function uninstallLaunchd(): void {
   } catch (e) {
     err(`failed to remove ${plistPath}: ${String(e)}`);
   }
-  out('ours-mcp service uninstalled.');
+  out(`ours-mcp service uninstalled (${LAUNCHD_LABEL}).`);
 }
 
 async function cmdInstallService(): Promise<void> {
+  requireValidInstance();
   await cmdStop();
   if (process.platform === 'linux') return installSystemd();
   if (process.platform === 'darwin') return installLaunchd();
@@ -1224,6 +1235,7 @@ async function cmdInstallService(): Promise<void> {
 }
 
 function cmdUninstallService(): void {
+  requireValidInstance();
   if (process.platform === 'linux') return uninstallSystemd();
   if (process.platform === 'darwin') return uninstallLaunchd();
   err(`uninstall-service: unsupported platform "${process.platform}".`);
@@ -1257,10 +1269,12 @@ function usage(): void {
   out('');
   out('  install-service    install + start a boot-persistent service (systemd/launchd)');
   out('  uninstall-service  stop + remove that service');
+  out('     a named instance (OURS_SERVICE_NAME / config serviceName) owns its OWN unit,');
+  out('     so an isolated second daemon never overwrites the shared one. Default: shared.');
   out('');
   out('Config precedence (per field): env var > config.json > default.');
   out('  config.json: OURS_CONFIG, else ~/.ours/config.json — edit with `setup`.');
-  out('  env: OURS_BROKER_URL, OURS_PORT (3050), OURS_STATE_DIR (~/.ours), OURS_GC_INTERVAL_MS (3600000), OURS_AUTOSTART (off)');
+  out('  env: OURS_BROKER_URL, OURS_PORT (3050), OURS_STATE_DIR (~/.ours), OURS_GC_INTERVAL_MS (3600000), OURS_AUTOSTART (off), OURS_SERVICE_NAME (none)');
   out('(install-service bakes the resolved config values into the service definition.)');
 }
 

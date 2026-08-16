@@ -42,6 +42,11 @@ export interface OursConfig {
   // until the operator sets provider + apiKey (+ model where required); model
   // strings pass to the provider verbatim. See src/transcribe.ts.
   stt?: SttUserConfig;
+  // Boot-service instance name. Empty/absent (the default, and every existing
+  // deployment) keeps the historical single `ours.service` / bare launchd label.
+  // A name gives this daemon its OWN unit so a second, deliberately isolated
+  // daemon cannot overwrite the shared one's definition. See service-instance.ts.
+  serviceName?: string;
 }
 
 export const DEFAULT_CONFIG: OursConfig = {
@@ -82,6 +87,7 @@ function readFileConfig(): Partial<OursConfig> {
     out.apiVisibility = parsed.apiVisibility as ApiVisibility;
   }
   if (typeof parsed.apiToken === 'string' && parsed.apiToken.trim()) out.apiToken = parsed.apiToken.trim();
+  if (typeof parsed.serviceName === 'string' && parsed.serviceName.trim()) out.serviceName = parsed.serviceName.trim();
   if (parsed.stt && typeof parsed.stt === 'object') {
     const s = parsed.stt as Record<string, unknown>;
     const stt: SttUserConfig = {};
@@ -126,6 +132,7 @@ export function loadConfig(): OursConfig {
     autoStart: envBool('OURS_AUTOSTART') ?? file.autoStart ?? DEFAULT_CONFIG.autoStart,
     apiVisibility: envVisibility() ?? file.apiVisibility ?? DEFAULT_CONFIG.apiVisibility,
     apiToken: process.env.OURS_API_TOKEN?.trim() || file.apiToken,
+    serviceName: process.env.OURS_SERVICE_NAME?.trim() || file.serviceName,
     stt: sttFromEnv(file.stt),
   };
 }

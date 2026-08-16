@@ -2,9 +2,15 @@
 // ours.network — the unified `ours-install` experience (the real UX behind install.sh's thin
 // bootstrap, and the `ours-install` command once the stack is on the machine).
 //
-// ONE installer for the WHOLE stack — ours core (the daemon) + the harness plugins (Claude Code /
-// Codex / Hermes) + ours-fleet + the Telegram connector — for someone who ALREADY has Claude,
-// Codex, and/or Hermes.
+// ONE installer for the WHOLE stack — the shared ours daemon + the harness plugins (Claude Code /
+// Codex / Hermes) + ours-fleet + the Telegram connector + Rooms (ours-cowork) — for someone who
+// ALREADY has Claude, Codex, and/or Hermes.
+//
+// TOPOLOGY. Step 1 installs and configures ONE shared daemon and the user picks its listen port
+// there; every consumer below is wired to that endpoint. The Telegram connector may instead be
+// given its OWN daemon — its own port, state directory and boot unit — chosen independently, and
+// defaulting to the shared one so Enter and non-interactive runs keep the historical topology.
+// Rooms runs its own standalone daemon by design and consumes no ours daemon at all (see step 5).
 // Its whole job: install the stack cleanly, then hand back ONE copy-paste prompt the user drops
 // into their agent to finish remaining configuration conversationally. Voice API credentials are
 // the one guided secret flow: interactive, masked, optional, and written atomically with mode 0600.
@@ -28,15 +34,18 @@ import {
   detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
   voiceSetupStatus, resolveSharedBroker, tgConfigPath, planTgDaemonConfig, daemonEndpoint,
   DEFAULT_PORT, resolveChannel, pkgSpec,
+  validateDaemonPort, planPorts, dedicatedDaemonPaths, DEDICATED_INSTANCES,
+  coworkConfigPath, planCoworkConfig, COWORK_DEFAULT_PORT,
 } from './lib/logic.mjs';
 import { atomicWriteConfig } from './lib/config.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
-// Release channel: OURS_CHANNEL=nightly installs @nightly for mcp/tg-connector/plugin
-// launchers but keeps @ours.network/fleet at @latest (fleet has no nightly). With no
-// explicit selection the installer follows its OWN channel, so a nightly installer
-// builds a nightly stack instead of silently mixing tags across the connector's
-// architecture boundary (see resolveChannel).
+// Release channel: OURS_CHANNEL=nightly installs each package's PRERELEASE dist-tag —
+// @nightly for mcp/tg-connector/fleet/the plugin launchers, and @latest for cowork,
+// which publishes `next` rather than `nightly` and whose `next` is currently older
+// than its `latest` (see PKG_CHANNEL_TAGS in lib/logic.mjs). With no explicit
+// selection the installer follows its OWN channel, so a nightly installer builds a
+// nightly stack instead of silently mixing tags across an architecture boundary.
 const CHANNEL = resolveChannel(process.env.OURS_CHANNEL || process.env.OURS_INSTALL_CHANNEL, pkgVersion());
 const spec = (pkgKey) => pkgSpec(pkgKey, CHANNEL); // → "@ours.network/<key>@<tag>"
 let DRY = !!process.env.OURS_INSTALL_DRY_RUN;
@@ -49,10 +58,11 @@ const line = (s = '') => sink(`${s}\n`);
 const say = (s) => sink(`ours: ${s}\n`);
 
 // --- external command helpers (never throw; the installer degrades, it doesn't crash) ----------
-function run(bin, args, { capture = false, timeout } = {}) {
+function run(bin, args, { capture = false, timeout, env } = {}) {
   const r = spawnSync(bin, args, {
     encoding: 'utf8',
     timeout,
+    env: env ? { ...process.env, ...env } : process.env,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
   });
   const timedOut = !!(r.error && (r.error.code === 'ETIMEDOUT' || r.signal === 'SIGTERM'));
@@ -194,10 +204,13 @@ const USAGE = `ours-install — the unified ours.network stack installer.
 
   ours-install [--dry-run] [--help] [--version]
 
-Guided ~3-minute setup for the whole stack: ours core (the daemon), the harness
-plugins (Claude Code + Codex + Hermes), ours-fleet, and the Telegram connector — then one
-copy-paste hand-off prompt. You approve each step; re-run any time to add a piece
-or update.
+Guided ~3-minute setup for the whole stack: the shared ours daemon (you pick its
+port), the harness plugins (Claude Code + Codex + Hermes), ours-fleet, the Telegram
+connector, and Rooms (ours-cowork) — then one copy-paste hand-off prompt. You approve
+each step; re-run any time to add a piece or update.
+
+Telegram can share the daemon from step 1 or be given its own (its own port, state
+directory and boot service); Enter keeps the shared one.
 
   --dry-run    walk the whole flow and print what it WOULD do — install/change nothing
   --help       show this help and exit
@@ -296,56 +309,44 @@ async function main() {
   line('');
   cont();
 
-  // ============================================================================================
-  // STEP 0 — the two config questions (asked ONCE, up front). SKIPPED entirely when a daemon is
-  // already configured (update path reuses its port/broker; delta #1859).
-  // ============================================================================================
   const status0 = parseStatus(daemonStatusText());
   let chosenBroker;     // undefined = keep default / existing
   let chosenPort = status0.port || DEFAULT_PORT;
   const configFirst = !daemonInstalled;
 
-  if (configFirst) {
-    line(heading('A couple of quick settings'));
-    // 0a — broker (owner edit #1: SECURE wording; owner edit #2: self-host → website only).
-    line(info('Your agents connect through a "broker" — a shared meeting point that lets them find'));
-    line(info("each other. It's secure: your messages are end-to-end encrypted, so the broker never"));
-    line(info('sees what they say. Almost everyone uses the standard one — just press Enter.'));
-    const custom = yes('  Use a custom broker address?', false);
-    if (custom) {
-      line(info(`(Only needed if you run your own broker. More at ${SELFHOST_URL}.)`));
-      const entered = ask('  Enter the broker address: ', '');
-      const v = validateBroker(entered);
-      if (entered && v.ok && !v.empty) {
-        // Undo safety net: a mistaken custom entry is one keystroke back to the standard broker.
-        const keep = yes(`  Use "${v.value}"?  (No = go back to the standard broker)`, true);
-        if (keep) { chosenBroker = v.value; line(ok(`broker set to ${chosenBroker}.`)); }
-        else line(ok('using the standard broker.'));
-      } else {
-        if (entered) line(warn(`"${entered}" doesn't look like a ws:// address — using the standard broker.`));
-        else line(ok('using the standard broker.'));
-      }
-    } else {
-      line(ok('using the standard broker.'));
-    }
+  // Every port this run has committed to, so a later daemon can't be handed one an
+  // earlier daemon claimed. A live bind probe cannot see these — nothing is
+  // listening on them yet — which is exactly why they're tracked by hand.
+  const claimedPorts = [];
+  // The finished topology, for the end-of-run cross-check. Each entry is one thing that
+  // will try to BIND a port, named so a collision can be reported in the user's terms.
+  const topology = [];
+  const claimPort = (port, label) => {
+    if (!Number.isInteger(port)) return;
+    if (!claimedPorts.includes(port)) claimedPorts.push(port);
+    if (label) topology.push({ label, port });
+  };
 
-    // 0b — port: probe 3050; only ask if busy. Minimize the concept.
-    if (!portTakenSync(DEFAULT_PORT)) {
-      chosenPort = DEFAULT_PORT;
-      line(ok(`Using local port ${DEFAULT_PORT}.`));
-    } else {
-      line(info(`The standard local port (${DEFAULT_PORT}) is already in use on your machine.`));
-      let candidate = suggestPort(DEFAULT_PORT + 1, portTakenSync);
-      const raw = ask(`  Pick another number for the ours daemon?  ${c.gray(`[Enter for ${candidate}]`)}: `, String(candidate));
-      const parsed = parsePort(raw, candidate);
-      candidate = suggestPort(parsed.ok ? parsed.port : candidate, portTakenSync);
-      chosenPort = candidate;
-      line(ok(`Using local port ${chosenPort}.`));
+  // Ask for ONE daemon's port, validate it, and keep asking until the answer is
+  // usable. Enter (and every non-interactive run) takes `def` unchanged — that is
+  // what keeps the historical behaviour and scripted installs identical.
+  const askDaemonPort = (prompt, def) => {
+    let candidate = def;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const raw = ask(`  ${prompt}  ${c.gray(`[Enter for ${candidate}]`)}: `, String(candidate));
+      const v = validateDaemonPort(raw, { fallback: candidate, isTaken: portTakenSync, taken: claimedPorts });
+      if (v.ok) return v.port;
+      line(warn(`${v.reason}.`));
+      if (!interactive) break;   // no one to re-ask; fall through to a suggestion
+      candidate = suggestPort(v.port + 1, (p) => claimedPorts.includes(p) || portTakenSync(p));
+      line(info(`Suggesting ${candidate} instead.`));
     }
-    line('');
-    line(ok(`Config ready — broker: ${chosenBroker ? 'custom' : 'standard'}, port: ${chosenPort}.`));
-    cont();
-  }
+    // Out of attempts (or headless): take the first genuinely free port rather
+    // than persisting one we know is unusable.
+    const fallback = suggestPort(candidate, (p) => claimedPorts.includes(p) || portTakenSync(p));
+    line(ok(`Using port ${fallback}.`));
+    return fallback;
+  };
 
   // Track outcomes for the summary + hand-off.
   const summary = [];
@@ -432,12 +433,56 @@ async function main() {
   };
 
   // ============================================================================================
-  // STEP 1 / 4 — ours core (the daemon). Config-first: write config → optional voice → start ONCE.
+  // STEP 1 / 5 — the SHARED ours daemon. Its own visible step, and it owns its own configuration
+  // (broker + listen port) rather than a nameless "quick settings" preamble: every consumer below
+  // is wired to the endpoint chosen HERE, so the choice belongs to the step that makes it.
+  // Config-first within the step: choose → write config → optional voice → start ONCE.
   // ============================================================================================
-  line(heading('1/4 — ours core (the daemon)'));
-  line(info('This is the piece that lets your agents talk to each other securely. Everything else'));
-  line(info('needs it.'));
+  line(heading('1/5 — the shared ours daemon'));
+  line(info('This is the piece that lets your agents talk to each other securely. The harness'));
+  line(info('plugins, ours-fleet and the Telegram connector all connect to it — Telegram can be'));
+  line(info('given its own instead, later. (Rooms runs its own daemon either way.)'));
   const before = parseVersion(versionBefore);
+
+  if (configFirst) {
+    // Broker (owner edit #1: SECURE wording; owner edit #2: self-host → website only).
+    line('');
+    line(info('Your agents connect through a "broker" — a shared meeting point that lets them find'));
+    line(info("each other. It's secure: your messages are end-to-end encrypted, so the broker never"));
+    line(info('sees what they say. Almost everyone uses the standard one — just press Enter.'));
+    const custom = yes('  Use a custom broker address?', false);
+    if (custom) {
+      line(info(`(Only needed if you run your own broker. More at ${SELFHOST_URL}.)`));
+      const entered = ask('  Enter the broker address: ', '');
+      const v = validateBroker(entered);
+      if (entered && v.ok && !v.empty) {
+        // Undo safety net: a mistaken custom entry is one keystroke back to the standard broker.
+        const keep = yes(`  Use "${v.value}"?  (No = go back to the standard broker)`, true);
+        if (keep) { chosenBroker = v.value; line(ok(`broker set to ${chosenBroker}.`)); }
+        else line(ok('using the standard broker.'));
+      } else {
+        if (entered) line(warn(`"${entered}" doesn't look like a ws:// address — using the standard broker.`));
+        else line(ok('using the standard broker.'));
+      }
+    } else {
+      line(ok('using the standard broker.'));
+    }
+
+    // Listen port. ALWAYS asked now, so the shared daemon's endpoint is a decision the
+    // user makes rather than one they only hear about when 3050 happens to be busy.
+    // The default is still 3050 (the next free port when it is taken), so Enter and
+    // every non-interactive run land exactly where they always did.
+    line('');
+    line(info('The daemon listens on a local port. Everything else in this install is pointed at it.'));
+    const portDefault = portTakenSync(DEFAULT_PORT) ? suggestPort(DEFAULT_PORT + 1, portTakenSync) : DEFAULT_PORT;
+    if (portDefault !== DEFAULT_PORT) line(info(`The standard port (${DEFAULT_PORT}) is already in use on your machine.`));
+    chosenPort = askDaemonPort('Which local port should the shared daemon use?', portDefault);
+    line(ok(`Shared daemon: port ${chosenPort}, broker ${chosenBroker ? 'custom' : 'standard'}.`));
+    line('');
+  } else {
+    line(ok(`Shared daemon already configured — port ${chosenPort}. Keeping it.`));
+  }
+  claimPort(chosenPort, 'the shared ours daemon');
 
   if (!daemonInstalled) {
     const goCore = yes('  Install and start it?', true);
@@ -628,10 +673,10 @@ async function main() {
   }
 
   // ============================================================================================
-  // STEP 2 / 4 — harness plugins (Claude Code + Codex + Hermes). The installer drives the plugin
+  // STEP 2 / 5 — harness plugins (Claude Code + Codex + Hermes). The installer drives the plugin
   // CLIs for Claude/Codex; Hermes installs via npm + ours-hermes-install (no CLI driving).
   // ============================================================================================
-  line(heading('2/4 — harness plugins'));
+  line(heading('2/5 — harness plugins'));
   line(info('These teach Claude Code, Codex, and Hermes the ours skills, so you can just talk to your'));
   line(info("agent to message people and set things up. I'll install them for you — no commands to type."));
   for (const h of harnesses) {
@@ -644,9 +689,9 @@ async function main() {
   }
 
   // ============================================================================================
-  // STEP 3 / 4 — ours-fleet. Appealing wording (owner edit #4); default YES.
+  // STEP 3 / 5 — ours-fleet. Appealing wording (owner edit #4); default YES.
   // ============================================================================================
-  line(heading('3/4 — ours-fleet (your always-online agent team)'));
+  line(heading('3/5 — ours-fleet (your always-online agent team)'));
   line(info('This makes your harnesses PERSISTENT: Claude Code and Codex stop being just a terminal'));
   line(info('session and become always-online daemons that survive a reboot. Stand up your own team'));
   line(info('of always-online developers, combine harnesses, run several Claude Codes, and link them'));
@@ -674,22 +719,82 @@ async function main() {
   }
   cont(goFleet);
 
-  // Give the Telegram connector the ONE daemon this install just built: its loopback
+  // The broker the WHOLE deployment shares, whichever daemon a consumer talks to.
+  const sharedBroker = () => resolveSharedBroker({
+    chosenBroker,
+    statusBroker: status0.broker,
+    configBroker: readConfigObject().brokerUrl,
+  });
+
+  // Provision a daemon that belongs to ONE consumer: its own config file, its own
+  // state directory, its own port, and — via core's OURS_SERVICE_NAME — its own boot
+  // unit, so `install-service` cannot overwrite the shared daemon's. Returns the
+  // endpoint + state dir to wire that consumer to, and whether it came up.
+  async function provisionDedicatedDaemon({ instance, port, label }) {
+    const { stateDir, configPath: cfgPath, serviceName } = dedicatedDaemonPaths(homedir(), instance);
+    const env = { OURS_CONFIG: cfgPath, OURS_STATE_DIR: stateDir, OURS_SERVICE_NAME: serviceName };
+    // The dedicated daemon has to exist as a package before it can be started; on a
+    // fresh machine step 1 already installed it, but a re-run that skipped core has not.
+    await actSpin(`ensuring ${spec('mcp')}…`, `npm i -g ${spec('mcp')}`, () => runAsync(NPM, ['i', '-g', spec('mcp')]));
+    const desired = { port, stateDir, serviceName };
+    const broker = sharedBroker();
+    if (broker) desired.brokerUrl = broker;
+    let existing = {};
+    try { existing = JSON.parse(readFileSync(cfgPath, 'utf8')); } catch { /* absent or unreadable */ }
+    const sameAlready = existing.port === port && existing.stateDir === stateDir && existing.serviceName === serviceName;
+    if (sameAlready) {
+      line(ok(`The ${label} daemon is already configured on port ${port} — no change.`));
+      // Nothing to change AND it is already up: do not touch it. `install-service` STOPS
+      // the daemon before rewriting the unit, so re-running it here would bounce a healthy
+      // daemon for no reason.
+      if (!DRY && run('ours-mcp', ['status'], { capture: true, env }).ok) {
+        line(ok(`Dedicated ${label} daemon already running on port ${port} — left alone.`));
+        return { endpoint: daemonEndpoint(port), stateDir, serviceName, configPath: cfgPath, running: true, port };
+      }
+    } else {
+      await act(`write ${cfgPath} (dedicated ${label} daemon, port ${port}, state ${stateDir})`, async () => {
+        atomicWriteConfig(cfgPath, mergeConfig(existing, desired));
+        return { ok: true };
+      });
+    }
+    const started = await act(`ours-mcp start (dedicated ${label} daemon, port ${port})`, async () => run('ours-mcp', ['start'], { env }));
+    const svc = await act(`ours-mcp install-service (dedicated ${label} daemon, unit ours-${serviceName})`, async () => run('ours-mcp', ['install-service'], { env }));
+    // Same recovery as the shared daemon: install-service STOPS the daemon before it
+    // writes the unit, so a failure there leaves nothing listening on this port.
+    let running = started.ok;
+    if (!DRY && !svc.ok) {
+      running = run('ours-mcp', ['status'], { capture: true, env }).ok;
+      if (!running) {
+        line(info(`the boot-service step stopped the ${label} daemon before it failed — restarting it.`));
+        running = run('ours-mcp', ['start'], { env }).ok;
+      }
+      line(warn(`the ${label} daemon has no boot service — retry '${c.cyan(`OURS_CONFIG=${cfgPath} OURS_SERVICE_NAME=${serviceName} ours-mcp install-service`)}'.`));
+    }
+    if (running || DRY) line(ok(`Dedicated ${label} daemon ready on port ${port} (state ${stateDir}, unit ours-${serviceName}).`));
+    else line(warn(`could not start the dedicated ${label} daemon — run '${c.cyan(`OURS_CONFIG=${cfgPath} ours-mcp start`)}'.`));
+    return { endpoint: daemonEndpoint(port), stateDir, serviceName, configPath: cfgPath, running: running || DRY, port };
+  }
+
+  // Ask one consumer whether it uses the COMMON daemon or gets its own. Enter and
+  // every non-interactive run answer "common" — the historical topology.
+  const askDaemonMode = (what) => {
+    line(info(`${what} can share the daemon from step 1, or run against its own isolated one.`));
+    line(info('Sharing is right for almost everyone — press Enter. A dedicated daemon gets its own'));
+    line(info('port, state directory and boot service, and does not see the shared daemon\'s identities.'));
+    return yes(`  Give ${what} its OWN dedicated daemon?`, false) ? 'dedicated' : 'common';
+  };
+
+  // Give the Telegram connector the daemon it was assigned: that daemon's loopback
   // endpoint, the state directory that endpoint's API token belongs to, and — for a
   // pre-0.3.3 connector that still meets the daemon at a broker instead — that broker.
   // Idempotent: an unchanged selection writes nothing. Returns { changed, hadPrevious }
   // so the caller can warn about a service unit that froze an older selection.
-  async function writeTgDaemonConfig({ chosenPort, chosenBroker, status0 }) {
+  async function writeTgDaemonConfig({ endpoint, stateDir }) {
     const path = tgConfigPath(process.env, homedir());
-    const stateDir = daemonStateDir();
     const desired = {
-      daemonUrl: daemonEndpoint(chosenPort),
+      daemonUrl: endpoint,
       daemonStateDir: stateDir,
-      brokerUrl: resolveSharedBroker({
-        chosenBroker,
-        statusBroker: status0.broker,
-        configBroker: readConfigObject().brokerUrl,
-      }),
+      brokerUrl: sharedBroker(),
     };
     let existing = {};
     try { existing = JSON.parse(readFileSync(path, 'utf8')); } catch { /* absent or unreadable */ }
@@ -708,42 +813,143 @@ async function main() {
   }
 
   // ============================================================================================
-  // STEP 4 / 4 — Telegram connector. Install-only (no bot tokens here). Then: run as a service?
+  // STEP 4 / 5 — Telegram connector. Install-only (no bot tokens here). Then: run as a service?
   // ============================================================================================
-  line(heading('4/4 — Telegram connector'));
+  line(heading('4/5 — Telegram connector'));
   line(info('This bridges a Telegram bot to your Ours node, so you can talk to your agent from'));
   line(info("Telegram. (You'll set up the actual bot later, with your agent — not here.)"));
   const goTg = yes('  Install it?', false);
   if (goTg) {
     await actSpin(`installing ${spec('tg-connector')}…`, `npm i -g ${spec('tg-connector')}`, () => runAsync(NPM, ['i', '-g', spec('tg-connector')]));
-    // POINT IT AT THE ONE DAEMON — BEFORE it is started or installed as a service.
+    // WHICH daemon — asked independently of every other consumer, and answered
+    // "common" by Enter / non-interactive so the historical topology is the default.
+    line('');
+    const tgMode = askDaemonMode('the Telegram connector');
+    let tgDaemon = { endpoint: daemonEndpoint(chosenPort), stateDir: daemonStateDir(), port: chosenPort, mode: 'common' };
+    if (tgMode === 'dedicated') {
+      const instance = DEDICATED_INSTANCES.telegram;
+      const suggested = suggestPort(chosenPort + 1, (p) => claimedPorts.includes(p) || portTakenSync(p));
+      const port = askDaemonPort('Which local port should the Telegram daemon use?', suggested);
+      claimPort(port, 'the dedicated Telegram daemon');
+      const provisioned = await provisionDedicatedDaemon({ instance, port, label: 'Telegram' });
+      tgDaemon = { ...provisioned, mode: 'dedicated' };
+    } else {
+      line(ok(`Telegram will use the shared daemon on port ${chosenPort}.`));
+    }
+    // POINT IT AT THAT DAEMON — BEFORE it is started or installed as a service.
     // The connector never inherits ~/.ours/config.json (its SDK reports configPath:
     // null unless told otherwise), and `install-service` bakes whatever it resolves
     // into the unit as environment variables that outrank the file from then on. So
     // the daemon's identity has to be in its config BEFORE either happens. See
     // planTgDaemonConfig for why all three keys are written.
-    const tgConfigured = await writeTgDaemonConfig({ chosenPort, chosenBroker, status0 });
+    const tgConfigured = await writeTgDaemonConfig(tgDaemon);
+    const where = tgDaemon.mode === 'dedicated' ? `its own daemon on port ${tgDaemon.port}` : `the shared daemon on port ${tgDaemon.port}`;
     const asService = yes('  Keep it running in the background so it starts automatically on boot?', true);
     if (asService) {
       const svc = await act('ours-tg-connector install-service (starts on boot)', async () => run('ours-tg-connector', ['install-service']));
-      if (svc.ok) line(ok(`Telegram connector installed and running as a service (starts on boot), pointed at the daemon on port ${chosenPort}. No problems.`));
+      if (svc.ok) line(ok(`Telegram connector installed and running as a service (starts on boot), pointed at ${where}. No problems.`));
       else line(warn(`connector installed, but the service didn't start — retry '${c.cyan('ours-tg-connector install-service')}'.`));
-      record({ key: 'telegram', label: 'Telegram connector', state: 'installed', version: globalVersion('@ours.network/tg-connector'), note: `service (boot) · daemon ${chosenPort}` });
+      record({ key: 'telegram', label: 'Telegram connector', state: 'installed', version: globalVersion('@ours.network/tg-connector'), note: `service (boot) · ${tgDaemon.mode} daemon ${tgDaemon.port}` });
     } else {
-      line(ok(`Telegram connector installed, pointed at the daemon on port ${chosenPort}. Start it any time with '${c.cyan('ours-tg-connector start')}'. No problems.`));
+      line(ok(`Telegram connector installed, pointed at ${where}. Start it any time with '${c.cyan('ours-tg-connector start')}'. No problems.`));
       // A connector already installed as a service froze its OLD daemon selection into
       // the unit's environment, which outranks the file we just wrote. Config alone
       // cannot repair that — say so plainly rather than let it look fixed.
       if (tgConfigured.changed && tgConfigured.hadPrevious) {
         line(warn(`if you previously ran '${c.cyan('ours-tg-connector install-service')}', re-run it — the old service froze the previous daemon selection in its unit.`));
       }
-      record({ key: 'telegram', label: 'Telegram connector', state: 'installed', version: globalVersion('@ours.network/tg-connector'), note: `start on demand · daemon ${chosenPort}` });
+      record({ key: 'telegram', label: 'Telegram connector', state: 'installed', version: globalVersion('@ours.network/tg-connector'), note: `start on demand · ${tgDaemon.mode} daemon ${tgDaemon.port}` });
     }
   } else {
     line(info('skipped cleanly.'));
     record({ key: 'telegram', label: 'Telegram connector', state: 'skipped' });
   }
   cont(goTg);
+
+  // ============================================================================================
+  // STEP 5 / 5 — Rooms (ours-cowork). A STANDALONE daemon: per its own docs and shipped bundle it
+  // has "no dependency on another agent daemon" and exposes no daemonUrl / daemonStateDir /
+  // /api/v1 at all — it meets other identities at the BROKER, exactly as the ours daemon does.
+  // So there is no common-vs-dedicated ours-daemon question to ask here: the three things it
+  // actually has are the shared broker, its own private state directory, and its own loopback
+  // console/REST port. Those are what this step configures. (An owner request for a
+  // common-vs-dedicated choice on Rooms is pending a cross-repo change in ours-cowork; until that
+  // lands, offering the choice would configure nothing.)
+  // ============================================================================================
+  line(heading('5/5 — Rooms (ours-cowork)'));
+  line(info('Durable mission rooms: a room keeps its own ordered history, and people and agents'));
+  line(info('join it as seats. It runs as its own daemon with a local web console, and reaches'));
+  line(info('everyone through the same broker as the rest of your install.'));
+  const goRooms = yes('  Install it?', false);
+  if (goRooms) {
+    await actSpin(`installing ${spec('cowork')}…`, `npm i -g ${spec('cowork')}`, () => runAsync(NPM, ['i', '-g', spec('cowork')]));
+    const roomsStateDir = join(homedir(), '.ours-cowork');
+    const cfgPath = coworkConfigPath(process.env, homedir());
+    let existingRooms = {};
+    try { existingRooms = JSON.parse(readFileSync(cfgPath, 'utf8')); } catch { /* absent or unreadable */ }
+    const restDefault = Number.isInteger(existingRooms.rest?.port) ? existingRooms.rest.port : COWORK_DEFAULT_PORT;
+    line('');
+    line(info('Rooms serves a console on a loopback port — 127.0.0.1 only, never exposed.'));
+    // COWORK_DEFAULT_PORT is in RESERVED_PORTS (so no ours daemon can be handed it),
+    // so validate this one against the daemon ports only.
+    const roomsPort = (() => {
+      let candidate = restDefault;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const raw = ask(`  Which local port should the Rooms console use?  ${c.gray(`[Enter for ${candidate}]`)}: `, String(candidate));
+        const v = validateDaemonPort(raw, {
+          fallback: candidate, isTaken: (p) => (p === restDefault ? false : portTakenSync(p)),
+          taken: claimedPorts, reserved: [],
+        });
+        if (v.ok) return v.port;
+        line(warn(`${v.reason}.`));
+        if (!interactive) break;
+        candidate = suggestPort(v.port + 1, (p) => claimedPorts.includes(p) || portTakenSync(p));
+        line(info(`Suggesting ${candidate} instead.`));
+      }
+      return candidate;
+    })();
+    claimPort(roomsPort, 'the Rooms console');
+    const roomsPlan = planCoworkConfig(existingRooms, {
+      brokerUrl: sharedBroker(),
+      stateDir: roomsStateDir,
+      restPort: roomsPort,
+    });
+    if (roomsPlan.changed) {
+      await act(`write ${cfgPath} (console port ${roomsPort}, state ${roomsStateDir})`, async () => {
+        atomicWriteConfig(cfgPath, roomsPlan.text);
+        return { ok: true };
+      });
+    } else {
+      line(ok(`Rooms is already configured for this deployment (console port ${roomsPort}) — no change.`));
+    }
+    const svc = await act('ours-cowork install-service (starts on boot)', async () => run('ours-cowork', ['install-service']));
+    if (svc.ok) {
+      line(ok(`Rooms ready — console at ${c.cyan(`http://127.0.0.1:${roomsPort}/`)}, sharing your broker. No problems.`));
+    } else {
+      line(warn(`Rooms installed, but its service didn't start — retry '${c.cyan('ours-cowork install-service')}'.`));
+      line(info(`You can also run it in the foreground: '${c.cyan('ours-cowork web')}'.`));
+    }
+    record({
+      key: 'rooms',
+      label: 'Rooms (ours-cowork)',
+      state: svc.ok ? 'installed' : 'failed',
+      version: globalVersion('@ours.network/cowork'),
+      note: svc.ok ? `console ${roomsPort} · service (boot)` : 'ours-cowork install-service failed',
+    });
+  } else {
+    line(info('skipped cleanly — re-run ours-install any time to add it.'));
+    record({ key: 'rooms', label: 'Rooms (ours-cowork)', state: 'skipped' });
+  }
+  cont(goRooms);
+
+  // Last guard on the whole topology: no two daemons in this install may share a port.
+  // Each answer was validated as it was given, but only the finished plan proves the set.
+  const portPlan = planPorts(topology);
+  if (!portPlan.ok) {
+    for (const d of portPlan.duplicates) {
+      line(warn(`port ${d.port} ended up claimed by both ${d.labels[0]} and ${d.labels[1]} — one of them will fail to bind.`));
+    }
+  }
 
   return endScreen({ ttyFd, summary, chosenPort, chosenBroker });
 }
@@ -823,7 +1029,9 @@ function endScreen({ ttyFd, summary, chosenPort, chosenBroker }) {
   const has = (k) => summary.some((r) => r.key === k && (r.state === 'installed' || r.state === 'current'));
   if (has('core')) {
     const identityDone = has('identity');
-    const { text, empty } = buildHandoffPrompt({ identity: !identityDone, fleet: has('fleet'), telegram: has('telegram') });
+    const { text, empty } = buildHandoffPrompt({
+      identity: !identityDone, fleet: has('fleet'), telegram: has('telegram'), rooms: has('rooms'),
+    });
     if (empty) {
       // Nothing left to finish (identity created in-install, no fleet/Telegram). Don't show an empty box.
       line('');

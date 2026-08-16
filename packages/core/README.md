@@ -40,6 +40,30 @@ fail atomically without retrieving or writing any file.
 |---------|---------|---------|
 | `OURS_STATE_DIR` | `~/.ours` | Node identity + serialized state. Distinct per node. |
 | `OURS_BROKER_URL` | `wss://broker1.ours.network` | The ADAPT broker to connect through. Set to `ws://localhost:9000` for a local broker. |
+| `OURS_SERVICE_NAME` | *(none)* | Boot-service instance name (also `serviceName` in `config.json`). See below. |
+
+### Running more than one daemon on a host
+
+`install-service` bakes the resolved port, broker and state directory into a single boot
+definition — `ours.service` on Linux, `solutions.adaptframework.ours` on macOS. Two daemons
+installed that way would write the **same** definition, so the second silently replaces the
+first.
+
+Give a daemon an instance name and it gets its own definition instead:
+
+```sh
+OURS_CONFIG=~/.ours-tg/config.json OURS_SERVICE_NAME=tg ours-mcp install-service
+# → ours-tg.service  /  solutions.adaptframework.ours.tg
+```
+
+With no name — the default, and every existing deployment — the unit and label are exactly what
+they always were. A name must be 1–32 characters of letters, digits, hyphen or underscore,
+starting and ending with a letter or digit; anything else is **refused** rather than rewritten,
+because falling back to the shared unit is the overwrite this prevents. Removing a named
+instance needs the same name: `OURS_SERVICE_NAME=tg ours-mcp uninstall-service`.
+
+An isolated daemon also needs its own `OURS_CONFIG`/`stateDir` and its own port — the API token
+lives in the state directory, so two daemons must never share one.
 
 ### Voice-message transcription
 

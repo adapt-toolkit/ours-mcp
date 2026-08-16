@@ -43,41 +43,78 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
    answers `--version` promptly. A shell alias / hanging wrapper is **never called** (that would
    hang the run) — it's reported plainly with a fix, and a manual-install path is always offered.
    If neither harness exists it says so and exits.
-2. **Config-first** (first install only) — the daemon's two base settings, up front:
-   the **broker** (end-to-end encrypted; the broker never sees message content — almost everyone
-   just presses Enter) and the **port** (probes `3050`; only asks if it's busy; never hands out
-   `3051`, reserved for the Telegram connector). Applied once, then the stack is built with it.
-3. **Four consent gates**, each paced with a clean `✓ … No problems.` line + an explicit
+2. **Five consent gates**, each paced with a clean `✓ … No problems.` line + an explicit
    **Continue?** — never a start-twice-then-ask, never a silent failure:
-   - **1/4 ours core (the daemon)** — write config → optional voice setup → install/start ONCE
-     → boot service. On a re-run it reuses the running config (no re-ask) and only updates when
-     you say yes. Complete voice setup is kept without prompting. Missing/incomplete setup is
-     offered before the first start or pending update restart, then delegated to the canonical
-     `ours-mcp voice-setup` provider selector and hidden API-key prompt. Accepted setup owns the
-     one restart/readiness transaction; declining or already-ready setup preserves the normal
-     core lifecycle. The secret is written atomically to mode-`0600` config; a failed daemon
-     reload rolls back.
-   - **2/4 harness plugins** — the installer **drives the plugin CLIs itself**
+   - **1/5 the shared ours daemon** — its own step, before every consumer, and it owns its own
+     configuration: the **broker** (end-to-end encrypted; the broker never sees message content —
+     almost everyone just presses Enter) and the **listen port**, which is now an explicit
+     question rather than one you only hear about when `3050` is busy. The default is still
+     `3050` (the next free port when that is taken), so **Enter and every non-interactive run
+     land exactly where they always did**. The answer is validated (a real port, not reserved by
+     another component, not already in use, not already claimed by another daemon in this run),
+     persisted to `~/.ours/config.json`, and it is the endpoint everything below is wired to.
+     Then: write config → optional voice setup → install/start ONCE → boot service. On a re-run
+     it reuses the running config (no re-ask) and only updates when you say yes. Complete voice
+     setup is kept without prompting. Missing/incomplete setup is offered before the first start
+     or pending update restart, then delegated to the canonical `ours-mcp voice-setup` provider
+     selector and hidden API-key prompt. Accepted setup owns the one restart/readiness
+     transaction; declining or already-ready setup preserves the normal core lifecycle. The
+     secret is written atomically to mode-`0600` config; a failed daemon reload rolls back.
+   - **2/5 harness plugins** — the installer **drives the plugin CLIs itself**
      (`claude plugin marketplace add …` + `claude plugin install ours@ours.network`;
      `codex plugin marketplace add …` + `codex plugin add ours@ours-codex-marketplace`). Choosing
      Codex also installs the `ours-codex` live launcher in the same step. Any failure / alias
      prints the exact manual commands and continues — it **never dead-ends**.
-   - **3/4 ours-fleet** — makes your harnesses persistent, always-online agent teams that survive
+   - **3/5 ours-fleet** — makes your harnesses persistent, always-online agent teams that survive
      a reboot; runs `ours-fleet init`. Default **Yes**.
-   - **4/4 Telegram connector** — install-only (no bot tokens here), **pointed at the daemon
-     step 1 just built**, then optionally as a boot service.
-4. **Summary + hand-off** — a recap (skipped/failed rows call out the fix), then a **literal
-   copy-paste prompt** (root identity + fleet + Telegram) with the steps for any skipped/failed
-   component dropped out. Copied to the clipboard where supported.
+   - **4/5 Telegram connector** — install-only (no bot tokens here), then a question asked
+     **independently of every other consumer**: use the shared daemon from step 1, or run against
+     its **own dedicated daemon**? Default (and Enter, and non-interactive) is the shared one.
+     A dedicated daemon is provisioned with its own port, its own state directory
+     (`~/.ours-tg`) and its own boot unit (`ours-tg.service`), and the connector is wired to
+     that endpoint. Then optionally installed as a boot service itself.
+   - **5/5 Rooms (ours-cowork)** — durable mission rooms. Default **No**. `ours-cowork` is a
+     **standalone** daemon that consumes no ours daemon at all, so what this step configures is
+     what its config actually has: the deployment's broker, its own state directory
+     (`~/.ours-cowork`) and its loopback **console port** (default `3052`, validated the same
+     way). Then `ours-cowork install-service`.
+3. **Summary + hand-off** — a recap (skipped/failed rows call out the fix), then a **literal
+   copy-paste prompt** (human identity + fleet + Telegram + Rooms) with the steps for any
+   skipped/failed component dropped out. Copied to the clipboard where supported.
 
 The human identity is created idempotently after the daemon becomes reachable. Because
 `curl … | bash` gives the script its input over the pipe, every prompt is read from the
 controlling terminal (`/dev/tty`), so the flow still works piped.
 
-## One daemon, and everything pointed at it
+## Daemon topology
 
-A clean deployment installs, configures and starts **one** ours daemon first, then wires every
-client to that same daemon. What that takes differs per client:
+A clean deployment installs, configures and starts **one shared** ours daemon first, then wires
+every client to that same daemon. That is the default and the backward-compatible answer.
+
+**Optional isolation.** The Telegram connector may instead be given its own daemon, chosen
+independently of everything else. Isolation is only real when all three of these are separate,
+which is what the installer provisions:
+
+| | shared | dedicated (Telegram) |
+|---|---|---|
+| listen port | your step-1 answer | its own, validated against every other daemon in the run |
+| state directory | `~/.ours` | `~/.ours-tg` — the daemon's API token lives here |
+| boot unit | `ours.service` | `ours-tg.service` (via `OURS_SERVICE_NAME`) |
+| config file | `~/.ours/config.json` | `~/.ours-tg/config.json` |
+
+Without a distinct service name, `ours-mcp install-service` would write the **same** unit for
+both and the second daemon would silently overwrite the first's port and state directory. See
+`packages/core/src/service-instance.ts`; a daemon with no instance name keeps exactly the
+historical `ours.service` / `solutions.adaptframework.ours`.
+
+**Rooms is different.** `ours-cowork` is a standalone daemon: it has no `daemonUrl` /
+`daemonStateDir` / `/api/v1` surface anywhere in its shipped bundle and its own docs state it
+"has no dependency on another agent daemon" — it meets other identities at the **broker**, just
+as the ours daemon does. So there is no shared-vs-dedicated ours-daemon question to ask for
+Rooms; offering one would configure nothing. What it gets instead is the deployment's broker, its
+own state directory, and its own console port.
+
+What wiring a client to a daemon takes differs per client:
 
 - **The harness plugins** need nothing extra: each is `ours-mcp proxy`, which reads the daemon's
   own config (`OURS_CONFIG`, else `~/.ours/config.json`). `autoStart` is off by default, so a proxy
@@ -104,9 +141,25 @@ while the summary claims success.
 
 ## Release channel
 
-`OURS_CHANNEL=nightly` (or `OURS_INSTALL_CHANNEL`) installs the `nightly` dist-tag for the packages
-that publish one — `mcp`, `tg-connector`, and the `claude-code` / `codex` / `hermes` launchers —
-while `@ours.network/fleet` stays `@latest` always (it publishes no nightly).
+`OURS_CHANNEL=nightly` (or `OURS_INSTALL_CHANNEL`) installs each package's **own** prerelease
+dist-tag. The tag is not the same string everywhere, so the mapping is per package:
+
+| package | stable channel | nightly channel |
+|---|---|---|
+| `mcp`, `tg-connector`, `claude-code`, `codex`, `hermes` | `latest` | `nightly` |
+| `fleet` | `latest` | `nightly` |
+| `cowork` (Rooms) | `latest` | `latest` — **pinned** |
+
+`fleet` follows the channel: it publishes its own `nightly` dist-tag, and the nightly stack needs
+the fleet build carrying the SDK integration. A nightly installer that quietly installed stable
+fleet is the same split-brain deployment the channel exists to prevent.
+
+`cowork` is pinned because its prerelease tag is `next`, not `nightly`, **and** `next` is
+currently older than `latest` (`0.3.7-nightly.*` vs `0.4.0`) — following it would knowingly
+downgrade Rooms. When cowork's `next` catches up, add `{ nightly: 'next' }` for it in
+`PKG_CHANNEL_TAGS` (`lib/logic.mjs`); nothing else changes. A package with no mapping for the
+selected channel installs `@latest` rather than a guessed tag, because a 404 fails the *whole*
+install.
 
 **With no explicit selection the installer follows its own version.** A published nightly build
 carries the `-nightly.N` suffix the release bump stamps, so `npm i -g @ours.network/install@nightly`
@@ -140,7 +193,11 @@ is reported and left unchanged.
 | `OURS_CONFIG` | daemon config file location (default `~/.ours/config.json`) |
 | `OURS_STATE_DIR` | daemon state directory (default `~/.ours`) — also what the Telegram connector is told to expect |
 | `OURS_TG_CONFIG` | Telegram connector config file location (default `~/.ours-telegram/config.json`) |
+| `OURS_COWORK_CONFIG` | Rooms config file location (default `~/.ours-cowork/config.json`) |
 | `OURS_CHANNEL` | `nightly` or `latest`; unset follows the installer's own version |
+
+A non-interactive run takes the shared daemon on its existing default port and installs no
+dedicated daemon and no Rooms — the topology is unchanged from before this flow existed.
 
 ## Uninstall
 
@@ -183,10 +240,11 @@ OURS_UNINSTALL_DAEMON=yes \
 - This package is **not published to npm** (`private: true`); it ships as the hosted
   `install.sh` bootstrap plus the `install.mjs` Node installer (and its `lib/`), and exposes the
   `ours-install` bin. The pieces it installs — the daemon (`@ours.network/mcp`), the harness
-  plugins via each marketplace, `@ours.network/fleet`, and `@ours.network/tg-connector` — are the
-  published components.
+  plugins via each marketplace, `@ours.network/fleet`, `@ours.network/tg-connector`, and
+  `@ours.network/cowork` — are the published components.
 - **Idempotent + safe to re-run.** A re-run adds a skipped piece, re-points the plugins, or (only
   when you say yes) updates a component; an already-current daemon is left untouched, its running
   port and complete voice setup are reused everywhere — and the Telegram connector's daemon
-  selection is rewritten only if it actually changed. Bot tokens and fleet roles remain in the
-  copy-paste hand-off; provider keys never enter that prompt or agent chat.
+  selection, a dedicated daemon's config, and the Rooms config are each rewritten only if they
+  actually changed. Bot tokens and fleet roles remain in the copy-paste hand-off; provider keys
+  never enter that prompt or agent chat.

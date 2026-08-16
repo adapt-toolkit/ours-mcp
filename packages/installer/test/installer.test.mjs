@@ -66,7 +66,11 @@ function fakeBins(dir, opts = {}) {
       : daemonState === 'external'
         ? `${resolvePort} echo "ours-mcp: running (no pidfile — external launcher)"; echo "  url:    http://localhost:$P/mcp (reachable)"; exit 0;`
         : `${resolvePort} echo "ours-mcp: running"; echo "  pid:    4242"; echo "  url:    http://localhost:$P/mcp (reachable)"; exit 0;`;
+  // A dedicated daemon is driven with OURS_CONFIG/OURS_STATE_DIR/OURS_SERVICE_NAME in its
+  // environment — log those so a test can prove WHICH daemon each call was aimed at.
+  const envTrace = `[ -n "$OURS_SERVICE_NAME" ] && printf 'ours-mcp-env %s service=%s config=%s state=%s\\n' "$1" "$OURS_SERVICE_NAME" "$OURS_CONFIG" "$OURS_STATE_DIR" >> "$CALLLOG"\n`;
   write('ours-mcp',
+    envTrace +
     mcpVersion +
     lifecycle +
     `[ "$1" = "status" ] && { ${statusBody} }\n` +
@@ -81,7 +85,7 @@ function fakeBins(dir, opts = {}) {
 
   write('npm',
     `case "$*" in *"@ours.network/mcp"*) touch "$CALLLOG.mcpinstalled" "$CALLLOG.mcpupdated";; esac\n` +
-    `case "$1" in ls) echo "@ours.network/fleet@0.7.0"; echo "@ours.network/tg-connector@0.1.7";; esac\n` +
+    `case "$1" in ls) echo "@ours.network/fleet@0.7.0"; echo "@ours.network/tg-connector@0.1.7"; echo "@ours.network/cowork@0.4.0";; esac\n` +
     `exit 0\n`);
 
   if (!opts.noHarness) {
@@ -100,6 +104,10 @@ function fakeBins(dir, opts = {}) {
     `[ "$1" = "install-service" ] && { cp "$HOME/.ours-telegram/config.json" "$CALLLOG.tgsnapshot" 2>/dev/null; exit 0; }\nexit 0\n`);
   // Hermes plugin front-door: logs its argv (so we can assert --skip-daemon) and succeeds.
   write('ours-hermes-install', `exit 0\n`);
+  // Rooms: snapshot cowork's config when its service is installed, for the same reason as
+  // the connector — install-service is the moment the resolved settings get frozen.
+  write('ours-cowork',
+    `[ "$1" = "install-service" ] && { cp "\${OURS_COWORK_CONFIG:-$HOME/.ours-cowork/config.json}" "$CALLLOG.cwsnapshot" 2>/dev/null; ${opts.coworkServiceFails ? 'exit 1' : 'exit 0'}; }\nexit 0\n`);
 }
 
 // Run install.mjs non-interactively with fakes on PATH. Returns { out, calls, tmp }.
@@ -145,8 +153,9 @@ function runInstall(opts = {}, extraEnv = {}) {
 
 test('update path: daemon present → drives plugin CLIs, creates human identity in-install, fleet, no config re-ask', () => {
   const { out, calls, tmp } = runInstall({ daemon: 'installed' });
-  // Config-first questions are SKIPPED when a daemon already exists.
-  assert.doesNotMatch(out, /A couple of quick settings/, 'no Step 0 on an already-configured daemon');
+  // Config questions are SKIPPED when a daemon already exists — its port is reused.
+  assert.doesNotMatch(out, /Which local port should the shared daemon use\?/, 'no port re-ask on an already-configured daemon');
+  assert.match(out, /Shared daemon already configured — port 3050/, 'the running daemon\'s port is what everything is wired to');
   // Daemon reused, not reinstalled/restarted (update is opt-in and default is No under assume-yes).
   assert.doesNotMatch(calls, /npm i -g @ours\.network\/mcp/, 'daemon not reinstalled without an explicit update yes');
   assert.doesNotMatch(calls, /ours-mcp (start|restart)/, 'running daemon not restarted');
@@ -185,8 +194,14 @@ test('update path: daemon present → drives plugin CLIs, creates human identity
 
 test('first install: config-first Step 0, daemon installed once with config + service, human identity created', () => {
   const { out, calls, tmp } = runInstall({ daemon: 'absent' });
-  assert.match(out, /A couple of quick settings/, 'Step 0 config questions run on a first install');
-  assert.match(out, /1\/4 — ours core/, 'daemon is step 1');
+  // The shared daemon owns its own configuration inside its own visible step.
+  assert.match(out, /1\/5 — the shared ours daemon/, 'the shared daemon is step 1, before every consumer');
+  assert.match(out, /The daemon listens on a local port/, 'the port is configured inside the daemon step');
+  assert.match(out, /Shared daemon: port \d+, broker standard/, 'the chosen endpoint is stated back');
+  assert.doesNotMatch(out, /A couple of quick settings/, 'no nameless config preamble any more');
+  // Non-interactive takes the offered default rather than prompting. (Which port that
+  // is stays probe-dependent — 3050 may genuinely be busy on the machine running this.)
+  assert.doesNotMatch(out, /Suggesting \d+ instead/, 'a free default is accepted without a retry loop');
   assert.match(calls, /npm i -g @ours\.network\/mcp@latest/, 'daemon installed on consent');
   assert.match(calls, /ours-mcp start/, 'daemon started once');
   assert.match(calls, /ours-mcp install-service/, 'installed as a boot service');
@@ -644,9 +659,25 @@ const PTY_TELEGRAM = `
 import os, pty, sys, time, select
 env=dict(os.environ); env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None); env.pop("OURS_INSTALL_DRY_RUN",None)
 broker=os.environ.get("ANSWER_BROKER","")
+tg=os.environ.get("ANSWER_TELEGRAM","y")            # install the Telegram connector?
+tg_dedicated=os.environ.get("ANSWER_TG_DEDICATED","")  # give it its OWN daemon?
+rooms=os.environ.get("ANSWER_ROOMS","")             # install Rooms (ours-cowork)?
+# Port answers are keyed by WHICH daemon is being asked about, not by position: a re-run
+# skips the shared daemon's question entirely, so a positional list would shift.
+port_shared=os.environ.get("ANSWER_PORT_SHARED","")
+port_tg=os.environ.get("ANSWER_PORT_TG","")
+port_rooms=os.environ.get("ANSWER_PORT_ROOMS","")
 pid,fd=pty.fork()
 if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
 buf=b""; pending=b""; last=time.time(); st=None
+def step(buf):
+    # Which component's step are we in? The last heading printed wins, so the shared
+    # "Install it?" prompt is answered for the right component.
+    marks={"fleet":buf.rfind(b"ours-fleet (your always-online"),
+           "telegram":buf.rfind(b"Telegram connector"),
+           "rooms":buf.rfind(b"Rooms (ours-cowork)")}
+    best=max(marks,key=lambda k:marks[k])
+    return best if marks[best]>=0 else ""
 for _ in range(1500):
     try: w,s=os.waitpid(pid,os.WNOHANG)
     except ChildProcessError: st="reaped"; break
@@ -659,9 +690,18 @@ for _ in range(1500):
         buf+=d; pending+=d; last=time.time()
         if pending.endswith((b"] ", b": ")):
             tail=pending[-800:]
+            here=step(buf)
             if b"custom broker address?" in tail and broker: reply=b"y\\n"
             elif b"Enter the broker address" in tail and broker: reply=broker.encode()+b"\\n"
-            elif b"Install it?" in tail and b"Telegram connector" in buf[-2500:]: reply=b"y\\n"
+            elif b"should the shared daemon use" in tail:
+                reply=(port_shared.encode()+b"\\n") if port_shared else b"\\n"
+            elif b"should the Telegram daemon use" in tail:
+                reply=(port_tg.encode()+b"\\n") if port_tg else b"\\n"
+            elif b"should the Rooms console use" in tail:
+                reply=(port_rooms.encode()+b"\\n") if port_rooms else b"\\n"
+            elif b"OWN dedicated daemon?" in tail: reply=(b"y\\n" if tg_dedicated else b"\\n")
+            elif b"Install it?" in tail and here=="telegram": reply=(b"y\\n" if tg else b"\\n")
+            elif b"Install it?" in tail and here=="rooms": reply=(b"y\\n" if rooms else b"\\n")
             elif b"starts automatically on boot" in tail: reply=b"y\\n"
             else: reply=b"\\n"
             os.write(fd,reply); pending=b""
@@ -686,7 +726,7 @@ function isolatedRoot(opts = {}, extraEnv = {}) {
   writeFileSync(log, '');
   fakeBins(bin, opts);
   const inherited = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !key.startsWith('OURS_') && key !== 'ANSWER_BROKER'),
+    Object.entries(process.env).filter(([key]) => !key.startsWith('OURS_') && !key.startsWith('ANSWER_')),
   );
   const env = {
     ...inherited,
@@ -759,6 +799,165 @@ test('idempotent re-run: an unchanged daemon selection rewrites nothing',
   rmSync(root.tmp, { recursive: true, force: true });
 });
 
+// ===============================================================================================
+// TOPOLOGY — the shared daemon, plus a consumer that may be given its own.
+//
+// The default is unchanged and must stay that way: everything shares the daemon from step 1, and
+// Enter / non-interactive never provisions a second one. A dedicated daemon is only real if it is
+// isolated in all three ways at once — its own port, its own state directory (the API token lives
+// there) and its own boot unit (core's OURS_SERVICE_NAME; without it `install-service` overwrites
+// the shared daemon's unit, which is the collision this whole feature exists to prevent).
+// ===============================================================================================
+
+test('default topology: every consumer shares the one daemon and no second daemon is provisioned',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const root = isolatedRoot({ daemon: 'absent' });
+  const { out, calls } = root.run();
+  assert.match(out, /---EXIT 0/);
+  assert.match(out, /Telegram will use the shared daemon on port \d+/, 'the shared daemon is the default answer');
+  // Nothing was driven with a dedicated daemon's environment.
+  assert.doesNotMatch(calls, /ours-mcp-env/, 'no daemon was started with an instance name');
+  assert.ok(!existsSync(join(root.tmp, '.ours-tg')), 'no dedicated state directory created');
+  assert.equal(calls.match(/^ours-mcp start$/gm)?.length, 1, 'exactly one daemon');
+  const tg = readJson(join(root.tmp, '.ours-telegram', 'config.json'));
+  assert.equal(tg.daemonStateDir, join(root.tmp, '.ours'), 'the connector points at the SHARED state dir');
+  rmSync(root.tmp, { recursive: true, force: true });
+});
+
+test('dedicated Telegram daemon: its own port, state dir and boot unit — and the connector is wired to it',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  // Port answers, in the order the installer asks: shared daemon (Enter → default), then the
+  // dedicated Telegram daemon (an explicit, distinct port).
+  const root = isolatedRoot({ daemon: 'absent' }, { ANSWER_TG_DEDICATED: '1', ANSWER_PORT_TG: '3077' });
+  const { out, calls } = root.run();
+  assert.match(out, /---EXIT 0/, 'the run completes cleanly');
+
+  const sharedCfg = readJson(join(root.tmp, '.ours', 'config.json'));
+  const dedicatedPath = join(root.tmp, '.ours-tg', 'config.json');
+  assert.ok(existsSync(dedicatedPath), 'the dedicated daemon got its own config file');
+  const dedicated = readJson(dedicatedPath);
+
+  // 1. Its own port — and never the shared daemon's.
+  assert.equal(dedicated.port, 3077);
+  assert.notEqual(dedicated.port, sharedCfg.port, 'two daemons never share a port');
+  // 2. Its own state directory — the daemon API token lives there, so sharing one would
+  //    hand the connector a token that belongs to a different daemon.
+  assert.equal(dedicated.stateDir, join(root.tmp, '.ours-tg'));
+  assert.notEqual(dedicated.stateDir, join(root.tmp, '.ours'));
+  // 3. Its own boot unit — without this, install-service overwrites the shared daemon's.
+  assert.equal(dedicated.serviceName, 'tg');
+  assert.match(calls, /ours-mcp-env install-service service=tg /, 'its service was installed under its own name');
+  assert.match(calls, /ours-mcp-env start service=tg /, 'and it was started as itself');
+  assert.match(calls, new RegExp(`ours-mcp-env install-service service=tg config=${dedicatedPath} state=${join(root.tmp, '.ours-tg')}`),
+    'the dedicated daemon is driven entirely through its own config + state');
+  // The shared daemon's own service install carried NO instance name, so its unit is untouched.
+  assert.match(calls, /^ours-mcp install-service$/m, 'the shared daemon still installs the default unit');
+
+  // The connector is wired to the DEDICATED daemon, endpoint and state dir together.
+  const tg = readJson(join(root.tmp, '.ours-telegram', 'config.json'));
+  assert.equal(tg.daemonUrl, 'http://127.0.0.1:3077');
+  assert.equal(tg.daemonStateDir, join(root.tmp, '.ours-tg'));
+  assert.notEqual(tg.daemonUrl, `http://127.0.0.1:${sharedCfg.port}`);
+  // Both daemons still meet the deployment at the same broker.
+  assert.equal(dedicated.brokerUrl, tg.brokerUrl, 'one broker across the topology');
+  // And install-service saw the final selection, not a later one.
+  assert.deepEqual(readJson(`${root.log}.tgsnapshot`), tg);
+  assert.match(out, /Dedicated Telegram daemon ready on port 3077/);
+  rmSync(root.tmp, { recursive: true, force: true });
+});
+
+test('a dedicated daemon may not take the port the shared daemon just claimed',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  // Both port questions answered 3081. Nothing is LISTENING on it yet — the shared daemon
+  // is only configured, not really running — so a bind probe cannot catch this. Only the
+  // in-run ledger can, which is exactly the duplicate case it exists for.
+  const root = isolatedRoot({ daemon: 'absent' }, { ANSWER_TG_DEDICATED: '1', ANSWER_PORT_SHARED: '3081', ANSWER_PORT_TG: '3081' });
+  const { out } = root.run();
+  assert.match(out, /---EXIT 0/);
+  assert.match(out, /already being used by another daemon in this install/, 'the collision is named plainly');
+  const sharedPort = readJson(join(root.tmp, '.ours', 'config.json')).port;
+  const dedicatedPort = readJson(join(root.tmp, '.ours-tg', 'config.json')).port;
+  assert.equal(sharedPort, 3081, 'the first answer stands');
+  assert.notEqual(dedicatedPort, sharedPort, 'the second is moved off it, never silently persisted');
+  rmSync(root.tmp, { recursive: true, force: true });
+});
+
+test('dedicated daemon re-run is idempotent — an unchanged selection rewrites nothing',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const root = isolatedRoot({ daemon: 'absent' }, { ANSWER_TG_DEDICATED: '1', ANSWER_PORT_TG: '3079' });
+  root.run();
+  const dedicatedPath = join(root.tmp, '.ours-tg', 'config.json');
+  const first = readJson(dedicatedPath);
+  assert.equal(first.port, 3079);
+  const second = root.run();
+  assert.match(second.out, /already configured on port 3079 — no change/, 'the re-run reports no change');
+  assert.deepEqual(readJson(dedicatedPath), first, 'and the file is byte-for-byte the same selection');
+  rmSync(root.tmp, { recursive: true, force: true });
+});
+
+// ===============================================================================================
+// ROOMS (ours-cowork) — a standalone daemon. It consumes NO ours daemon (its shipped bundle has no
+// daemonUrl / daemonStateDir / api/v1 at all), so what the installer configures is the three keys
+// its config actually has: the shared broker, its own state directory, and its console port.
+// ===============================================================================================
+
+test('Rooms is an explicit step, skipped by default, and never installed non-interactively', () => {
+  const { out, calls, tmp } = runInstall({ daemon: 'absent' });
+  assert.match(out, /5\/5 — Rooms \(ours-cowork\)/, 'Rooms is a visible step of its own');
+  assert.doesNotMatch(calls, /npm i -g @ours\.network\/cowork/, 'default No — nothing installed');
+  assert.doesNotMatch(calls, /ours-cowork/, 'and its CLI is never driven');
+  assert.match(out, /Rooms \(ours-cowork\).*skipped/, 'the summary says so');
+  assert.doesNotMatch(out, /Set up my first Rooms mission room/, 'a skipped Rooms drops out of the hand-off');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('Rooms install: cowork at @latest, shared broker, its own state dir + console port, boot service',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  // Port answers in order: shared daemon (Enter), Rooms console (explicit).
+  const root = isolatedRoot(
+    { daemon: 'absent' },
+    { ANSWER_ROOMS: '1', ANSWER_TELEGRAM: '', ANSWER_PORT_ROOMS: '3062', ANSWER_BROKER: 'wss://broker.example.test' },
+  );
+  const { out, calls } = root.run();
+  assert.match(out, /---EXIT 0/);
+
+  // cowork's prerelease tag is `next` and currently OLDER than latest, so it is pinned.
+  assert.match(calls, /npm i -g @ours\.network\/cowork@latest/, 'rooms installs the stable cowork');
+  assert.doesNotMatch(calls, /@ours\.network\/cowork@(next|nightly)/, 'never a knowing downgrade');
+
+  const cfg = readJson(join(root.tmp, '.ours-cowork', 'config.json'));
+  assert.equal(cfg.version, 1, "cowork's config is a versioned strict document");
+  assert.equal(cfg.brokerUrl, 'wss://broker.example.test', 'Rooms shares the deployment broker');
+  assert.equal(cfg.stateDir, join(root.tmp, '.ours-cowork'), 'its own private state directory');
+  assert.equal(cfg.rest.port, 3062, 'the console port the user chose');
+  assert.equal(cfg.rest.enabled, true);
+  // It is NOT wired to an ours daemon, because it cannot consume one.
+  assert.equal(cfg.daemonUrl, undefined, 'no faked daemon wiring');
+  assert.equal(cfg.daemonStateDir, undefined);
+
+  // Ordering: install-service freezes what it resolves, so the config existed first.
+  assert.match(calls, /ours-cowork install-service/, 'installed as a boot service');
+  assert.deepEqual(readJson(`${root.log}.cwsnapshot`), cfg, 'install-service saw the final config');
+  assert.match(out, /console at http:\/\/127\.0\.0\.1:3062\//);
+  assert.match(out, /Set up my first Rooms mission room/, 'the hand-off gains its Rooms step');
+  rmSync(root.tmp, { recursive: true, force: true });
+});
+
+test('Rooms re-run is idempotent and preserves keys the installer does not own',
+  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
+  const root = isolatedRoot({ daemon: 'absent' }, { ANSWER_ROOMS: '1', ANSWER_TELEGRAM: '', ANSWER_PORT_ROOMS: '3063' });
+  root.run();
+  const cfgPath = join(root.tmp, '.ours-cowork', 'config.json');
+  const first = readJson(cfgPath);
+  writeFileSync(cfgPath, JSON.stringify({ ...first, operatorNote: 'keep me' }, null, 2) + '\n', { mode: 0o600 });
+  const second = root.run();
+  assert.match(second.out, /already configured for this deployment/, 'an unchanged selection rewrites nothing');
+  const after = readJson(cfgPath);
+  assert.equal(after.operatorNote, 'keep me');
+  assert.equal(after.rest.port, first.rest.port, 'the console port is unchanged on a rerun');
+  rmSync(root.tmp, { recursive: true, force: true });
+});
+
 test('a failed boot-service never leaves the deployment without its one daemon', () => {
   const { out, calls, tmp } = runInstall({ daemon: 'absent', serviceFails: true });
   // install-service stops the daemon first, then fails — the installer must put it back.
@@ -820,7 +1019,11 @@ test('a packaged nightly installer installs the nightly Telegram connector and d
   const calls = readFileSync(log, 'utf8');
   assert.match(calls, /npm i -g @ours\.network\/mcp@nightly/, 'the nightly installer installs the nightly daemon');
   assert.match(calls, /npm i -g @ours\.network\/codex@nightly/, 'and the nightly harness launcher');
-  assert.match(calls, /npm i -g @ours\.network\/fleet@latest/, 'but fleet stays @latest — it publishes no nightly');
+  // fleet DOES publish a nightly dist-tag, and the nightly stack needs the fleet build
+  // carrying the SDK integration — a nightly installer that quietly installed stable
+  // fleet is the split-brain deployment the channel exists to prevent.
+  assert.match(calls, /npm i -g @ours\.network\/fleet@nightly/, 'fleet follows the channel');
+  assert.doesNotMatch(calls, /@ours\.network\/fleet@latest/, 'a nightly install never mixes in stable fleet');
   assert.doesNotMatch(calls, /@ours\.network\/mcp@latest/, 'no stable/nightly mixing within the suite');
   assert.ok(out.length > 0, 'the packaged installer runs from its own files');
   rmSync(tmp, { recursive: true, force: true });

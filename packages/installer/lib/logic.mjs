@@ -28,18 +28,44 @@ export function canonHarnesses(raw) {
 
 // ── Release CHANNEL / npm dist-tag selection (owner 2026-07-17) ─────────────────
 // The installer normally installs everything at @latest (stable). Setting
-// OURS_CHANNEL=nightly (or OURS_INSTALL_CHANNEL) makes it install the NIGHTLY tag
-// for the packages that HAVE a nightly (mcp, tg-connector, and the harness-plugin
-// launchers claude-code/codex/hermes — all lockstep-published to the `nightly` tag),
-// but keep @ours.network/fleet at @latest ALWAYS: ours-fleet lives in its own repo
-// and publishes NO nightly tag, so `@nightly` there would 404 the whole install.
+// OURS_CHANNEL=nightly (or OURS_INSTALL_CHANNEL) makes it install each package's
+// PRERELEASE dist-tag instead — for the packages that publish one.
+//
+// The prerelease tag is NOT the same string everywhere, which is why this is a
+// per-package map rather than one global tag:
+//   · mcp, tg-connector, claude-code, codex, hermes  → `nightly` (lockstep-published
+//     from this repo by .github/workflows/scripts/bump-versions.sh)
+//   · fleet                                          → `nightly` (its own repo,
+//     adapt-toolkit/ours-fleet, publishes a nightly dist-tag of its own)
+//   · cowork (rooms)                                 → PINNED to `latest`, see below
+//
+// WHY FLEET FOLLOWS THE CHANNEL NOW. It used to be pinned to @latest with the note
+// "ours-fleet publishes no nightly tag". It does publish one, and the nightly stack
+// needs the fleet build carrying the SDK integration — the same architecture
+// boundary that made a mixed tg-connector fatal applies here. A nightly installer
+// that silently installs stable fleet is exactly the split-brain deployment the
+// channel exists to prevent.
+//
+// WHY COWORK IS PINNED. @ours.network/cowork's prerelease dist-tag is `next`, not
+// `nightly`, AND as of 2026-08-16 `next` (0.3.7-nightly.20260815.80ea770) is OLDER
+// than `latest` (0.4.0). Following it would knowingly DOWNGRADE rooms on the
+// nightly channel. Coordinator decision 2026-08-16: use `latest` on both channels
+// until cowork's `next` is newer than or equal to its `latest`; at that point move
+// cowork to `{ nightly: 'next' }` below — nothing else has to change.
 export const DEFAULT_CHANNEL = 'latest';
 
-// Packages that follow the selected channel (nightly ⇒ @nightly). Short keys map to
-// the @ours.network/<key> npm name. NOTE fleet is deliberately ABSENT — it is pinned.
-const CHANNEL_TRACKING_PKGS = new Set(['mcp', 'tg-connector', 'claude-code', 'codex', 'hermes']);
-// Packages ALWAYS pinned to @latest regardless of channel (no nightly tag exists).
-const STABLE_ONLY_PKGS = new Set(['fleet']);
+// Per-package dist-tag by channel. A package absent from this map, or missing a
+// key for the selected channel, installs @latest — this never guesses a tag that
+// might not exist, because a 404 fails the WHOLE install.
+const PKG_CHANNEL_TAGS = {
+  mcp: { nightly: 'nightly' },
+  'tg-connector': { nightly: 'nightly' },
+  'claude-code': { nightly: 'nightly' },
+  codex: { nightly: 'nightly' },
+  hermes: { nightly: 'nightly' },
+  fleet: { nightly: 'nightly' },
+  cowork: {}, // pinned to latest on every channel — see the note above
+};
 
 // Normalize a raw channel selection to 'latest' | 'nightly'. Anything unrecognized
 // (incl. undefined/'') falls back to the installer's OWN channel — never guesses a tag.
@@ -67,14 +93,14 @@ export function isNightlyVersion(version) {
   return /-nightly\.\d+/.test(String(version || ''));
 }
 
-// The npm dist-tag to install for one package key under a channel. fleet is ALWAYS
-// 'latest'; channel-tracking packages take the channel; anything else defaults to 'latest'.
+// The npm dist-tag to install for one package key under a channel. Looks the key
+// up in PKG_CHANNEL_TAGS; anything unmapped — including an unknown package —
+// falls back to 'latest' rather than inventing a tag that would 404.
 export function pkgTag(pkgKey, channel = DEFAULT_CHANNEL) {
   const key = String(pkgKey || '').replace(/^@ours\.network\//, '');
-  if (STABLE_ONLY_PKGS.has(key)) return 'latest';
   const ch = resolveChannel(channel);
-  if (ch === 'nightly' && CHANNEL_TRACKING_PKGS.has(key)) return 'nightly';
-  return 'latest';
+  if (ch === DEFAULT_CHANNEL) return 'latest';
+  return PKG_CHANNEL_TAGS[key]?.[ch] ?? 'latest';
 }
 
 // Full `@ours.network/<key>@<tag>` spec for `npm i -g`, honoring the channel.
@@ -83,10 +109,87 @@ export function pkgSpec(pkgKey, channel = DEFAULT_CHANNEL) {
   return `@ours.network/${key}@${pkgTag(key, channel)}`;
 }
 
-// The Telegram connector owns 3051 — the installer must never hand a daemon that port.
-export const RESERVED_PORTS = [3051];
+// Ports other components in the stack own, which the installer must never hand a
+// daemon: 3051 is the Telegram connector's, 3052 is ours-cowork's loopback console
+// (its config default; see COWORK_DEFAULT_PORT).
+export const RESERVED_PORTS = [3051, 3052];
 export const DEFAULT_PORT = 3050;
 export const DEFAULT_BROKER = 'wss://broker1.ours.network';
+
+// ── Daemon topology: one COMMON daemon, plus optional DEDICATED ones ───────────
+// Every consumer defaults to the common daemon on the common port — that is the
+// backward-compatible answer and what Enter / non-interactive mode picks. A
+// consumer may instead be given its OWN daemon, which needs three things to be
+// genuinely isolated and not merely differently-addressed:
+//   · its own PORT              (nothing else may bind it)
+//   · its own STATE DIRECTORY   (the daemon's API token lives there; sharing one
+//                                state dir between two daemons corrupts both)
+//   · its own SERVICE NAME      (ours-mcp's boot unit — without a distinct name,
+//                                `install-service` overwrites the common daemon's
+//                                unit; see packages/core/src/service-instance.ts)
+// The config file is separate too, since ours-mcp resolves port + stateDir from
+// whatever OURS_CONFIG points at.
+export const DAEMON_MODES = ['common', 'dedicated'];
+
+// Fixed instance names, one per consumer that can own a daemon. These are what
+// core validates and turns into `ours-<name>.service`, so they must satisfy its
+// rules (alphanumeric, no separators at the ends).
+export const DEDICATED_INSTANCES = { telegram: 'tg', rooms: 'rooms' };
+
+// Where a dedicated daemon's private config + state live. Derived from the
+// instance name so two consumers can never be handed the same directory.
+export function dedicatedDaemonPaths(home, instance) {
+  const name = String(instance || '').trim();
+  const stateDir = `${home}/.ours-${name}`;
+  return { stateDir, configPath: `${stateDir}/config.json`, serviceName: name };
+}
+
+// Normalize a daemon-mode answer. Anything unrecognized (including empty and
+// non-interactive) is 'common' — the backward-compatible default.
+export function resolveDaemonMode(raw) {
+  const v = String(raw || '').trim().toLowerCase();
+  return v === 'dedicated' || v === 'own' || v === 'separate' ? 'dedicated' : 'common';
+}
+
+// Validate a port the user picked for a daemon, against the reserved list AND
+// every port this install has already committed to. `isTaken(port)` probes a real
+// bind; `taken` is the set of ports already chosen in THIS run, which a live probe
+// cannot see (nothing is listening on them yet). Returns
+// { ok, port, reason } — ok=false means "ask again", never "silently substitute".
+export function validateDaemonPort(input, { fallback = DEFAULT_PORT, isTaken = () => false, taken = [], reserved = RESERVED_PORTS } = {}) {
+  // Stricter than parsePort on purpose: this answer becomes a persisted listen port,
+  // so "3.5.1" must be a question repeated, not silently accepted as port 3.
+  if (!/^\d+$/.test(String(input ?? '').trim())) {
+    return { ok: false, port: fallback, reason: 'that is not a port number between 1 and 65535' };
+  }
+  const parsed = parsePort(input, fallback);
+  if (!parsed.ok) return { ok: false, port: fallback, reason: 'that is not a port number between 1 and 65535' };
+  const port = parsed.port;
+  if (reserved.includes(port)) {
+    return { ok: false, port, reason: `port ${port} is reserved by another part of the stack` };
+  }
+  if (taken.includes(port)) {
+    return { ok: false, port, reason: `port ${port} is already being used by another daemon in this install` };
+  }
+  if (isTaken(port)) {
+    return { ok: false, port, reason: `port ${port} is already in use on this machine` };
+  }
+  return { ok: true, port, reason: '' };
+}
+
+// The whole install's port plan, checked as a set. Returns { ok, duplicates } so
+// the caller can refuse a topology where two daemons would fight over one port
+// even though each looked fine on its own.
+export function planPorts(entries = []) {
+  const seen = new Map();
+  const duplicates = [];
+  for (const { label, port } of entries) {
+    if (!Number.isInteger(port)) continue;
+    if (seen.has(port)) duplicates.push({ port, labels: [seen.get(port), label] });
+    else seen.set(port, label);
+  }
+  return { ok: duplicates.length === 0, duplicates };
+}
 
 // ── Handing the Telegram connector the ONE shared daemon ───────────────────────
 // The connector has its OWN config file and never inherits the daemon's. Two
@@ -159,6 +262,48 @@ export function planTgDaemonConfig(existing, { daemonUrl, daemonStateDir, broker
   const changed = Object.entries(next).some(([k, v]) => v !== undefined && previous[k] !== v);
   if (!changed) return { changed: false, text: '', previous };
   return { changed: true, text: mergeConfig(base, next), previous };
+}
+
+// ── Rooms / ours-cowork ────────────────────────────────────────────────────────
+// ours-cowork is a STANDALONE daemon: per its own docs and its shipped bundle it
+// has "no dependency on another agent daemon" and exposes no daemonUrl /
+// daemonStateDir / /api/v1 surface at all. It reaches other identities over the
+// BROKER, exactly like the ours daemon does, so the only things this installer
+// can honestly configure are the three keys its config actually has: the shared
+// broker, its private state directory, and its loopback console/REST port.
+//
+// That is why the Rooms step does NOT offer the common-vs-dedicated ours-daemon
+// choice the Telegram step does — there is no ours daemon in its picture to point
+// at either way. Offering it would be configuration theatre. See the PR notes.
+export const COWORK_DEFAULT_PORT = 3052;
+
+// The cowork config file (mirrors its docs/03-configuration.md: OURS_COWORK_CONFIG,
+// else <home>/.ours-cowork/config.json).
+export function coworkConfigPath(env = {}, home = '') {
+  return env.OURS_COWORK_CONFIG || `${home}/.ours-cowork/config.json`;
+}
+
+// Decide whether cowork's config needs a write, and what to write. Same contract
+// as planTgDaemonConfig: { changed, text, previous }, unchanged ⇒ nothing written,
+// so a re-run is a no-op. Its `rest` block is merged rather than replaced, so an
+// operator's explicit `rest.enabled: false` survives a port update.
+export function planCoworkConfig(existing, { brokerUrl, stateDir, restPort } = {}) {
+  const base = existing && typeof existing === 'object' ? existing : {};
+  const baseRest = base.rest && typeof base.rest === 'object' ? base.rest : {};
+  const previous = {
+    brokerUrl: typeof base.brokerUrl === 'string' ? base.brokerUrl : '',
+    stateDir: typeof base.stateDir === 'string' ? base.stateDir : '',
+    restPort: Number.isInteger(baseRest.port) ? baseRest.port : null,
+  };
+  const changed = (brokerUrl !== undefined && previous.brokerUrl !== brokerUrl)
+    || (stateDir !== undefined && previous.stateDir !== stateDir)
+    || (restPort !== undefined && previous.restPort !== restPort);
+  if (!changed) return { changed: false, text: '', previous };
+  const patch = { version: 1 };
+  if (brokerUrl !== undefined) patch.brokerUrl = brokerUrl;
+  if (stateDir !== undefined) patch.stateDir = stateDir;
+  if (restPort !== undefined) patch.rest = { ...baseRest, enabled: baseRest.enabled ?? true, port: restPort };
+  return { changed: true, text: mergeConfig(base, patch), previous };
 }
 
 // suggestPort: pick a usable HTTP port. If `desired` is free and not reserved, keep it. Otherwise
@@ -365,7 +510,7 @@ export function harnessAvailable(status) { return status === 'ok'; }
 // instruction for a piece they don't have. The human identity is normally created DURING install,
 // so its step is included ONLY as a fallback (identity: true) when in-install creation was skipped
 // or failed. Returns { text, empty } — empty is true when there is nothing left to finish.
-export function buildHandoffPrompt({ identity = false, fleet = false, telegram = false } = {}) {
+export function buildHandoffPrompt({ identity = false, fleet = false, telegram = false, rooms = false } = {}) {
   const steps = [];
   if (identity) {
     steps.push(
@@ -385,6 +530,13 @@ export function buildHandoffPrompt({ identity = false, fleet = false, telegram =
       'Set up my Telegram bot: ask me for my bot\'s name and its token from\n' +
       '   @BotFather, register the bot, create a chat↔agent connection, and\n' +
       '   give me the invite link to send.',
+    );
+  }
+  if (rooms) {
+    steps.push(
+      'Set up my first Rooms mission room: ask me what the room is for and what\n' +
+      '   to call it, create it, then walk me through inviting the people and\n' +
+      '   agents who should have a seat.',
     );
   }
   if (steps.length === 0) return { text: '', empty: true };
