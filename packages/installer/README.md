@@ -73,11 +73,12 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
      A dedicated daemon is provisioned with its own port, its own state directory
      (`~/.ours-tg`) and its own boot unit (`ours-tg.service`), and the connector is wired to
      that endpoint. Then optionally installed as a boot service itself.
-   - **5/5 Rooms (ours-cowork)** — durable mission rooms. Default **No**. `ours-cowork` is a
-     **standalone** daemon that consumes no ours daemon at all, so what this step configures is
-     what its config actually has: the deployment's broker, its own state directory
-     (`~/.ours-cowork`) and its loopback **console port** (default `3052`, validated the same
-     way). Then `ours-cowork install-service`.
+   - **5/5 Rooms (ours-cowork)** — durable mission rooms. Default **No**. Configures its own
+     surface (the deployment's broker, its state directory `~/.ours-cowork`, and its loopback
+     **console port** — default `3052`, validated the same way), then asks the same
+     shared-vs-dedicated daemon question, defaulting to shared. A dedicated Rooms daemon gets
+     `~/.ours-rooms` and `ours-rooms.service`. Then `ours-cowork install-service`. See
+     **Daemon topology** for when the question is asked at all.
 3. **Summary + hand-off** — a recap (skipped/failed rows call out the fix), then a **literal
    copy-paste prompt** (human identity + fleet + Telegram + Rooms) with the steps for any
    skipped/failed component dropped out. Copied to the clipboard where supported.
@@ -91,28 +92,42 @@ controlling terminal (`/dev/tty`), so the flow still works piped.
 A clean deployment installs, configures and starts **one shared** ours daemon first, then wires
 every client to that same daemon. That is the default and the backward-compatible answer.
 
-**Optional isolation.** The Telegram connector may instead be given its own daemon, chosen
-independently of everything else. Isolation is only real when all three of these are separate,
-which is what the installer provisions:
+**Optional isolation.** The Telegram connector and Rooms may each instead be given their own
+daemon, chosen independently of one another. Isolation is only real when all three of these are
+separate, which is what the installer provisions:
 
-| | shared | dedicated (Telegram) |
-|---|---|---|
-| listen port | your step-1 answer | its own, validated against every other daemon in the run |
-| state directory | `~/.ours` | `~/.ours-tg` — the daemon's API token lives here |
-| boot unit | `ours.service` | `ours-tg.service` (via `OURS_SERVICE_NAME`) |
-| config file | `~/.ours/config.json` | `~/.ours-tg/config.json` |
+| | shared | dedicated (Telegram) | dedicated (Rooms) |
+|---|---|---|---|
+| listen port | your step-1 answer | its own, validated against every other daemon in the run | likewise |
+| state directory | `~/.ours` | `~/.ours-tg` — the daemon's API token lives here | `~/.ours-rooms` |
+| boot unit | `ours.service` | `ours-tg.service` (via `OURS_SERVICE_NAME`) | `ours-rooms.service` |
+| config file | `~/.ours/config.json` | `~/.ours-tg/config.json` | `~/.ours-rooms/config.json` |
 
 Without a distinct service name, `ours-mcp install-service` would write the **same** unit for
 both and the second daemon would silently overwrite the first's port and state directory. See
 `packages/core/src/service-instance.ts`; a daemon with no instance name keeps exactly the
 historical `ours.service` / `solutions.adaptframework.ours`.
 
-**Rooms is different.** `ours-cowork` is a standalone daemon: it has no `daemonUrl` /
-`daemonStateDir` / `/api/v1` surface anywhere in its shipped bundle and its own docs state it
-"has no dependency on another agent daemon" — it meets other identities at the **broker**, just
-as the ours daemon does. So there is no shared-vs-dedicated ours-daemon question to ask for
-Rooms; offering one would configure nothing. What it gets instead is the deployment's broker, its
-own state directory, and its own console port.
+**Rooms has a third answer.** `ours-cowork` used to host its own daemon, always. It now also
+supports an **external** one, so Rooms answers the same shared-vs-dedicated question — plus
+`embedded`, cowork's own, which is what every install predating that support runs.
+
+Its config carries an optional `daemon` block. Absent means embedded; external is
+`{ mode: 'external', endpoint, stateDir }` and **requires both halves**, because cowork stores no
+token and its SDK reads `<stateDir>/daemon-token`. Env equivalents are `OURS_COWORK_DAEMON_MODE`
+/ `_ENDPOINT` / `_STATE_DIR`, and the service unit carries only those — never a token.
+
+Two things follow from cowork's boot being **fail-closed** (an unreachable endpoint, a non-ours
+daemon, or a mismatched state directory aborts startup, with no embedded fallback):
+
+- A build that **predates** the external mode is never handed a block. On the stable channel the
+  installer keeps Rooms embedded and says why; `OURS_CHANNEL=nightly` gets the line that has it.
+  When a stable cowork ships it, set `COWORK_EXTERNAL_MIN_VERSION` in `lib/logic.mjs`.
+- An install **already running embedded** is never migrated behind the user's back — headless
+  runs leave it exactly as it is, and interactive runs ask first.
+
+Note the two different `stateDir` keys: the top-level one is cowork's own private state;
+`daemon.stateDir` is the **ours daemon's** state directory. Confusing them fails closed at boot.
 
 What wiring a client to a daemon takes differs per client:
 
@@ -148,18 +163,19 @@ dist-tag. The tag is not the same string everywhere, so the mapping is per packa
 |---|---|---|
 | `mcp`, `tg-connector`, `claude-code`, `codex`, `hermes` | `latest` | `nightly` |
 | `fleet` | `latest` | `nightly` |
-| `cowork` (Rooms) | `latest` | `latest` — **pinned** |
+| `cowork` (Rooms) | `latest` | `next` |
 
 `fleet` follows the channel: it publishes its own `nightly` dist-tag, and the nightly stack needs
 the fleet build carrying the SDK integration. A nightly installer that quietly installed stable
 fleet is the same split-brain deployment the channel exists to prevent.
 
-`cowork` is pinned because its prerelease tag is `next`, not `nightly`, **and** `next` is
-currently older than `latest` (`0.3.7-nightly.*` vs `0.4.0`) — following it would knowingly
-downgrade Rooms. When cowork's `next` catches up, add `{ nightly: 'next' }` for it in
-`PKG_CHANNEL_TAGS` (`lib/logic.mjs`); nothing else changes. A package with no mapping for the
-selected channel installs `@latest` rather than a guessed tag, because a 404 fails the *whole*
-install.
+`cowork`'s prerelease line is called **`next`**, not `nightly` — which is exactly why this is a
+map rather than one string. The nightly channel must follow it, because the external-daemon mode
+the Rooms step configures ships on that line; taking `latest` there would pair a config carrying
+a `daemon` block with a build that predates it.
+
+A package with no mapping for the selected channel installs `@latest` rather than a guessed tag,
+because a 404 fails the *whole* install.
 
 **With no explicit selection the installer follows its own version.** A published nightly build
 carries the `-nightly.N` suffix the release bump stamps, so `npm i -g @ours.network/install@nightly`
@@ -194,10 +210,12 @@ is reported and left unchanged.
 | `OURS_STATE_DIR` | daemon state directory (default `~/.ours`) — also what the Telegram connector is told to expect |
 | `OURS_TG_CONFIG` | Telegram connector config file location (default `~/.ours-telegram/config.json`) |
 | `OURS_COWORK_CONFIG` | Rooms config file location (default `~/.ours-cowork/config.json`) |
+| `OURS_COWORK_DAEMON_MODE` / `_ENDPOINT` / `_STATE_DIR` | cowork's own env equivalents of its `daemon` block (read by cowork, not set by the installer) |
 | `OURS_CHANNEL` | `nightly` or `latest`; unset follows the installer's own version |
 
 A non-interactive run takes the shared daemon on its existing default port and installs no
-dedicated daemon and no Rooms — the topology is unchanged from before this flow existed.
+dedicated daemon and no Rooms — the topology is unchanged from before this flow existed. It also
+never converts an existing embedded Rooms install to an external daemon.
 
 ## Uninstall
 

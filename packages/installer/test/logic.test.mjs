@@ -9,7 +9,8 @@ import {
   resolveChannel, pkgTag, pkgSpec, DEFAULT_CHANNEL,
   isNightlyVersion, daemonEndpoint, resolveSharedBroker, tgConfigPath, planTgDaemonConfig,
   validateDaemonPort, planPorts, resolveDaemonMode, dedicatedDaemonPaths, DEDICATED_INSTANCES,
-  coworkConfigPath, planCoworkConfig, COWORK_DEFAULT_PORT,
+  coworkConfigPath, planCoworkConfig, COWORK_DEFAULT_PORT, coworkDaemonMode, coworkDaemonBlock,
+  coworkSupportsExternalDaemon, compareVersions, COWORK_EXTERNAL_MIN_VERSION,
 } from '../lib/logic.mjs';
 
 test('resolveChannel: nightly synonyms → nightly; everything else → latest', () => {
@@ -128,10 +129,10 @@ test('pkgTag: the nightly channel takes each package\'s OWN prerelease tag', () 
   // stack needs the fleet build with the SDK integration, and a stable fleet against a
   // nightly daemon is the split-brain deployment the channel exists to prevent.
   assert.equal(pkgTag('fleet', 'nightly'), 'nightly', 'fleet follows the channel');
-  // cowork's prerelease tag is `next`, not `nightly`, and `next` is currently OLDER than
-  // `latest` (0.3.7-nightly.* vs 0.4.0). Following it would knowingly downgrade rooms,
-  // so it is pinned to latest on both channels until `next` catches up.
-  assert.equal(pkgTag('cowork', 'nightly'), 'latest', 'cowork is pinned — never a knowing downgrade');
+  // cowork's prerelease tag is `next`, not `nightly` — which is exactly why this is a map.
+  // The nightly channel must follow it: the external-daemon mode the Rooms step configures
+  // ships on that line, so taking `latest` would pair a daemon block with a build predating it.
+  assert.equal(pkgTag('cowork', 'nightly'), 'next', "cowork's prerelease line is called next");
   // Latest channel → everything latest.
   assert.equal(pkgTag('mcp', 'latest'), 'latest');
   assert.equal(pkgTag('fleet', 'latest'), 'latest');
@@ -141,7 +142,7 @@ test('pkgTag: the nightly channel takes each package\'s OWN prerelease tag', () 
   // Accepts the fully-qualified name too.
   assert.equal(pkgTag('@ours.network/mcp', 'nightly'), 'nightly');
   assert.equal(pkgTag('@ours.network/fleet', 'nightly'), 'nightly');
-  assert.equal(pkgTag('@ours.network/cowork', 'nightly'), 'latest');
+  assert.equal(pkgTag('@ours.network/cowork', 'nightly'), 'next');
 });
 
 test('pkgSpec: builds the full npm spec honoring each package\'s channel mapping', () => {
@@ -149,7 +150,8 @@ test('pkgSpec: builds the full npm spec honoring each package\'s channel mapping
   assert.equal(pkgSpec('tg-connector', 'nightly'), '@ours.network/tg-connector@nightly');
   assert.equal(pkgSpec('codex', 'nightly'), '@ours.network/codex@nightly');
   assert.equal(pkgSpec('fleet', 'nightly'), '@ours.network/fleet@nightly', 'the fix: nightly fleet on the nightly channel');
-  assert.equal(pkgSpec('cowork', 'nightly'), '@ours.network/cowork@latest');
+  assert.equal(pkgSpec('cowork', 'nightly'), '@ours.network/cowork@next');
+  assert.equal(pkgSpec('cowork', 'latest'), '@ours.network/cowork@latest');
   assert.equal(pkgSpec('mcp', 'latest'), '@ours.network/mcp@latest');
   assert.equal(pkgSpec('fleet', 'latest'), '@ours.network/fleet@latest', 'stable installs stable fleet');
   assert.equal(pkgSpec('fleet'), '@ours.network/fleet@latest', 'default channel = latest');
@@ -467,4 +469,115 @@ test('buildHandoffPrompt: Rooms gets its own step, and drops out when Rooms was 
   assert.doesNotMatch(noRooms, /Rooms/, 'a skipped Rooms must not appear in the hand-off');
   const roomsOnly = buildHandoffPrompt({ rooms: true }).text;
   assert.match(roomsOnly, /1\. Set up my first Rooms mission room/, 'steps renumber');
+});
+
+// ── Rooms daemon selection (ours-cowork PR #9 external-daemon contract) ────────
+// Optional `daemon` block; absent ⇒ embedded. External is
+// { mode:'external', endpoint, stateDir } and REQUIRES both halves — cowork stores
+// no token, its SDK reads <stateDir>/daemon-token. Boot is fail-closed with NO
+// embedded fallback, so a half-written block or an unasked migration is a real outage.
+
+test('coworkDaemonMode: no block means embedded, which is what every pre-#9 install runs', () => {
+  assert.equal(coworkDaemonMode({}), 'embedded');
+  assert.equal(coworkDaemonMode({ rest: { port: 3052 } }), 'embedded');
+  assert.equal(coworkDaemonMode(null), 'embedded');
+  assert.equal(coworkDaemonMode('nonsense'), 'embedded');
+  assert.equal(coworkDaemonMode({ daemon: null }), 'embedded');
+  assert.equal(coworkDaemonMode({ daemon: { mode: 'embedded' } }), 'embedded');
+  assert.equal(coworkDaemonMode({ daemon: { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir: '/s' } }), 'external');
+});
+
+test('coworkDaemonBlock: external needs BOTH halves, and is never written half-formed', () => {
+  const good = coworkDaemonBlock({ endpoint: 'http://127.0.0.1:3050', stateDir: '/home/u/.ours' });
+  assert.equal(good.ok, true);
+  assert.deepEqual(good.block, { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir: '/home/u/.ours' });
+  // A partial selection fails closed at cowork's boot, so it is refused here instead.
+  for (const bad of [{ endpoint: 'http://127.0.0.1:3050' }, { stateDir: '/home/u/.ours' }, {}, undefined]) {
+    const v = coworkDaemonBlock(bad);
+    assert.equal(v.ok, false, `refuses ${JSON.stringify(bad)}`);
+    assert.equal(v.block, null);
+    assert.match(v.reason, /BOTH an endpoint and its state directory/);
+  }
+  // No token, ever — cowork reads it from stateDir itself.
+  assert.equal(good.block.token, undefined);
+  assert.deepEqual(Object.keys(good.block).sort(), ['endpoint', 'mode', 'stateDir']);
+});
+
+test('planCoworkConfig: the daemon selection is three-valued (leave / embedded / external)', () => {
+  const base = { brokerUrl: 'wss://b', stateDir: '/home/u/.ours-cowork', restPort: 3052 };
+  const embeddedCfg = { version: 1, brokerUrl: 'wss://b', stateDir: '/home/u/.ours-cowork', rest: { enabled: true, port: 3052 } };
+
+  // undefined ⇒ LEAVE IT ALONE. This is the answer for an embedded install nobody
+  // asked to migrate; with everything else unchanged it must be a total no-op.
+  const untouched = planCoworkConfig(embeddedCfg, base);
+  assert.equal(untouched.changed, false, 'an embedded install is not migrated by omission');
+  assert.equal(untouched.previous.daemonMode, 'embedded');
+
+  // external ⇒ write the documented block.
+  const ext = planCoworkConfig(embeddedCfg, { ...base, daemon: { endpoint: 'http://127.0.0.1:3050', stateDir: '/home/u/.ours' } });
+  assert.equal(ext.changed, true);
+  const written = JSON.parse(ext.text);
+  assert.deepEqual(written.daemon, { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir: '/home/u/.ours' });
+  // cowork's OWN state dir is a different key and is not disturbed by the daemon choice.
+  assert.equal(written.stateDir, '/home/u/.ours-cowork');
+  assert.notEqual(written.stateDir, written.daemon.stateDir);
+
+  // Same external selection again ⇒ no rewrite.
+  assert.equal(planCoworkConfig(written, { ...base, daemon: { endpoint: 'http://127.0.0.1:3050', stateDir: '/home/u/.ours' } }).changed, false);
+  // A moved daemon IS a change, and the old selection is reported.
+  const moved = planCoworkConfig(written, { ...base, daemon: { endpoint: 'http://127.0.0.1:3085', stateDir: '/home/u/.ours-rooms' } });
+  assert.equal(moved.changed, true);
+  assert.equal(moved.previous.daemonEndpoint, 'http://127.0.0.1:3050');
+  assert.equal(moved.previous.daemonStateDir, '/home/u/.ours');
+  assert.equal(JSON.parse(moved.text).daemon.stateDir, '/home/u/.ours-rooms');
+
+  // null ⇒ back to EMBEDDED, which means the block is REMOVED, not set to null:
+  // `daemon: null` is not the same document as no `daemon` key.
+  const back = planCoworkConfig(written, { ...base, daemon: null });
+  assert.equal(back.changed, true);
+  const backObj = JSON.parse(back.text);
+  assert.ok(!('daemon' in backObj), 'the block is deleted outright');
+  assert.equal(coworkDaemonMode(backObj), 'embedded');
+  // And going embedded when already embedded is a no-op.
+  assert.equal(planCoworkConfig(embeddedCfg, { ...base, daemon: null }).changed, false);
+
+  // A half-formed selection is refused rather than written — it would fail closed at boot.
+  const partial = planCoworkConfig(embeddedCfg, { ...base, daemon: { endpoint: 'http://127.0.0.1:3050' } });
+  assert.equal(partial.changed, false);
+  assert.equal(partial.text, '');
+  assert.match(partial.error, /BOTH an endpoint and its state directory/);
+
+  // Keys the installer does not own still survive a daemon change.
+  const extra = planCoworkConfig({ ...embeddedCfg, operatorNote: 'keep me' },
+    { ...base, daemon: { endpoint: 'http://127.0.0.1:3050', stateDir: '/home/u/.ours' } });
+  assert.equal(JSON.parse(extra.text).operatorNote, 'keep me');
+});
+
+test('coworkSupportsExternalDaemon: only a build that HAS the mode may be handed a daemon block', () => {
+  // The prerelease line carries it, so the nightly channel is always allowed.
+  assert.equal(coworkSupportsExternalDaemon('nightly'), true);
+  assert.equal(coworkSupportsExternalDaemon('prerelease'), true, 'channel synonyms resolve first');
+  // Stable does not, until a stable cowork ships it. Writing a block a strict-config,
+  // fail-closed-boot build cannot honour would BREAK Rooms, not degrade it.
+  assert.equal(coworkSupportsExternalDaemon('latest'), false);
+  assert.equal(coworkSupportsExternalDaemon(), false, 'the default channel is stable');
+  // An installed version never upgrades the answer while no floor is set.
+  assert.equal(COWORK_EXTERNAL_MIN_VERSION, '', 'no stable cowork carries it yet');
+  assert.equal(coworkSupportsExternalDaemon('latest', '99.0.0'), false, 'no floor ⇒ no stable support, whatever is installed');
+  assert.equal(coworkSupportsExternalDaemon('latest', ''), false, 'an unknown installed version never claims support');
+});
+
+test('compareVersions: numeric x.y.z, and unparseable input never claims to be newer', () => {
+  assert.equal(compareVersions('1.2.3', '1.2.3'), 0);
+  assert.equal(compareVersions('1.2.4', '1.2.3'), 1);
+  assert.equal(compareVersions('1.3.0', '1.2.9'), 1);
+  assert.equal(compareVersions('2.0.0', '1.9.9'), 1);
+  assert.equal(compareVersions('1.2.2', '1.2.3'), -1);
+  assert.equal(compareVersions('0.4.0', '0.5.0'), -1);
+  // A prerelease suffix is ignored — the floor is only consulted for stable releases.
+  assert.equal(compareVersions('1.2.3-nightly.4', '1.2.3'), 0);
+  // Garbage is never "newer": that would silently enable an unsupported path.
+  for (const bad of ['', 'x', '1.2', undefined, null, 'v1.2.3']) {
+    assert.equal(compareVersions(bad, '1.0.0'), -1, `${JSON.stringify(bad)} is not newer`);
+  }
 });

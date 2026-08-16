@@ -10,7 +10,8 @@
 // there; every consumer below is wired to that endpoint. The Telegram connector may instead be
 // given its OWN daemon — its own port, state directory and boot unit — chosen independently, and
 // defaulting to the shared one so Enter and non-interactive runs keep the historical topology.
-// Rooms runs its own standalone daemon by design and consumes no ours daemon at all (see step 5).
+// Rooms answers the same question, plus a third answer the connector has no use for: keeping
+// cowork's own EMBEDDED daemon, which is what every pre-PR#9 cowork install runs (see step 5).
 // Its whole job: install the stack cleanly, then hand back ONE copy-paste prompt the user drops
 // into their agent to finish remaining configuration conversationally. Voice API credentials are
 // the one guided secret flow: interactive, masked, optional, and written atomically with mode 0600.
@@ -35,15 +36,16 @@ import {
   voiceSetupStatus, resolveSharedBroker, tgConfigPath, planTgDaemonConfig, daemonEndpoint,
   DEFAULT_PORT, resolveChannel, pkgSpec,
   validateDaemonPort, planPorts, dedicatedDaemonPaths, DEDICATED_INSTANCES,
-  coworkConfigPath, planCoworkConfig, COWORK_DEFAULT_PORT,
+  coworkConfigPath, planCoworkConfig, COWORK_DEFAULT_PORT, coworkDaemonMode,
+  coworkSupportsExternalDaemon,
 } from './lib/logic.mjs';
 import { atomicWriteConfig } from './lib/config.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
 // Release channel: OURS_CHANNEL=nightly installs each package's PRERELEASE dist-tag —
 // @nightly for mcp/tg-connector/fleet/the plugin launchers, and @latest for cowork,
-// which publishes `next` rather than `nightly` and whose `next` is currently older
-// than its `latest` (see PKG_CHANNEL_TAGS in lib/logic.mjs). With no explicit
+// and @next for cowork, whose repo has always called its prerelease line `next`
+// (see PKG_CHANNEL_TAGS in lib/logic.mjs). With no explicit
 // selection the installer follows its OWN channel, so a nightly installer builds a
 // nightly stack instead of silently mixing tags across an architecture boundary.
 const CHANNEL = resolveChannel(process.env.OURS_CHANNEL || process.env.OURS_INSTALL_CHANNEL, pkgVersion());
@@ -441,7 +443,7 @@ async function main() {
   line(heading('1/5 — the shared ours daemon'));
   line(info('This is the piece that lets your agents talk to each other securely. The harness'));
   line(info('plugins, ours-fleet and the Telegram connector all connect to it — Telegram can be'));
-  line(info('given its own instead, later. (Rooms runs its own daemon either way.)'));
+  line(info('given its own instead, later — and so can Rooms.'));
   const before = parseVersion(versionBefore);
 
   if (configFirst) {
@@ -867,19 +869,27 @@ async function main() {
   cont(goTg);
 
   // ============================================================================================
-  // STEP 5 / 5 — Rooms (ours-cowork). A STANDALONE daemon: per its own docs and shipped bundle it
-  // has "no dependency on another agent daemon" and exposes no daemonUrl / daemonStateDir /
-  // /api/v1 at all — it meets other identities at the BROKER, exactly as the ours daemon does.
-  // So there is no common-vs-dedicated ours-daemon question to ask here: the three things it
-  // actually has are the shared broker, its own private state directory, and its own loopback
-  // console/REST port. Those are what this step configures. (An owner request for a
-  // common-vs-dedicated choice on Rooms is pending a cross-repo change in ours-cowork; until that
-  // lands, offering the choice would configure nothing.)
+  // STEP 5 / 5 — Rooms (ours-cowork). Two independent things get configured here.
+  //
+  // ITS OWN SURFACE — the deployment broker, its private state directory, and its loopback
+  // console/REST port. Those it has always had.
+  //
+  // WHICH DAEMON — ours-cowork used to host its own, always. It now supports an EXTERNAL ours
+  // daemon (cowork PR #9), so Rooms answers the same common-vs-dedicated question the Telegram
+  // connector does, plus a third state the connector does not have: EMBEDDED, cowork's own.
+  // Contract (see logic.mjs): the `daemon` block is optional; absent means embedded; external is
+  // { mode:'external', endpoint, stateDir } and REQUIRES both halves, because cowork holds no
+  // token and its SDK reads <stateDir>/daemon-token.
+  //
+  // Boot is FAIL-CLOSED on an unreachable endpoint, a non-ours daemon, or a mismatched state
+  // directory — there is no embedded fallback. So an install that is ALREADY running embedded is
+  // never migrated behind the user's back: non-interactively it is left exactly as it is, and
+  // interactively the question is asked plainly before anything is written.
   // ============================================================================================
   line(heading('5/5 — Rooms (ours-cowork)'));
   line(info('Durable mission rooms: a room keeps its own ordered history, and people and agents'));
-  line(info('join it as seats. It runs as its own daemon with a local web console, and reaches'));
-  line(info('everyone through the same broker as the rest of your install.'));
+  line(info('join it as seats. It serves a local web console, and reaches everyone through the'));
+  line(info('same broker as the rest of your install.'));
   const goRooms = yes('  Install it?', false);
   if (goRooms) {
     await actSpin(`installing ${spec('cowork')}…`, `npm i -g ${spec('cowork')}`, () => runAsync(NPM, ['i', '-g', spec('cowork')]));
@@ -909,16 +919,60 @@ async function main() {
       return candidate;
     })();
     claimPort(roomsPort, 'the Rooms console');
+
+    // WHICH DAEMON. `undefined` means "leave whatever is there alone" — the answer for an
+    // existing embedded install nobody asked to migrate.
+    const wasEmbedded = coworkDaemonMode(existingRooms) === 'embedded';
+    const hadConfig = existsSync(cfgPath);
+    const externalSupported = coworkSupportsExternalDaemon(CHANNEL, globalVersion('@ours.network/cowork'));
+    let roomsDaemon;
+    let roomsDaemonLabel;
+    if (!externalSupported) {
+      // The build we just installed predates cowork's external-daemon mode. Its config
+      // is a strict document and its boot fails closed, so writing a selection it cannot
+      // honour would break Rooms rather than degrade it.
+      line(info('This Rooms build hosts its own daemon; pointing it at the shared one needs a newer'));
+      line(info(`Rooms release. Re-run with ${c.cyan('OURS_CHANNEL=nightly')} for the prerelease line that has it.`));
+      roomsDaemonLabel = 'embedded';
+    } else if (hadConfig && wasEmbedded && !interactive) {
+      // Fail-closed boot makes this migration a real risk; never do it unasked.
+      line(info('Rooms already runs its own embedded daemon — leaving that alone.'));
+      line(info(`To point it at this install's daemon, re-run ${c.cyan('ours-install')} in a terminal.`));
+      roomsDaemonLabel = 'embedded (unchanged)';
+    } else {
+      line('');
+      const roomsMode = askDaemonMode('Rooms');
+      if (roomsMode === 'dedicated') {
+        const instance = DEDICATED_INSTANCES.rooms;
+        const suggested = suggestPort(chosenPort + 1, (p) => claimedPorts.includes(p) || portTakenSync(p));
+        const port = askDaemonPort('Which local port should the Rooms daemon use?', suggested);
+        claimPort(port, 'the dedicated Rooms daemon');
+        const provisioned = await provisionDedicatedDaemon({ instance, port, label: 'Rooms' });
+        roomsDaemon = { endpoint: provisioned.endpoint, stateDir: provisioned.stateDir };
+        roomsDaemonLabel = `dedicated daemon ${port}`;
+      } else {
+        roomsDaemon = { endpoint: daemonEndpoint(chosenPort), stateDir: daemonStateDir() };
+        roomsDaemonLabel = `common daemon ${chosenPort}`;
+        line(ok(`Rooms will use the shared daemon on port ${chosenPort}.`));
+      }
+    }
+
     const roomsPlan = planCoworkConfig(existingRooms, {
       brokerUrl: sharedBroker(),
       stateDir: roomsStateDir,
       restPort: roomsPort,
+      daemon: roomsDaemon,
     });
-    if (roomsPlan.changed) {
-      await act(`write ${cfgPath} (console port ${roomsPort}, state ${roomsStateDir})`, async () => {
+    if (roomsPlan.error) {
+      // Only reachable if a daemon selection lost half of itself; a half-written block
+      // would fail closed at cowork's boot, so refuse rather than write it.
+      line(warn(`not changing the Rooms daemon selection — ${roomsPlan.error}.`));
+    } else if (roomsPlan.changed) {
+      await act(`write ${cfgPath} (console port ${roomsPort}, state ${roomsStateDir}${roomsDaemon ? `, daemon ${roomsDaemon.endpoint}` : ''})`, async () => {
         atomicWriteConfig(cfgPath, roomsPlan.text);
         return { ok: true };
       });
+      if (roomsDaemon) line(ok(`Rooms configured to use ${roomsDaemonLabel} (${roomsDaemon.endpoint}, state ${roomsDaemon.stateDir}).`));
     } else {
       line(ok(`Rooms is already configured for this deployment (console port ${roomsPort}) — no change.`));
     }
@@ -934,7 +988,7 @@ async function main() {
       label: 'Rooms (ours-cowork)',
       state: svc.ok ? 'installed' : 'failed',
       version: globalVersion('@ours.network/cowork'),
-      note: svc.ok ? `console ${roomsPort} · service (boot)` : 'ours-cowork install-service failed',
+      note: svc.ok ? `console ${roomsPort} · ${roomsDaemonLabel}` : 'ours-cowork install-service failed',
     });
   } else {
     line(info('skipped cleanly — re-run ours-install any time to add it.'));
