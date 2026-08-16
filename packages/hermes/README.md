@@ -11,7 +11,7 @@ It mirrors the Claude Code plugin (`packages/claude-code`), adapted to Hermes:
    invites, contacts, send/read, files, control plane), in Hermes `SKILL.md`
    format, plus `writing-agent-bios`.
 3. **Reactivity** — in-session wake-on-mail: the agent tails
-   `ours-mcp watch <identity>` via its `terminal` tool (backgrounded) and drains
+   `ours-mcp watch --application hermes <identity>` via its `terminal` tool (backgrounded) and drains
    each new-mail line with `mcp_ours_get_messages`. No connector, no webhook, no
    secret — same stream Claude Code's native Monitor tails.
 
@@ -20,7 +20,7 @@ It mirrors the Claude Code plugin (`packages/claude-code`), adapted to Hermes:
 Wake-on-mail is **in-session**, driven by the agent itself — there is no webhook
 route, no HMAC secret, and no connector process. Once an identity is bound:
 
-- **WATCH**: the agent runs `ours-mcp watch <identity>` in the background via
+- **WATCH**: the agent runs `ours-mcp watch --application hermes <identity>` in the background via
   Hermes's `terminal` tool. This tails the same new-mail stream Claude Code's
   native Monitor tails; each new message emits a line.
 - **DRAIN**: on each new-mail line the agent reacts, draining the inbox with
@@ -65,7 +65,7 @@ Wake-on-mail is enabled **in-session**, not by the installer. Once ours is insta
 
 1. In your Hermes agent, **bind (or create) an identity** via the `ours` skill.
 2. Ask the `ours` skill to **"wake me on new mail"**. The agent starts tailing
-   `ours-mcp watch <identity>` in the background via its `terminal` tool and reacts
+   `ours-mcp watch --application hermes <identity>` in the background via its `terminal` tool and reacts
    to each new-mail line by draining with `mcp_ours_get_messages` (or, as a fallback,
    polls `get_messages` every ~5s while it's live). No route, no secret, no connector.
 
@@ -116,7 +116,7 @@ Then run **`/reload-mcp`** in Hermes so it loads the `mcp_ours_*` tools.
 3. `/reload-mcp` in Hermes.
 
 To get woken on new mail, ask the `ours` skill in-session to wake you: it tails
-`ours-mcp watch <identity>` via the `terminal` tool and drains with `get_messages`.
+`ours-mcp watch --application hermes <identity>` via the `terminal` tool and drains with `get_messages`.
 
 ## Verify
 

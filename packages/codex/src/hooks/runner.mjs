@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sendControlCommand } from '../control-server.mjs';
+import { resolveDaemonProfile } from '../profile.mjs';
 
 async function defaultFindPin(cwd) {
   let dir = resolve(cwd || process.cwd());
@@ -62,8 +63,19 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
     if (event === 'SessionStart' && socket && capability && payload.session_id && payload.cwd) {
       await send(socket, capability, { command: 'register_session', sessionId: payload.session_id, threadId: payload.session_id, cwd: payload.cwd });
     }
-    const port = env.OURS_PORT || '3050';
-    const headers = env.OURS_API_TOKEN ? { 'x-ours-api-token': env.OURS_API_TOKEN } : {};
+    let port = env.OURS_PORT || '3050';
+    let selectedToken = env.OURS_API_TOKEN || '';
+    // Standard Codex does not pass through ours-codex's resolved environment.
+    // Resolve its registry association here too so SessionStart/UserPromptSubmit
+    // inspect the same daemon as the stdio proxy. Hook failures remain benign.
+    if (!env.OURS_PORT && !env.OURS_CONFIG && !env.OURS_STATE_DIR) {
+      try {
+        const selected = await resolveDaemonProfile({ env, fetch: fetchImpl });
+        port = String(selected.port);
+        selectedToken = selected.token || '';
+      } catch { /* proxy/launcher owns diagnostics; hooks emit a benign no-op */ }
+    }
+    const headers = selectedToken ? { 'x-ours-api-token': selectedToken } : {};
     let unread = [];
     try {
       const response = await fetchImpl(`http://127.0.0.1:${port}/unread`, { headers, signal: AbortSignal.timeout(1500) });
@@ -83,4 +95,3 @@ async function main() {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) main();
-

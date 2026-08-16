@@ -2,10 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { monitorToolNames, handleMonitorCommand, waitForForegroundMail } from '../src/monitor-mcp.mjs';
+import {
+  monitorToolNames, foregroundWatchProcess, handleMonitorCommand, waitForForegroundMail,
+} from '../src/monitor-mcp.mjs';
 
 test('exposes background and foreground monitor tools', () => {
   assert.deepEqual(monitorToolNames, ['arm_monitor', 'foreground_monitor', 'disarm_monitor', 'monitor_status']);
+  const watch = foregroundWatchProcess('Alice');
+  assert.deepEqual(watch.args.slice(-4), ['watch', '--application', 'codex', 'Alice']);
 });
 
 test('standard mode is informative and live mode uses private control channel', async () => {

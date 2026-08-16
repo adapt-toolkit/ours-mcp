@@ -23,7 +23,12 @@ const SENTINEL_END = '# <<< ours.network plugin';
 // could corrupt existing YAML.
 export function planConfigInstall(text) {
   const t = text ?? '';
-  if (t.includes(SENTINEL)) return { action: 'noop', reason: 'ours block already present' };
+  if (t.includes(SENTINEL)) {
+    if (!t.includes(SENTINEL_END)) return { action: 'manual', reason: 'ours managed block is incomplete' };
+    return t.includes('--application') && t.includes('hermes')
+      ? { action: 'noop', reason: 'ours block already present' }
+      : { action: 'replace', reason: 'migrate the managed block to its durable daemon association' };
+  }
   if (!t.trim()) return { action: 'write', reason: 'no existing config' };
   if (/^mcp_servers:/m.test(t)) {
     return {
@@ -42,7 +47,7 @@ export function renderConfigBlock() {
 mcp_servers:
   ours:
     command: "ours-mcp"
-    args: ["proxy"]
+    args: ["proxy", "--application", "hermes"]
     enabled: true
 ${SENTINEL_END}
 `;
@@ -67,9 +72,13 @@ function main() {
     process.exitCode = 3;
     return;
   }
-  const next = plan.action === 'write' ? block : existing.replace(/\s*$/, '\n\n') + block;
+  const next = plan.action === 'write' ? block
+    : plan.action === 'replace'
+      ? existing.replace(new RegExp(`${SENTINEL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${SENTINEL_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n?`), block)
+      : existing.replace(/\s*$/, '\n\n') + block;
   writeFileSync(cfgPath, next);
-  console.log(`ours: ${plan.action === 'write' ? 'wrote' : 'appended ours block to'} ${cfgPath}. Run /reload-mcp in Hermes.`);
+  const verb = plan.action === 'write' ? 'wrote' : plan.action === 'replace' ? 'updated ours block in' : 'appended ours block to';
+  console.log(`ours: ${verb} ${cfgPath}. Run /reload-mcp in Hermes.`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

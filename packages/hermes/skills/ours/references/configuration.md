@@ -1,8 +1,9 @@
 # ours configuration & self-service
 
-The daemon is a **shared, host-wide singleton** reachable only on `127.0.0.1`
-(loopback — there is no host knob, by design). Configuration is resolved
-**env var > `~/.ours/config.json` > built-in default**:
+Each daemon is local-only on `127.0.0.1`. Nightly supports multiple isolated
+profiles. Hermes' managed MCP block runs `ours-mcp proxy --application hermes`,
+and documented watch commands use the same application. Resolution is
+**explicit env > Hermes' Nightly association > `~/.ours/config.json` > default**:
 
 | Setting | Env | config.json | Default |
 |---|---|---|---|
@@ -12,10 +13,9 @@ The daemon is a **shared, host-wide singleton** reachable only on `127.0.0.1`
 | GC interval (ms) | `OURS_GC_INTERVAL_MS` | `gcIntervalMs` | `3600000` |
 | Auto-start daemon | `OURS_AUTOSTART` | `autoStart` | `false` |
 
-**The port is shared.** Every process that dials the daemon — the `ours-mcp proxy` MCP
-server and `ours-mcp watch` — connects to `127.0.0.1:<OURS_PORT>`, and the daemon binds the
-same port (both read `OURS_PORT`/`config.json`). Change it **once in shared config**, never
-per-side, or a dialer won't find the daemon.
+Registry/config/daemon state drift and protected-auth failures stop rather than falling back.
+Explicit `OURS_CONFIG`, `OURS_PORT`, and `OURS_STATE_DIR` still win. Never add a duplicate ours
+MCP registration; reload the installer-managed block instead.
 
 **Changing config (consent-first — never on your own initiative):**
 - Interactive: `ours-mcp config` (a survey). It needs a TTY, so ask the **user**

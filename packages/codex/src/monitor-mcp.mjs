@@ -20,12 +20,12 @@ const foregroundOffer = (identity) =>
   `Only after an explicit yes, call get_messages once to drain existing unread mail, then ` +
   `call foreground_monitor({ identity: ${JSON.stringify(identity)} }).`;
 
-function foregroundWatchProcess(identity) {
+export function foregroundWatchProcess(identity) {
   try {
     const cliPath = require.resolve('@ours.network/mcp/dist/cli.js');
-    return { command: process.execPath, args: [cliPath, 'watch', identity] };
+    return { command: process.execPath, args: [cliPath, 'watch', '--application', 'codex', identity] };
   } catch {
-    return { command: 'ours-mcp', args: ['watch', identity] };
+    return { command: 'ours-mcp', args: ['watch', '--application', 'codex', identity] };
   }
 }
 
