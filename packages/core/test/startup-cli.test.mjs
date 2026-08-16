@@ -123,13 +123,30 @@ console.log('  ✓ shared mode readiness uses the explicit token without persist
 console.log('  ✓ non-TTY slow/many fake restoration emits stable count-only n/N lines');
 
 {
+  // The claim: when the daemon is alive but logically STUCK IN A PHASE, the absolute
+  // bound expires and the error names THAT phase.
+  //
+  // The bound is measured from process start, so it races the daemon's own boot —
+  // Initializing daemon → Starting protocol runtime → Starting local contact book →
+  // Restoring identities. This case used a 6s bound against a 10s stall, which left
+  // barely 1.6x for boot to reach the restore phase. On a loaded CI runner it did not:
+  // the bound expired at "Starting local contact book" and the assertion on WHICH
+  // phase was reported failed, while every behavioural claim was still true.
+  //
+  // Fixed by removing the competition rather than by loosening the assertion. The
+  // stall now dominates the bound by ~33x, so the phase the bound expires in is the
+  // restore phase for any boot that completes at all — and a boot slower than
+  // ABSOLUTE_MS would already have failed the cases above, which run on the harness's
+  // own 20s default. Every assertion is preserved, and the expected duration is
+  // derived from the constant so the two cannot drift apart.
+  const ABSOLUTE_MS = 18_000;
   const result = await runStart({
     OURS_TEST_FAKE_RESTORE_COUNT: '1',
-    OURS_TEST_FAKE_RESTORE_MS: '10000',
-    OURS_TEST_STARTUP_ABSOLUTE_MS: '6000',
+    OURS_TEST_FAKE_RESTORE_MS: '600000',
+    OURS_TEST_STARTUP_ABSOLUTE_MS: String(ABSOLUTE_MS),
   });
   assert.equal(result.exitStatus, 1);
-  assert.match(result.stderr, /startup did not finish within 6s/);
+  assert.match(result.stderr, new RegExp(`startup did not finish within ${ABSOLUTE_MS / 1000}s`));
   assert.match(result.stderr, /Last phase: Restoring identities 0\/1/);
   assert.match(result.stderr, /bounded wait expired/i);
 }
