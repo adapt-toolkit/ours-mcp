@@ -7,6 +7,7 @@ import {
   effectiveVoiceConfig, voiceSetupStatus, validateVoiceSecret, redactSensitive,
   DEFAULT_PORT, DEFAULT_BROKER, RESERVED_PORTS,
   resolveChannel, pkgTag, pkgSpec, DEFAULT_CHANNEL,
+  isNightlyVersion, daemonEndpoint, resolveSharedBroker, tgConfigPath, planTgDaemonConfig,
 } from '../lib/logic.mjs';
 
 test('resolveChannel: nightly synonyms → nightly; everything else → latest', () => {
@@ -19,6 +20,99 @@ test('resolveChannel: nightly synonyms → nightly; everything else → latest',
   assert.equal(resolveChannel(''), 'latest');
   assert.equal(resolveChannel(undefined), 'latest');
   assert.equal(resolveChannel('garbage'), 'latest', 'unknown never guesses a tag');
+});
+
+test('resolveChannel: with no explicit selection the installer follows its OWN version', () => {
+  // A nightly build of @ours.network/install must build a nightly stack. Before this, a
+  // nightly installer installed @latest for everything it installs — and since
+  // tg-connector 0.3.3-nightly.1 that crosses an architecture boundary, not just a version.
+  assert.equal(resolveChannel('', '0.17.0-nightly.1'), 'nightly');
+  assert.equal(resolveChannel(undefined, '0.17.0-nightly.12'), 'nightly');
+  assert.equal(resolveChannel('', '0.17.0'), 'latest', 'a stable build never consumes a nightly');
+  assert.equal(resolveChannel('', ''), 'latest', 'an unreadable version falls back to stable');
+  assert.equal(resolveChannel('', '?'), 'latest');
+  // The environment still wins in BOTH directions.
+  assert.equal(resolveChannel('latest', '0.17.0-nightly.1'), 'latest');
+  assert.equal(resolveChannel('stable', '0.17.0-nightly.1'), 'latest');
+  assert.equal(resolveChannel('nightly', '0.17.0'), 'nightly');
+  // An unrecognized explicit value is stable, and must NOT silently inherit the build channel.
+  assert.equal(resolveChannel('garbage', '0.17.0-nightly.1'), 'latest');
+});
+
+test('isNightlyVersion: exactly the suffix the release bump stamps', () => {
+  assert.equal(isNightlyVersion('0.17.0-nightly.1'), true);
+  assert.equal(isNightlyVersion('1.2.3-nightly.42'), true);
+  assert.equal(isNightlyVersion('0.17.0'), false);
+  assert.equal(isNightlyVersion('0.17.0-rc.1'), false, 'only the nightly suffix counts');
+  assert.equal(isNightlyVersion(''), false);
+  assert.equal(isNightlyVersion(undefined), false);
+});
+
+test('daemonEndpoint: the loopback address the daemon actually binds', () => {
+  assert.equal(daemonEndpoint(3050), 'http://127.0.0.1:3050');
+  assert.equal(daemonEndpoint(3060), 'http://127.0.0.1:3060');
+});
+
+test('resolveSharedBroker: this run > the running daemon > the config file > the built-in', () => {
+  assert.equal(
+    resolveSharedBroker({ chosenBroker: 'wss://a', statusBroker: 'wss://b', configBroker: 'wss://c' }),
+    'wss://a', 'what the user chose in this run wins');
+  assert.equal(
+    resolveSharedBroker({ statusBroker: 'wss://b', configBroker: 'wss://c' }),
+    'wss://b', 'else what the running daemon actually resolved');
+  assert.equal(resolveSharedBroker({ configBroker: 'wss://c' }), 'wss://c', 'else the config file');
+  assert.equal(resolveSharedBroker({}), DEFAULT_BROKER, 'else the built-in, which the daemon shares');
+  assert.equal(resolveSharedBroker(), DEFAULT_BROKER);
+  // A malformed value is skipped rather than propagated to the connector.
+  assert.equal(resolveSharedBroker({ chosenBroker: 'not-a-url', statusBroker: 'wss://b' }), 'wss://b');
+  assert.equal(resolveSharedBroker({ chosenBroker: '   ' }), DEFAULT_BROKER);
+});
+
+test('tgConfigPath: OURS_TG_CONFIG else <home>/.ours-telegram/config.json', () => {
+  assert.equal(tgConfigPath({}, '/h'), '/h/.ours-telegram/config.json');
+  assert.equal(tgConfigPath({ OURS_TG_CONFIG: '/elsewhere/tg.json' }, '/h'), '/elsewhere/tg.json');
+});
+
+test('planTgDaemonConfig: writes both selections, preserves the rest, no-ops when unchanged', () => {
+  const desired = {
+    daemonUrl: 'http://127.0.0.1:3060',
+    daemonStateDir: '/home/u/.ours',
+    brokerUrl: 'wss://broker.example',
+  };
+  // Fresh file.
+  const fresh = planTgDaemonConfig({}, desired);
+  assert.equal(fresh.changed, true);
+  const written = JSON.parse(fresh.text);
+  // BOTH the endpoint and the state directory: the SDK refuses an endpoint selected while the
+  // state directory stays defaulted, because the daemon's API token belongs to a state dir.
+  assert.equal(written.daemonUrl, desired.daemonUrl);
+  assert.equal(written.daemonStateDir, desired.daemonStateDir);
+  // And the broker, for a pre-0.3.3 connector that meets the daemon at a broker instead.
+  assert.equal(written.brokerUrl, desired.brokerUrl);
+  assert.equal(fresh.previous.daemonUrl, '', 'nothing was there before');
+
+  // Keys the installer does not own survive.
+  const withUser = planTgDaemonConfig({ sttModel: 'mine', controlPort: 3051 }, desired);
+  const merged = JSON.parse(withUser.text);
+  assert.equal(merged.sttModel, 'mine');
+  assert.equal(merged.controlPort, 3051);
+
+  // Idempotent: the same selection is not rewritten.
+  const again = planTgDaemonConfig(merged, desired);
+  assert.equal(again.changed, false, 'an unchanged selection writes nothing');
+  assert.equal(again.text, '');
+  assert.equal(again.previous.daemonUrl, desired.daemonUrl);
+
+  // A moved daemon IS a change, and the old value is reported so the caller can warn about a
+  // service unit that froze it.
+  const moved = planTgDaemonConfig(merged, { ...desired, daemonUrl: 'http://127.0.0.1:3070' });
+  assert.equal(moved.changed, true);
+  assert.equal(moved.previous.daemonUrl, 'http://127.0.0.1:3060');
+  assert.equal(JSON.parse(moved.text).daemonUrl, 'http://127.0.0.1:3070');
+
+  // Non-object input (absent/corrupt file) is treated as empty, never thrown on.
+  assert.equal(planTgDaemonConfig(null, desired).changed, true);
+  assert.equal(planTgDaemonConfig('nonsense', desired).changed, true);
 });
 
 test('pkgTag: nightly channel tags mcp/tg/plugins @nightly but fleet ALWAYS @latest', () => {
