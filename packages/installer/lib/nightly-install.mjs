@@ -30,23 +30,41 @@ const canonicalPath = (path) => {
   try { return realpathSync(path); } catch { return resolve(path); }
 };
 
+// Mirror core's runtime-config-values + loadConfig contract for endpoint fields.
+// The standalone installer cannot import the daemon package, so every installer
+// discovery/validation path shares this one equivalent resolver: service env
+// uses core's envInt/nullish precedence, file values keep only finite numbers
+// and strings, and the historical defaults never depend on a service name.
+function resolveRuntimeEndpoint(config, home, env = {}) {
+  let environmentPort;
+  if (env.OURS_PORT !== undefined) {
+    const parsed = parseInt(env.OURS_PORT, 10);
+    if (!Number.isNaN(parsed)) environmentPort = parsed;
+  }
+  const filePort = typeof config.port === 'number' && Number.isFinite(config.port)
+    ? config.port
+    : undefined;
+  const stateValue = env.OURS_STATE_DIR !== undefined
+    ? env.OURS_STATE_DIR
+    : typeof config.stateDir === 'string'
+      ? config.stateDir
+      : join(home, '.ours');
+  return {
+    port: environmentPort ?? filePort ?? DEFAULT_PORT,
+    stateDir: resolve(stateValue),
+  };
+}
+
 // Keep this check aligned with the runtime association resolvers: a profile-selected
 // client reads this exact config with the historical 3050 / ~/.ours defaults. A manual
 // profile that merely reaches the requested daemon is still unusable when its client
 // config resolves another port or state directory, so reject it before any mutation.
 function assertClientConfigMatchesProfile(profile, config, home) {
-  // Mirror core/src/config.ts readFileConfig exactly for the two association fields:
-  // values with the wrong JSON type are ignored, then loadConfig applies defaults.
-  const configuredPort = typeof config.port === 'number' && Number.isFinite(config.port)
-    ? config.port
-    : DEFAULT_PORT;
-  const configuredState = canonicalPath(
-    typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'),
-  );
-  if (configuredPort !== profile.port) {
-    throw new Error(`client config resolves port ${configuredPort}, not selected port ${profile.port}`);
+  const configured = resolveRuntimeEndpoint(config, home);
+  if (configured.port !== profile.port) {
+    throw new Error(`client config resolves port ${configured.port}, not selected port ${profile.port}`);
   }
-  if (configuredState !== canonicalPath(profile.stateDir)) {
+  if (canonicalPath(configured.stateDir) !== canonicalPath(profile.stateDir)) {
     throw new Error('client config resolves a different state directory than the selected daemon');
   }
 }
@@ -54,10 +72,7 @@ function assertClientConfigMatchesProfile(profile, config, home) {
 function candidateFromConfig(id, label, configPath, home, { serviceName = '', ownership } = {}) {
   if (!existsSync(configPath)) return null;
   const config = readObject(configPath);
-  // Mirror core/src/config.ts: wrong-typed file values are ignored before the
-  // historical runtime defaults are applied.
-  const stateDir = resolve(typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'));
-  const port = typeof config.port === 'number' && Number.isFinite(config.port) ? config.port : DEFAULT_PORT;
+  const { stateDir, port } = resolveRuntimeEndpoint(config, home);
   return {
     id, label, host: '127.0.0.1', port, configPath: resolve(configPath), stateDir,
     serviceName: typeof config.serviceName === 'string' ? config.serviceName : serviceName,
@@ -115,14 +130,13 @@ function parseServiceFile(path, id, home) {
       })[entity]);
       continue;
     }
-    const match = text.match(new RegExp(`(?:Environment=|<key>)${key}(?:=|<\\/key>\\s*<string>)([^\\n<]+)`));
+    const match = text.match(new RegExp(`(?:Environment=|<key>)${key}(?:=|<\\/key>\\s*<string>)([^\\n<]*)`));
     if (match) env[key] = match[1].replace(/^['"]|['"]$/g, '').trim();
   }
   const serviceName = env.OURS_SERVICE_NAME || (id === 'default' ? '' : id);
-  const configPath = resolve(env.OURS_CONFIG || (id === 'default' ? join(home, '.ours', 'config.json') : join(home, `.ours-${id}`, 'config.json')));
+  const configPath = resolve(env.OURS_CONFIG || join(home, '.ours', 'config.json'));
   const configured = existsSync(configPath) ? readObject(configPath) : {};
-  const stateDir = resolve(env.OURS_STATE_DIR || configured.stateDir || (id === 'default' ? join(home, '.ours') : join(home, `.ours-${id}`)));
-  const port = Number(env.OURS_PORT || configured.port || DEFAULT_PORT);
+  const { stateDir, port } = resolveRuntimeEndpoint(configured, home, env);
   return {
     id, label: id === 'default' ? 'Default ours service' : `ours service ${id}`,
     host: '127.0.0.1', port, configPath, stateDir, serviceName,

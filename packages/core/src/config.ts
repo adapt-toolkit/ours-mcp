@@ -13,6 +13,9 @@ import {
   resolveRuntimeAssociation,
   type AssociatedApplication,
 } from './association';
+import {
+  DEFAULT_RUNTIME_PORT, defaultRuntimeStateDir, finiteConfigNumber, stringConfigValue,
+} from './runtime-config-values';
 
 // How reachable the daemon's local HTTP surface (the messaging + notification
 // endpoints) is to OTHER local OS users. The port always binds 127.0.0.1, so
@@ -55,8 +58,8 @@ export interface OursConfig {
 
 export const DEFAULT_CONFIG: OursConfig = {
   brokerUrl: 'wss://broker1.ours.network',
-  port: 3050,
-  stateDir: resolve(homedir(), '.ours'),
+  port: DEFAULT_RUNTIME_PORT,
+  stateDir: defaultRuntimeStateDir(),
   gcIntervalMs: 3_600_000,
   autoStart: false,
   apiVisibility: 'owner',
@@ -87,8 +90,10 @@ function readFileConfig(path = configPath()): Partial<OursConfig> {
   }
   const out: Partial<OursConfig> = {};
   if (typeof parsed.brokerUrl === 'string') out.brokerUrl = parsed.brokerUrl;
-  if (typeof parsed.port === 'number' && Number.isFinite(parsed.port)) out.port = parsed.port;
-  if (typeof parsed.stateDir === 'string') out.stateDir = resolve(parsed.stateDir);
+  const port = finiteConfigNumber(parsed.port);
+  if (port !== undefined) out.port = port;
+  const stateDir = stringConfigValue(parsed.stateDir);
+  if (stateDir !== undefined) out.stateDir = resolve(stateDir);
   if (typeof parsed.gcIntervalMs === 'number' && Number.isFinite(parsed.gcIntervalMs)) {
     out.gcIntervalMs = parsed.gcIntervalMs;
   }

@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, normalize, resolve } from 'node:path';
 import type { OursConfig } from './config';
+import { resolveRuntimeEndpointFileValues } from './runtime-config-values';
 
 export const INSTALLER_PROFILES_VERSION = 1;
 export const ASSOCIATED_APPLICATIONS = ['claude-code', 'codex', 'hermes'] as const;
@@ -200,13 +201,11 @@ export function resolveRuntimeAssociation(
   }
   const profile = safeProfile(profileMap[profileId], profileId);
   const config = readJson(profile.configPath, `associated daemon config for ${profileId}`);
-  const configuredPort = config.port === undefined ? 3050 : Number(config.port);
-  const configuredState = canonical(
-    typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'),
-  );
-  if (configuredPort !== profile.port) {
+  const configured = resolveRuntimeEndpointFileValues(config, home);
+  const configuredState = canonical(configured.stateDir);
+  if (configured.port !== profile.port) {
     throw new AssociationError(
-      `profile ${profileId} expects port ${profile.port} but ${profile.configPath} resolves port ${configuredPort}`,
+      `profile ${profileId} expects port ${profile.port} but ${profile.configPath} resolves port ${configured.port}`,
       'CONFIG_DRIFT',
     );
   }

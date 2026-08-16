@@ -58,6 +58,57 @@ assert.throws(() => resolveRuntimeAssociation('codex', env, home), (e) => e.code
 writeFileSync(registryPath, JSON.stringify(registry));
 console.log('  ✓ corrupt registry and config port/state drift fail closed');
 
+const defaultsHome = mkdtempSync(join(tmpdir(), 'ours-association-defaults-'));
+const defaultsState = join(defaultsHome, '.ours');
+const defaultsConfig = join(defaultsState, 'config.json');
+const defaultsRegistryPath = join(defaultsHome, 'profiles.json');
+mkdirSync(defaultsState, { recursive: true });
+const defaultsRegistry = {
+  version: 1,
+  profiles: {
+    default: {
+      label: 'Default', host: '127.0.0.1', port: 3050, configPath: defaultsConfig,
+      stateDir: defaultsState, serviceName: '',
+      ownership: { config: false, service: false, state: false },
+    },
+  },
+  harnessAssociations: { codex: 'default' },
+};
+writeFileSync(defaultsRegistryPath, JSON.stringify(defaultsRegistry));
+const defaultsEnv = { HOME: defaultsHome, OURS_INSTALL_PROFILES: defaultsRegistryPath };
+for (const [label, configText] of [
+  ['numeric string', JSON.stringify({ port: '4999', stateDir: { path: '/wrong' } })],
+  ['NaN string', JSON.stringify({ port: 'NaN', stateDir: 42 })],
+  ['infinite string', JSON.stringify({ port: 'Infinity', stateDir: false })],
+  ['overflowing JSON number', '{"port":1e999,"stateDir":null}'],
+  ['null', JSON.stringify({ port: null, stateDir: null })],
+  ['object', JSON.stringify({ port: { value: 4999 }, stateDir: { path: '/wrong' } })],
+  ['array', JSON.stringify({ port: [4999], stateDir: ['/wrong'] })],
+  ['boolean', JSON.stringify({ port: true, stateDir: true })],
+  ['empty string port', JSON.stringify({ port: '', stateDir: 0 })],
+  ['omitted', '{}'],
+]) {
+  writeFileSync(defaultsConfig, configText);
+  const resolved = resolveRuntimeAssociation('codex', defaultsEnv, defaultsHome);
+  assert.equal(resolved.profile.port, 3050, `${label}: wrong-typed port uses the runtime default`);
+  assert.equal(resolved.profile.stateDir, defaultsState, `${label}: wrong-typed stateDir uses the runtime default`);
+}
+console.log('  ✓ association ignores the same wrong-typed endpoint fields as runtime config loading');
+
+for (const [label, config] of [
+  ['finite numeric port drift', { port: 4999, stateDir: defaultsState }],
+  ['string state drift', { port: 3050, stateDir: join(defaultsHome, 'wrong-state') }],
+  ['empty string state drift', { port: 3050, stateDir: '' }],
+]) {
+  writeFileSync(defaultsConfig, JSON.stringify(config));
+  assert.throws(
+    () => resolveRuntimeAssociation('codex', defaultsEnv, defaultsHome),
+    (error) => error instanceof AssociationError && error.code === 'CONFIG_DRIFT' && /profile default expects/.test(error.message),
+    `${label} remains a structured fail-closed error`,
+  );
+}
+console.log('  ✓ association preserves structured errors for real finite-number/string drift');
+
 const collision = structuredClone(registry);
 collision.profiles.green = {
   ...collision.profiles.blue,

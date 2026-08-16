@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { runNightlyInstaller } from '../lib/nightly-install.mjs';
 import { profilesPath, readRegistry, writeRegistry } from '../lib/profiles.mjs';
 import { COWORK_EXTERNAL_MIN_VERSION } from '../lib/logic.mjs';
@@ -63,6 +63,10 @@ function namedPlist({ id, configPath, port, stateDir }) {
 </dict>
 </plist>
 `;
+}
+
+function systemdService(env) {
+  return `[Service]\n${Object.entries(env).map(([key, value]) => `Environment=${key}=${value}`).join('\n')}\n`;
 }
 
 test('assume-yes default-creates historical topology, associates detected harnesses, and updates global mcp once', async () => withHome(async (home) => {
@@ -225,6 +229,117 @@ test('default and legacy discovery mirror runtime types and historical defaults'
     });
   }
 });
+
+test('service discovery shares runtime file types, defaults, and environment precedence', async () => {
+  const cases = [
+    { label: 'string port and object state', config: (home) => ({ port: '4060', stateDir: { path: join(home, 'wrong') } }), port: 3050, state: (home) => join(home, '.ours') },
+    { label: 'null values', config: () => ({ port: null, stateDir: null }), port: 3050, state: (home) => join(home, '.ours') },
+    { label: 'array values', config: () => ({ port: [3060], stateDir: ['wrong'] }), port: 3050, state: (home) => join(home, '.ours') },
+    { label: 'boolean values', config: () => ({ port: true, stateDir: false }), port: 3050, state: (home) => join(home, '.ours') },
+    { label: 'empty string port and valid empty string state', config: () => ({ port: '', stateDir: '' }), port: 3050, state: () => resolve('') },
+    { label: 'overflowing numeric port', raw: () => '{"port":1e999,"stateDir":42}\n', port: 3050, state: (home) => join(home, '.ours') },
+    { label: 'omitted values', config: () => ({}), port: 3050, state: (home) => join(home, '.ours') },
+    { label: 'valid file values', config: (home) => ({ port: 3060, stateDir: join(home, 'configured-state') }), port: 3060, state: (home) => join(home, 'configured-state') },
+    { label: 'valid service values override file', config: (home) => ({ port: 3060, stateDir: join(home, 'configured-state') }), env: (home) => ({ OURS_PORT: '3077tail', OURS_STATE_DIR: join(home, 'service-state') }), port: 3077, state: (home) => join(home, 'service-state') },
+    { label: 'NaN service port falls back to file', config: (home) => ({ port: 3061, stateDir: join(home, 'configured-state') }), env: () => ({ OURS_PORT: 'NaN' }), port: 3061, state: (home) => join(home, 'configured-state') },
+    { label: 'infinite service port falls back to file', config: (home) => ({ port: 3062, stateDir: join(home, 'configured-state') }), env: () => ({ OURS_PORT: 'Infinity' }), port: 3062, state: (home) => join(home, 'configured-state') },
+    { label: 'empty service port falls back to file', config: (home) => ({ port: 3063, stateDir: join(home, 'configured-state') }), env: () => ({ OURS_PORT: '' }), port: 3063, state: (home) => join(home, 'configured-state') },
+    { label: 'empty service state remains an explicit string', config: (home) => ({ port: 3064, stateDir: join(home, 'configured-state') }), env: () => ({ OURS_STATE_DIR: '' }), port: 3064, state: () => resolve('') },
+  ];
+  for (const entry of cases) {
+    await withHome(async (home) => {
+      const configPath = join(home, 'service-config.json');
+      const serviceDir = join(home, '.config', 'systemd', 'user');
+      mkdirSync(serviceDir, { recursive: true });
+      writeFileSync(configPath, entry.raw ? entry.raw(home) : JSON.stringify(entry.config(home)) + '\n');
+      writeFileSync(join(serviceDir, 'ours.service'), systemdService({
+        OURS_CONFIG: configPath,
+        ...(entry.env ? entry.env(home) : {}),
+      }));
+      const probed = [];
+      const { deps, calls } = makeDeps({
+        probe: async (candidate) => {
+          probed.push(candidate);
+          return { ...candidate, reachable: true, compatible: false, error: 'stop after discovery' };
+        },
+      });
+      await runNightlyInstaller(deps);
+      const candidate = probed.find((value) => value.id === 'default');
+      assert.ok(candidate, `${entry.label}: service remains discoverable`);
+      assert.equal(candidate.port, entry.port, `${entry.label}: port matches core runtime resolution`);
+      assert.equal(candidate.stateDir, entry.state(home), `${entry.label}: stateDir matches core runtime resolution`);
+      assert.equal(calls.length, 0, `${entry.label}: discovery performs no mutation`);
+    });
+  }
+});
+
+test('OURS_CONFIG-only services remove false collisions and retain exact named-profile behavior', async () => {
+  await withHome(async (home) => {
+    const stateDir = join(home, '.ours');
+    const configPath = join(stateDir, 'config.json');
+    const serviceDir = join(home, '.config', 'systemd', 'user');
+    mkdirSync(stateDir, { recursive: true });
+    mkdirSync(serviceDir, { recursive: true });
+    writeFileSync(configPath, JSON.stringify({ port: '4060', stateDir }) + '\n');
+    writeFileSync(join(serviceDir, 'ours.service'), systemdService({ OURS_CONFIG: configPath }));
+    const probed = [];
+    const { deps, calls } = makeDeps({
+      probe: async (candidate) => {
+        probed.push(candidate);
+        return { ...candidate, reachable: true, compatible: false, error: 'stop after discovery' };
+      },
+    });
+    await runNightlyInstaller(deps);
+    assert.equal(probed.length, 1, 'default config and service resolve to one exact endpoint instead of a false collision');
+    assert.equal(probed[0].port, 3050);
+    assert.equal(probed[0].stateDir, stateDir);
+    assert.deepEqual(probed[0].origins, ['default-config', 'known-service']);
+    assert.equal(calls.length, 0, 'false-collision discovery performs no mutation');
+  });
+
+  await withHome(async (home) => {
+    const configPath = join(home, 'named-config.json');
+    const serviceDir = join(home, '.config', 'systemd', 'user');
+    mkdirSync(serviceDir, { recursive: true });
+    writeFileSync(configPath, JSON.stringify({ port: '4060', stateDir: { path: join(home, '.ours-blue') } }) + '\n');
+    writeFileSync(join(serviceDir, 'ours-blue.service'), systemdService({ OURS_CONFIG: configPath }));
+    const probed = [];
+    const { deps, calls } = makeDeps({
+      probe: async (candidate) => {
+        probed.push(candidate);
+        return { ...candidate, reachable: true, compatible: false, error: 'stop after discovery' };
+      },
+    });
+    await runNightlyInstaller(deps);
+    assert.equal(probed.length, 1);
+    assert.equal(probed[0].id, 'blue');
+    assert.equal(probed[0].serviceName, 'blue');
+    assert.equal(probed[0].configPath, configPath);
+    assert.equal(probed[0].port, 3050, 'named services use the historical runtime default, not an invented named default');
+    assert.equal(probed[0].stateDir, join(home, '.ours'), 'named services use the historical runtime state default');
+    assert.equal(calls.length, 0, 'named-profile discovery performs no mutation');
+  });
+});
+
+test('real service discovery collisions still reject before probes or mutations', async () => withHome(async (home) => {
+  const serviceDir = join(home, '.config', 'systemd', 'user');
+  const sharedState = join(home, 'shared-state');
+  const defaultConfig = join(home, 'default-config.json');
+  const blueConfig = join(home, 'blue-config.json');
+  mkdirSync(serviceDir, { recursive: true });
+  writeFileSync(defaultConfig, JSON.stringify({ port: 3050, stateDir: sharedState }) + '\n');
+  writeFileSync(blueConfig, JSON.stringify({ port: 3060, stateDir: sharedState }) + '\n');
+  writeFileSync(join(serviceDir, 'ours.service'), systemdService({ OURS_CONFIG: defaultConfig }));
+  writeFileSync(join(serviceDir, 'ours-blue.service'), systemdService({ OURS_CONFIG: blueConfig }));
+  let probes = 0;
+  const { deps, calls } = makeDeps({
+    probe: async (candidate) => { probes += 1; return candidate; },
+  });
+  await runNightlyInstaller(deps);
+  assert.equal(probes, 0, 'collision rejects the entire candidate set before endpoint probing');
+  assert.equal(calls.length, 0, 'no package, service, harness, identity, or registry mutation starts');
+  assert.equal(existsSync(profilesPath(process.env, home)), false, 'rejection does not create the profile registry');
+}));
 
 test('a discovered registry profile with runtime-ignored config values rejects drift before mutation', async () => withHome(async (home) => {
   const stateDir = join(home, '.ours-tg');
