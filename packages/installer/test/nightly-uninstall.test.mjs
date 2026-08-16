@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planNightlyUninstall, runNightlyUninstaller } from '../lib/nightly-uninstall.mjs';
@@ -33,6 +33,32 @@ test('daemon removal and metadata forgetting refuse while any harness, Telegram,
   assert.throws(() => planNightlyUninstall(withoutHarness, { profileId: 'default', removeDaemon: true }, {
     roomsConfig: { daemon: { endpoint: 'http://localhost:3050', stateDir: '/home/u/.ours' } },
   }), /still required by: rooms/);
+});
+
+test('daemon removal refuses a connector dependency reached through a state-directory symlink', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ours-nightly-uninstall-symlink-'));
+  const stateDir = join(home, 'state');
+  const alias = join(home, 'state-alias');
+  mkdirSync(stateDir);
+  symlinkSync(stateDir, alias, 'dir');
+  const selected = {
+    ...profile('default'), stateDir, configPath: join(stateDir, 'config.json'),
+  };
+  assert.throws(() => planNightlyUninstall(
+    registry({ default: selected }),
+    { profileId: 'default', removeDaemon: true },
+    { telegramConfig: { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: alias } },
+  ), /still required by: telegram/);
+  const explicit = planNightlyUninstall(
+    registry({ default: selected }),
+    {
+      profileId: 'default', removeDaemon: true,
+      connectorActions: { telegram: { action: 'detach' } },
+    },
+    { telegramConfig: { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: alias } },
+  );
+  assert.equal(explicit.actions[0].type, 'connector-lifecycle',
+    'an explicit connector action is still the safe release path');
 });
 
 test('targeted connector lifecycle actions release only the selected profile dependency', () => {

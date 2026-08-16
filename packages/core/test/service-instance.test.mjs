@@ -22,6 +22,22 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, '..', 'dist', 'cli.js');
 
+function parsePlistString(plist, key) {
+  const startMarker = `<key>${key}</key><string>`;
+  const start = plist.indexOf(startMarker);
+  assert.notEqual(start, -1, `plist contains ${key}`);
+  const valueStart = start + startMarker.length;
+  const valueEnd = plist.indexOf('</string>', valueStart);
+  assert.notEqual(valueEnd, -1, `plist closes ${key}'s string value`);
+  return plist.slice(valueStart, valueEnd).replace(/&(?:amp|lt|gt|quot|apos);|[&<]/g, (entity) => {
+    const decoded = {
+      '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'",
+    }[entity];
+    assert.notEqual(decoded, undefined, `plist contains only well-formed XML text in ${key}`);
+    return decoded;
+  });
+}
+
 console.log('service-instance\n');
 
 // ---- backward compatibility: no name ⇒ exactly the historical definition ----
@@ -95,6 +111,10 @@ assert.match(shared, /^\[Install\]\nWantedBy=default\.target$/m);
 const plistShared = buildLaunchdPlist({
   port: 3050, brokerUrl: 'wss://b', stateDir: '/s', execPath: '/n', self: '/c', logPath: '/l',
 });
+const plistSharedWithUnusedConfig = buildLaunchdPlist({
+  configPath: '/ignored/profile&auth/config.json',
+  port: 3050, brokerUrl: 'wss://b', stateDir: '/s', execPath: '/n', self: '/c', logPath: '/l',
+});
 const plistDedicated = buildLaunchdPlist({
   instance: 'rooms', configPath: '/cfg/rooms.json', port: 3062,
   brokerUrl: 'wss://b', stateDir: '/s2', execPath: '/n', self: '/c', logPath: '/l',
@@ -102,10 +122,21 @@ const plistDedicated = buildLaunchdPlist({
 assert.match(plistShared, /<key>Label<\/key><string>solutions\.adaptframework\.ours<\/string>/);
 assert.doesNotMatch(plistShared, /OURS_SERVICE_NAME/);
 assert.doesNotMatch(plistShared, /OURS_CONFIG/);
+assert.equal(plistSharedWithUnusedConfig, plistShared,
+  'an unnamed launchd definition stays byte-identical and never persists OURS_CONFIG');
 assert.match(plistDedicated, /<key>Label<\/key><string>solutions\.adaptframework\.ours\.rooms<\/string>/);
 assert.match(plistDedicated, /<key>OURS_SERVICE_NAME<\/key><string>rooms<\/string>/);
 assert.match(plistDedicated, /<key>OURS_CONFIG<\/key><string>\/cfg\/rooms\.json<\/string>/);
 console.log('  ✓ named unit/plist bake the exact config, instance, port, and state dir');
+
+const specialConfigPath = `/tmp/profile&auth<nightly>"quote"'apostrophe/config.json`;
+const plistSpecial = buildLaunchdPlist({
+  instance: 'special', configPath: specialConfigPath, port: 3063,
+  brokerUrl: 'wss://b', stateDir: '/safe-state', execPath: '/n', self: '/c', logPath: '/l',
+});
+assert.equal(parsePlistString(plistSpecial, 'OURS_CONFIG'), specialConfigPath,
+  'plist parsing recovers the exact special-character config path');
+console.log('  ✓ named launchd config paths are valid XML and round-trip exactly');
 
 // ---- determinism / idempotency: same input ⇒ byte-identical definition ------
 assert.equal(

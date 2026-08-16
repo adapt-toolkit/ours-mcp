@@ -117,36 +117,46 @@ WantedBy=default.target
 }
 
 // The launchd agent plist text. Same reasoning as buildSystemdUnit.
+function xmlText(value: string | number): string {
+  return String(value).replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&apos;',
+  })[character]!);
+}
+
 export function buildLaunchdPlist(input: ServiceDefinitionInput): string {
   const instance = normalizeInstanceName(input.instance).name;
   const instanceEnv = instance
-    ? `    <key>OURS_SERVICE_NAME</key><string>${instance}</string>\n`
+    ? `    <key>OURS_SERVICE_NAME</key><string>${xmlText(instance)}</string>\n`
     : '';
   const configEnv = instance && input.configPath
-    ? `    <key>OURS_CONFIG</key><string>${input.configPath}</string>\n`
+    ? `    <key>OURS_CONFIG</key><string>${xmlText(input.configPath)}</string>\n`
     : '';
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${launchdLabel(instance)}</string>
+  <key>Label</key><string>${xmlText(launchdLabel(instance))}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${input.execPath}</string>
-    <string>${input.self}</string>
+    <string>${xmlText(input.execPath)}</string>
+    <string>${xmlText(input.self)}</string>
     <string>serve</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>OURS_TRANSPORT</key><string>http</string>
     <key>OURS_PORT</key><string>${input.port}</string>
-    <key>OURS_BROKER_URL</key><string>${input.brokerUrl}</string>
-    <key>OURS_STATE_DIR</key><string>${input.stateDir}</string>
+    <key>OURS_BROKER_URL</key><string>${xmlText(input.brokerUrl)}</string>
+    <key>OURS_STATE_DIR</key><string>${xmlText(input.stateDir)}</string>
 ${configEnv}${instanceEnv}  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${input.logPath ?? ''}</string>
-  <key>StandardErrorPath</key><string>${input.logPath ?? ''}</string>
+  <key>StandardOutPath</key><string>${xmlText(input.logPath ?? '')}</string>
+  <key>StandardErrorPath</key><string>${xmlText(input.logPath ?? '')}</string>
 </dict>
 </plist>
 `;

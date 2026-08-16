@@ -35,7 +35,11 @@ const canonicalPath = (path) => {
 // profile that merely reaches the requested daemon is still unusable when its client
 // config resolves another port or state directory, so reject it before any mutation.
 function assertClientConfigMatchesProfile(profile, config, home) {
-  const configuredPort = config.port === undefined ? DEFAULT_PORT : Number(config.port);
+  // Mirror core/src/config.ts readFileConfig exactly for the two association fields:
+  // values with the wrong JSON type are ignored, then loadConfig applies defaults.
+  const configuredPort = typeof config.port === 'number' && Number.isFinite(config.port)
+    ? config.port
+    : DEFAULT_PORT;
   const configuredState = canonicalPath(
     typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'),
   );

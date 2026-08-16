@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -123,6 +123,61 @@ test('reverse application index combines runtime harness associations with real 
   });
   assert.deepEqual(index.default, ['claude-code', 'telegram']);
   assert.deepEqual(index.rooms, ['codex', 'rooms']);
+});
+
+test('reverse application index canonicalizes connector state paths and fails closed on errors', () => {
+  const home = root();
+  const stateDir = join(home, 'state');
+  const alias = join(home, 'state-alias');
+  mkdirSync(stateDir);
+  symlinkSync(stateDir, alias, 'dir');
+  const registry = registryWith(home);
+  registry.profiles.default.stateDir = stateDir;
+  registry.profiles.default.configPath = join(stateDir, 'config.json');
+
+  assert.deepEqual(reverseApplicationIndex(registry, {
+    telegramConfig: { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: alias },
+  }).default, ['telegram'], 'a real symlink alias remains an in-use dependency');
+
+  assert.deepEqual(reverseApplicationIndex(registry, {
+    roomsConfig: { daemon: { endpoint: 'http://127.0.0.1:3050', stateDir: join(home, 'missing', '..', 'state') } },
+  }).default, ['rooms'], 'equivalent lexical paths match without requiring the path to exist');
+
+  assert.deepEqual(reverseApplicationIndex(registry, {
+    telegramConfig: { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: join(home, 'other-missing') },
+  }).default, [], 'distinct missing paths remain distinct');
+
+  const missingState = join(home, 'missing-state');
+  const missingRegistry = registryWith(home);
+  missingRegistry.profiles.default.stateDir = missingState;
+  missingRegistry.profiles.default.configPath = join(missingState, 'config.json');
+  assert.deepEqual(reverseApplicationIndex(missingRegistry, {
+    telegramConfig: { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: missingState },
+  }).default, ['telegram'], 'the same nonexistent path remains a dependency');
+
+  const parent = join(home, 'parent');
+  const parentAlias = join(home, 'parent-alias');
+  mkdirSync(parent);
+  symlinkSync(parent, parentAlias, 'dir');
+  missingRegistry.profiles.default.stateDir = join(parent, 'not-created');
+  missingRegistry.profiles.default.configPath = join(parent, 'not-created', 'config.json');
+  assert.deepEqual(reverseApplicationIndex(missingRegistry, {
+    roomsConfig: { daemon: { endpoint: 'http://127.0.0.1:3050', stateDir: join(parentAlias, 'not-created') } },
+  }).default, ['rooms'], 'a missing leaf below a symlinked ancestor canonicalizes deterministically');
+
+  const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+  const unreadableConfig = {
+    telegramConfig: { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: join(home, 'uninspectable') },
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.deepEqual(reverseApplicationIndex(registry, unreadableConfig, {
+      realpath: () => { throw denied; },
+    }).default, ['telegram'], 'an uninspectable endpoint match is retained consistently');
+  }
+  assert.deepEqual(reverseApplicationIndex(registry, {
+    telegramConfig: { ...unreadableConfig.telegramConfig, daemonUrl: 'http://127.0.0.1:3060' },
+  }, { realpath: () => { throw denied; } }).default, [],
+  'a canonicalization error does not invent a dependency on a different endpoint');
 });
 
 test('candidate dedupe requires both endpoint and canonical stateDir and rejects ambiguous collisions', () => {

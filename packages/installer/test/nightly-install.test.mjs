@@ -140,6 +140,43 @@ test('manual existing selection refuses a client config that resolves a differen
   assert.equal(calls.length, 0, 'no package, harness, service, or identity mutation starts after config drift');
 }));
 
+test('manual existing selection applies runtime config types and defaults before any mutation', async () => withHome(async (home) => {
+  const selectedState = join(home, '.ours-selected');
+  const configPath = join(home, 'client', 'config.json');
+  mkdirSync(join(home, 'client'), { recursive: true });
+  const answers = new Map([
+    ['Choose profile', 'm'],
+    ['Profile id', 'selected'],
+    ['Profile label', 'Selected existing daemon'],
+    ['Host', '127.0.0.1'],
+    ['Port', '3060'],
+    ['Exact state directory', selectedState],
+    ['Existing/client config path', configPath],
+    ['Service instance name', 'selected'],
+  ]);
+  for (const [label, config] of [
+    ['string port', { port: '3060', stateDir: selectedState }],
+    ['null port', { port: null, stateDir: selectedState }],
+    ['non-string state directory', { port: 3060, stateDir: { path: selectedState } }],
+  ]) {
+    writeFileSync(configPath, JSON.stringify(config) + '\n', { mode: 0o600 });
+    const { deps, calls } = makeDeps({
+      ask: (prompt, def) => [...answers].find(([key]) => prompt.includes(key))?.[1] ?? def,
+      probe: async (candidate) => ({ ...candidate, reachable: true, compatible: true }),
+      fetch: async (url) => String(url).endsWith('/info')
+        ? Response.json({ name: 'ours', stateDir: selectedState })
+        : String(url).endsWith('/version')
+          ? Response.json({ version: '0.16.0-nightly' })
+          : Response.json({ identities: [] }),
+    });
+    await runNightlyInstaller(deps);
+    assert.equal(existsSync(profilesPath(process.env, home)), false,
+      `${label}: an ignored value must not associate a runtime-drifted profile`);
+    assert.equal(calls.length, 0,
+      `${label}: no package, marketplace/plugin, service, identity, or registry mutation starts`);
+  }
+}));
+
 test('new-profile service failure transactionally records retained config/service/state ownership without associations', async () => withHome(async (home) => {
   process.env.OURS_ASSUME_YES = '1';
   const stateDir = join(home, '.ours');

@@ -3,7 +3,7 @@ import {
   unlinkSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 
 export const PROFILE_REGISTRY_VERSION = 1;
 export const HARNESS_APPLICATIONS = ['claude-code', 'codex', 'hermes'];
@@ -236,6 +236,37 @@ export function canonicalStateDir(path, realpath = realpathSync) {
   try { return realpath(normalized); } catch { return normalized; }
 }
 
+function canonicalStateForDependency(path, realpath) {
+  const normalized = resolve(path);
+  const suffix = [];
+  let existingAncestor = normalized;
+  while (true) {
+    try {
+      const canonicalAncestor = realpath(existingAncestor);
+      return { known: true, path: resolve(canonicalAncestor, ...suffix.reverse()) };
+    } catch (error) {
+      // A nonexistent leaf is deterministic: canonicalize its nearest existing
+      // ancestor so symlinked parents and lexical missing paths still compare.
+      // Permission/I/O failures are ambiguous and must remain fail-closed.
+      if (error?.code !== 'ENOENT') return { known: false };
+      const parent = dirname(existingAncestor);
+      if (parent === existingAncestor) return { known: false };
+      suffix.push(basename(existingAncestor));
+      existingAncestor = parent;
+    }
+  }
+}
+
+export function compareDependencyStateDirs(left, right, { realpath = realpathSync } = {}) {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  if (normalizedLeft === normalizedRight) return 'equal';
+  const canonicalLeft = canonicalStateForDependency(normalizedLeft, realpath);
+  const canonicalRight = canonicalStateForDependency(normalizedRight, realpath);
+  if (!canonicalLeft.known || !canonicalRight.known) return 'unknown';
+  return canonicalLeft.path === canonicalRight.path ? 'equal' : 'different';
+}
+
 export function profileConflicts(profiles, id, candidate, { realpath = realpathSync } = {}) {
   const normalized = normalizeProfile(id, candidate);
   const endpoint = endpointKey(normalized);
@@ -329,7 +360,7 @@ function externalDaemon(value) {
   return { host, port, stateDir: resolve(stateDir) };
 }
 
-export function reverseApplicationIndex(registry, { telegramConfig, roomsConfig } = {}) {
+export function reverseApplicationIndex(registry, { telegramConfig, roomsConfig } = {}, options = {}) {
   const current = validateRegistry(registry);
   const index = Object.fromEntries(Object.keys(current.profiles).map((id) => [id, []]));
   for (const [application, profileId] of Object.entries(current.harnessAssociations)) index[profileId].push(application);
@@ -340,7 +371,11 @@ export function reverseApplicationIndex(registry, { telegramConfig, roomsConfig 
   for (const [application, target] of connectorTargets) {
     if (!target) continue;
     for (const [id, profile] of Object.entries(current.profiles)) {
-      if (endpointKey(profile) === `${target.host}:${target.port}` && resolve(profile.stateDir) === target.stateDir) {
+      if (endpointKey(profile) !== `${target.host}:${target.port}`) continue;
+      const stateComparison = compareDependencyStateDirs(profile.stateDir, target.stateDir, options);
+      // Unknown canonicalization is a dependency for deletion safety. Operators
+      // can still proceed through an explicit connector lifecycle action.
+      if (stateComparison !== 'different') {
         index[id].push(application);
       }
     }
