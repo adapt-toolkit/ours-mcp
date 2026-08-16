@@ -554,29 +554,53 @@ test('planCoworkConfig: the daemon selection is three-valued (leave / embedded /
   assert.equal(JSON.parse(extra.text).operatorNote, 'keep me');
 });
 
-test('coworkSupportsExternalDaemon: only a build that HAS the mode may be handed a daemon block', () => {
-  // The prerelease line carries it, so the nightly channel is always allowed.
-  assert.equal(coworkSupportsExternalDaemon('nightly'), true);
-  assert.equal(coworkSupportsExternalDaemon('prerelease'), true, 'channel synonyms resolve first');
-  // Stable does not, until a stable cowork ships it. Writing a block a strict-config,
-  // fail-closed-boot build cannot honour would BREAK Rooms, not degrade it.
-  assert.equal(coworkSupportsExternalDaemon('latest'), false);
-  assert.equal(coworkSupportsExternalDaemon(), false, 'the default channel is stable');
-  // An installed version never upgrades the answer while no floor is set.
-  assert.equal(COWORK_EXTERNAL_MIN_VERSION, '', 'no stable cowork carries it yet');
-  assert.equal(coworkSupportsExternalDaemon('latest', '99.0.0'), false, 'no floor ⇒ no stable support, whatever is installed');
-  assert.equal(coworkSupportsExternalDaemon('latest', ''), false, 'an unknown installed version never claims support');
+test('coworkSupportsExternalDaemon: the BUILD decides, not the channel', () => {
+  // The floor is the first published cowork that implements the mode, verified against
+  // the registry AND its tarball contents (see the constant's comment in logic.mjs).
+  assert.equal(COWORK_EXTERNAL_MIN_VERSION, '0.4.1-nightly.20260816.4aaf940');
+
+  // Exactly the supporting build, and anything after it.
+  assert.equal(coworkSupportsExternalDaemon(COWORK_EXTERNAL_MIN_VERSION), true);
+  assert.equal(coworkSupportsExternalDaemon('0.4.1-nightly.20260817.abc1234'), true, 'a later nightly');
+  assert.equal(coworkSupportsExternalDaemon('0.4.1'), true, 'the eventual 0.4.1 release outranks its nightlies');
+  assert.equal(coworkSupportsExternalDaemon('0.5.0'), true);
+
+  // The build the stable channel installs today predates it.
+  assert.equal(coworkSupportsExternalDaemon('0.4.0'), false, 'cowork@latest has no external mode');
+  // And so does an EARLIER nightly of the same core version — the case a channel-only
+  // gate got wrong, and the reason the floor is a full version rather than an x.y.z.
+  assert.equal(coworkSupportsExternalDaemon('0.4.1-nightly.20260815.80ea770'), false, 'an earlier same-day-core nightly');
+  assert.equal(coworkSupportsExternalDaemon('0.3.7-nightly.20260815.80ea770'), false);
+
+  // Unknown never claims support: an unreadable version keeps Rooms embedded.
+  assert.equal(coworkSupportsExternalDaemon(''), false);
+  assert.equal(coworkSupportsExternalDaemon(undefined), false);
+  assert.equal(coworkSupportsExternalDaemon('not-a-version'), false);
+  // Nor does an empty floor, whatever is installed.
+  assert.equal(coworkSupportsExternalDaemon('99.0.0', ''), false);
 });
 
-test('compareVersions: numeric x.y.z, and unparseable input never claims to be newer', () => {
+test('compareVersions: semver precedence, and unparseable input never claims to be newer', () => {
   assert.equal(compareVersions('1.2.3', '1.2.3'), 0);
   assert.equal(compareVersions('1.2.4', '1.2.3'), 1);
   assert.equal(compareVersions('1.3.0', '1.2.9'), 1);
   assert.equal(compareVersions('2.0.0', '1.9.9'), 1);
   assert.equal(compareVersions('1.2.2', '1.2.3'), -1);
   assert.equal(compareVersions('0.4.0', '0.5.0'), -1);
-  // A prerelease suffix is ignored — the floor is only consulted for stable releases.
-  assert.equal(compareVersions('1.2.3-nightly.4', '1.2.3'), 0);
+
+  // A release outranks a prerelease of the same core version.
+  assert.equal(compareVersions('1.2.3', '1.2.3-nightly.1'), 1);
+  assert.equal(compareVersions('1.2.3-nightly.1', '1.2.3'), -1);
+
+  // Two prereleases compare identifier by identifier, numerics numerically — which is
+  // what orders cowork's nightly.<date>.<sha> line correctly.
+  assert.equal(compareVersions('0.4.1-nightly.20260816.4aaf940', '0.4.1-nightly.20260815.80ea770'), 1);
+  assert.equal(compareVersions('0.4.1-nightly.20260815.80ea770', '0.4.1-nightly.20260816.4aaf940'), -1);
+  assert.equal(compareVersions('0.4.1-nightly.20260816.4aaf940', '0.4.1-nightly.20260816.4aaf940'), 0);
+  assert.equal(compareVersions('1.0.0-alpha.2', '1.0.0-alpha.10'), -1, 'numeric, not lexicographic');
+  assert.equal(compareVersions('1.0.0-alpha.beta', '1.0.0-alpha.2'), 1, 'alphanumeric outranks numeric');
+  assert.equal(compareVersions('1.0.0-alpha.1.1', '1.0.0-alpha.1'), 1, 'a longer identifier set is higher');
+
   // Garbage is never "newer": that would silently enable an unsupported path.
   for (const bad of ['', 'x', '1.2', undefined, null, 'v1.2.3']) {
     assert.equal(compareVersions(bad, '1.0.0'), -1, `${JSON.stringify(bad)} is not newer`);

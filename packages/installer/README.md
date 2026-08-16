@@ -120,9 +120,14 @@ token and its SDK reads `<stateDir>/daemon-token`. Env equivalents are `OURS_COW
 Two things follow from cowork's boot being **fail-closed** (an unreachable endpoint, a non-ours
 daemon, or a mismatched state directory aborts startup, with no embedded fallback):
 
-- A build that **predates** the external mode is never handed a block. On the stable channel the
-  installer keeps Rooms embedded and says why; `OURS_CHANNEL=nightly` gets the line that has it.
-  When a stable cowork ships it, set `COWORK_EXTERNAL_MIN_VERSION` in `lib/logic.mjs`.
+- A build that **predates** the external mode is never handed a block. The check is on the
+  **installed version**, not the channel: `COWORK_EXTERNAL_MIN_VERSION` in `lib/logic.mjs` is
+  pinned to `0.4.1-nightly.20260816.4aaf940`, the first published cowork that implements it
+  (verified against the registry *and* the tarball's contents). A channel-only gate would have
+  accepted an earlier nightly of the same core version. `cowork@latest` (0.4.0) predates the
+  mode, so the stable installer keeps Rooms embedded, names the build it found and the version it
+  needed, and points at `OURS_CHANNEL=nightly`. An unreadable version keeps Rooms embedded too —
+  it never guesses.
 - An install **already running embedded** is never migrated behind the user's back — headless
   runs leave it exactly as it is, and interactive runs ask first.
 

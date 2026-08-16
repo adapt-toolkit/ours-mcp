@@ -37,7 +37,7 @@ import {
   DEFAULT_PORT, resolveChannel, pkgSpec,
   validateDaemonPort, planPorts, dedicatedDaemonPaths, DEDICATED_INSTANCES,
   coworkConfigPath, planCoworkConfig, COWORK_DEFAULT_PORT, coworkDaemonMode,
-  coworkSupportsExternalDaemon,
+  coworkSupportsExternalDaemon, COWORK_EXTERNAL_MIN_VERSION,
 } from './lib/logic.mjs';
 import { atomicWriteConfig } from './lib/config.mjs';
 
@@ -109,9 +109,13 @@ function daemonLifecycleState() {
   return /^\s*pid:\s*\d+/m.test(status.out) ? 'managed' : 'external';
 }
 const daemonRunning = () => daemonLifecycleState() !== 'stopped';
+// The installed version of a global package, INCLUDING any prerelease suffix. The
+// suffix is not cosmetic here: the Rooms daemon guard compares against an exact
+// `0.4.1-nightly.<date>.<sha>` floor, and truncating at the dash would make every
+// 0.4.1 nightly look alike — including ones published before the mode existed.
 const globalVersion = (pkg) => {
   const ls = run(NPM, ['ls', '-g', pkg], { capture: true }).out;
-  const m = ls.match(new RegExp(pkg.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') + '@([0-9][0-9.]*)'));
+  const m = ls.match(new RegExp(pkg.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') + '@(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)'));
   return m ? m[1] : '';
 };
 
@@ -924,15 +928,18 @@ async function main() {
     // existing embedded install nobody asked to migrate.
     const wasEmbedded = coworkDaemonMode(existingRooms) === 'embedded';
     const hadConfig = existsSync(cfgPath);
-    const externalSupported = coworkSupportsExternalDaemon(CHANNEL, globalVersion('@ours.network/cowork'));
+    // Ask the BUILD, not the channel: this runs after the install above, so the version
+    // read here is the one actually on the machine.
+    const coworkVersion = globalVersion('@ours.network/cowork');
+    const externalSupported = coworkSupportsExternalDaemon(coworkVersion);
     let roomsDaemon;
     let roomsDaemonLabel;
     if (!externalSupported) {
       // The build we just installed predates cowork's external-daemon mode. Its config
       // is a strict document and its boot fails closed, so writing a selection it cannot
       // honour would break Rooms rather than degrade it.
-      line(info('This Rooms build hosts its own daemon; pointing it at the shared one needs a newer'));
-      line(info(`Rooms release. Re-run with ${c.cyan('OURS_CHANNEL=nightly')} for the prerelease line that has it.`));
+      line(info(`This Rooms build${coworkVersion ? ` (${coworkVersion})` : ''} hosts its own daemon; pointing it at the shared`));
+      line(info(`one needs ${COWORK_EXTERNAL_MIN_VERSION} or newer. Re-run with ${c.cyan('OURS_CHANNEL=nightly')} to get it.`));
       roomsDaemonLabel = 'embedded';
     } else if (hadConfig && wasEmbedded && !interactive) {
       // Fail-closed boot makes this migration a real risk; never do it unasked.
@@ -987,7 +994,7 @@ async function main() {
       key: 'rooms',
       label: 'Rooms (ours-cowork)',
       state: svc.ok ? 'installed' : 'failed',
-      version: globalVersion('@ours.network/cowork'),
+      version: coworkVersion,
       note: svc.ok ? `console ${roomsPort} · ${roomsDaemonLabel}` : 'ours-cowork install-service failed',
     });
   } else {

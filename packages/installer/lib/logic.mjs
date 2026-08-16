@@ -315,33 +315,66 @@ export const COWORK_DAEMON_MODES = ['embedded', 'external'];
 // harmless no-op — and cowork's boot is fail-closed, so the failure surfaces as a
 // Rooms daemon that will not start rather than a warning.
 //
-// The external mode ships on cowork's prerelease line. `latest` (0.4.0 at time of
-// writing) predates it, so the stable installer must keep Rooms EMBEDDED and say
-// so, rather than write a selection the build cannot honour. When a stable cowork
-// carrying PR #9 is published, set COWORK_EXTERNAL_MIN_VERSION to its version and
-// this widens on its own.
-export const COWORK_EXTERNAL_MIN_VERSION = '';   // '' = no stable release supports it yet
+// The FIRST published cowork that implements the external-daemon mode. Verified
+// against the registry rather than taken on trust:
+//   @ours.network/cowork@nightly = 0.4.1-nightly.20260816.4aaf940
+//   gitHead 4aaf9406016098704d06b52352f7a38adc2ef160
+//   dist.shasum 5a6422409b1203a9bcc6aca33965fe47e9a5c17c
+//   depends on @ours.network/sdk 1.3.1; `latest` still 0.4.0
+// and the packed tarball really carries it — dist/daemon.js and dist/cli.js
+// contain the mode enum ["embedded","external"], the endpoint+stateDir pairing
+// check, OURS_COWORK_DAEMON_MODE/_ENDPOINT/_STATE_DIR, and the daemon-token read.
+export const COWORK_EXTERNAL_MIN_VERSION = '0.4.1-nightly.20260816.4aaf940';
 
-// Does the cowork build this run is installing support an external daemon?
-// `channel` is the resolved installer channel; `installedVersion` is what
-// `npm ls -g` reports when it is already on the machine (best effort — an empty
-// string just means "unknown", which never upgrades the answer).
-export function coworkSupportsExternalDaemon(channel = DEFAULT_CHANNEL, installedVersion = '') {
-  if (pkgTag('cowork', channel) !== 'latest') return true; // the prerelease line carries it
-  if (!COWORK_EXTERNAL_MIN_VERSION) return false;          // no stable release has it yet
-  return compareVersions(String(installedVersion || ''), COWORK_EXTERNAL_MIN_VERSION) >= 0;
+// Does the cowork build actually on this machine support an external daemon?
+//
+// This is deliberately a VERSION check and not a channel check. A channel gate
+// would answer "yes" for any nightly install, including one made before this
+// version was published — and a `daemon` block handed to a build without the mode
+// meets a strict config and a fail-closed boot, i.e. Rooms that will not start.
+// The version is read after the install, so it describes what is really there.
+// An unreadable version yields -1 below and therefore "no", which keeps Rooms
+// embedded rather than guessing.
+export function coworkSupportsExternalDaemon(installedVersion = '', minVersion = COWORK_EXTERNAL_MIN_VERSION) {
+  if (!minVersion) return false;   // no published build supports it yet
+  return compareVersions(String(installedVersion || ''), minVersion) >= 0;
 }
 
-// Numeric-only x.y.z comparison, enough for a published-release floor. A
-// prerelease suffix is ignored: the floor is only ever consulted for stable.
-// Returns -1 / 0 / 1, and -1 for anything unparseable (never claims support).
+// Semver precedence, enough for a published-release floor: x.y.z numerically,
+// then prerelease rules — a release outranks a prerelease of the same core
+// version, and two prereleases compare identifier by identifier (numeric parts
+// numerically, so nightly.20260815 < nightly.20260816). Returns -1 / 0 / 1, and
+// -1 for anything unparseable, so garbage NEVER claims to be new enough.
 export function compareVersions(a, b) {
-  const parse = (v) => (String(v).match(/^(\d+)\.(\d+)\.(\d+)/) || []).slice(1, 4).map(Number);
-  const x = parse(a);
-  const y = parse(b);
-  if (x.length !== 3 || y.length !== 3) return -1;
+  const split = (v) => {
+    const m = String(v ?? '').match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
+    return m ? { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? null } : null;
+  };
+  const x = split(a);
+  const y = split(b);
+  if (!x || !y) return -1;
   for (let i = 0; i < 3; i++) {
-    if (x[i] !== y[i]) return x[i] > y[i] ? 1 : -1;
+    if (x.core[i] !== y.core[i]) return x.core[i] > y.core[i] ? 1 : -1;
+  }
+  if (x.pre === null && y.pre === null) return 0;
+  if (x.pre === null) return 1;   // 1.0.0 outranks 1.0.0-nightly.1
+  if (y.pre === null) return -1;
+  const xs = x.pre.split('.');
+  const ys = y.pre.split('.');
+  for (let i = 0; i < Math.max(xs.length, ys.length); i++) {
+    const xi = xs[i];
+    const yi = ys[i];
+    if (xi === undefined) return -1;         // a shorter identifier set is lower
+    if (yi === undefined) return 1;
+    const xn = /^\d+$/.test(xi);
+    const yn = /^\d+$/.test(yi);
+    if (xn && yn) {
+      if (Number(xi) !== Number(yi)) return Number(xi) > Number(yi) ? 1 : -1;
+    } else if (xn !== yn) {
+      return xn ? -1 : 1;                    // numeric identifiers rank below alphanumeric
+    } else if (xi !== yi) {
+      return xi > yi ? 1 : -1;
+    }
   }
   return 0;
 }

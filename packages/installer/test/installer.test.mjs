@@ -10,7 +10,9 @@ import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveChannel, coworkDaemonMode as coworkDaemonModeOf } from '../lib/logic.mjs';
+import {
+  resolveChannel, coworkDaemonMode as coworkDaemonModeOf, COWORK_EXTERNAL_MIN_VERSION,
+} from '../lib/logic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG = dirname(HERE);
@@ -85,7 +87,7 @@ function fakeBins(dir, opts = {}) {
 
   write('npm',
     `case "$*" in *"@ours.network/mcp"*) touch "$CALLLOG.mcpinstalled" "$CALLLOG.mcpupdated";; esac\n` +
-    `case "$1" in ls) echo "@ours.network/fleet@0.7.0"; echo "@ours.network/tg-connector@0.1.7"; echo "@ours.network/cowork@0.4.0";; esac\n` +
+    `case "$1" in ls) echo "@ours.network/fleet@0.7.0"; echo "@ours.network/tg-connector@0.1.7"; echo "@ours.network/cowork@\${COWORK_INSTALLED:-0.4.0}";; esac\n` +
     `exit 0\n`);
 
   if (!opts.noHarness) {
@@ -933,7 +935,10 @@ test('stable channel: Rooms installs cowork@latest and stays EMBEDDED — no blo
   const cfg = readJson(join(root.tmp, '.ours-cowork', 'config.json'));
   assert.equal(cfg.rest.port, 3066, 'its own surface is still configured');
   assert.equal(cfg.daemon, undefined, 'and NO daemon block is written');
-  assert.match(out, /needs a newer/, 'the reason is stated plainly');
+  // The refusal names the build it found and the exact floor it needed — not a vague "newer".
+  assert.match(out, /This Rooms build \(0\.4\.0\) hosts its own daemon/, 'it says which build it found');
+  assert.match(out, new RegExp(`needs ${COWORK_EXTERNAL_MIN_VERSION.replace(/\./g, '\\.')} or newer`),
+    'and the exact version it needed');
   assert.match(out, /OURS_CHANNEL=nightly/, 'with the exact way to get it');
   rmSync(root.tmp, { recursive: true, force: true });
 });
@@ -944,7 +949,7 @@ test('nightly channel: Rooms installs cowork@nightly and is wired to the shared 
   const root = isolatedRoot(
     { daemon: 'absent' },
     { ANSWER_ROOMS: '1', ANSWER_TELEGRAM: '', ANSWER_PORT_ROOMS: '3062', ANSWER_BROKER: 'wss://broker.example.test',
-      OURS_CHANNEL: 'nightly' },
+      OURS_CHANNEL: 'nightly', COWORK_INSTALLED: COWORK_EXTERNAL_MIN_VERSION },
   );
   const { out, calls } = root.run();
   assert.match(out, /---EXIT 0/);
@@ -987,7 +992,8 @@ test('nightly channel: Rooms installs cowork@nightly and is wired to the shared 
 
 test('Rooms re-run is idempotent and preserves keys the installer does not own',
   { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const root = isolatedRoot({ daemon: 'absent' }, { ANSWER_ROOMS: '1', ANSWER_TELEGRAM: '', ANSWER_PORT_ROOMS: '3063', OURS_CHANNEL: 'nightly' });
+  const root = isolatedRoot({ daemon: 'absent' }, { ANSWER_ROOMS: '1', ANSWER_TELEGRAM: '', ANSWER_PORT_ROOMS: '3063', OURS_CHANNEL: 'nightly',
+    COWORK_INSTALLED: COWORK_EXTERNAL_MIN_VERSION });
   root.run();
   const cfgPath = join(root.tmp, '.ours-cowork', 'config.json');
   const first = readJson(cfgPath);
@@ -1006,7 +1012,7 @@ test('dedicated Rooms daemon: its own port, state dir and boot unit, in cowork\'
   const root = isolatedRoot(
     { daemon: 'absent' },
     { ANSWER_ROOMS: '1', ANSWER_ROOMS_DEDICATED: '1', ANSWER_TELEGRAM: '', ANSWER_PORT_ROOMS: '3064',
-      ANSWER_PORT_ROOMS_DAEMON: '3085', OURS_CHANNEL: 'nightly' },
+      ANSWER_PORT_ROOMS_DAEMON: '3085', OURS_CHANNEL: 'nightly', COWORK_INSTALLED: COWORK_EXTERNAL_MIN_VERSION },
   );
   const { out, calls } = root.run();
   assert.match(out, /---EXIT 0/);
