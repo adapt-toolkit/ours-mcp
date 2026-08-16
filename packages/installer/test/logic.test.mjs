@@ -129,10 +129,11 @@ test('pkgTag: the nightly channel takes each package\'s OWN prerelease tag', () 
   // stack needs the fleet build with the SDK integration, and a stable fleet against a
   // nightly daemon is the split-brain deployment the channel exists to prevent.
   assert.equal(pkgTag('fleet', 'nightly'), 'nightly', 'fleet follows the channel');
-  // cowork's prerelease tag is `next`, not `nightly` — which is exactly why this is a map.
-  // The nightly channel must follow it: the external-daemon mode the Rooms step configures
-  // ships on that line, so taking `latest` would pair a daemon block with a build predating it.
-  assert.equal(pkgTag('cowork', 'nightly'), 'next', "cowork's prerelease line is called next");
+  // cowork publishes `nightly` too, aligned with every other service (owner, 2026-08-16 —
+  // it previously used `next`). The nightly channel must reach that line: the external-daemon
+  // mode the Rooms step configures ships there, so taking `latest` would pair a daemon block
+  // with a build predating it.
+  assert.equal(pkgTag('cowork', 'nightly'), 'nightly', 'cowork aligns with the other services');
   // Latest channel → everything latest.
   assert.equal(pkgTag('mcp', 'latest'), 'latest');
   assert.equal(pkgTag('fleet', 'latest'), 'latest');
@@ -142,7 +143,7 @@ test('pkgTag: the nightly channel takes each package\'s OWN prerelease tag', () 
   // Accepts the fully-qualified name too.
   assert.equal(pkgTag('@ours.network/mcp', 'nightly'), 'nightly');
   assert.equal(pkgTag('@ours.network/fleet', 'nightly'), 'nightly');
-  assert.equal(pkgTag('@ours.network/cowork', 'nightly'), 'next');
+  assert.equal(pkgTag('@ours.network/cowork', 'nightly'), 'nightly');
 });
 
 test('pkgSpec: builds the full npm spec honoring each package\'s channel mapping', () => {
@@ -150,7 +151,7 @@ test('pkgSpec: builds the full npm spec honoring each package\'s channel mapping
   assert.equal(pkgSpec('tg-connector', 'nightly'), '@ours.network/tg-connector@nightly');
   assert.equal(pkgSpec('codex', 'nightly'), '@ours.network/codex@nightly');
   assert.equal(pkgSpec('fleet', 'nightly'), '@ours.network/fleet@nightly', 'the fix: nightly fleet on the nightly channel');
-  assert.equal(pkgSpec('cowork', 'nightly'), '@ours.network/cowork@next');
+  assert.equal(pkgSpec('cowork', 'nightly'), '@ours.network/cowork@nightly');
   assert.equal(pkgSpec('cowork', 'latest'), '@ours.network/cowork@latest');
   assert.equal(pkgSpec('mcp', 'latest'), '@ours.network/mcp@latest');
   assert.equal(pkgSpec('fleet', 'latest'), '@ours.network/fleet@latest', 'stable installs stable fleet');

@@ -37,7 +37,9 @@ export function canonHarnesses(raw) {
 //     from this repo by .github/workflows/scripts/bump-versions.sh)
 //   · fleet                                          → `nightly` (its own repo,
 //     adapt-toolkit/ours-fleet, publishes a nightly dist-tag of its own)
-//   · cowork (rooms)                                 → `next`, its own prerelease tag
+//   · cowork (rooms)                                 → `nightly` (owner decision
+//     2026-08-16: cowork aligns with every other service rather than keeping its
+//     historical `next` tag)
 //
 // WHY FLEET FOLLOWS THE CHANNEL NOW. It used to be pinned to @latest with the note
 // "ours-fleet publishes no nightly tag". It does publish one, and the nightly stack
@@ -46,21 +48,26 @@ export function canonHarnesses(raw) {
 // that silently installs stable fleet is exactly the split-brain deployment the
 // channel exists to prevent.
 //
-// WHY COWORK'S TAG IS `next`, NOT `nightly`. Its repo has always called its
-// prerelease tag `next`, which is why this is a map and not one string. The
-// nightly channel MUST follow it: the external-daemon mode the Rooms step
-// configures ships in cowork's prerelease line (PR #9), so a nightly installer
-// that took `latest` would pair a config carrying a `daemon` block with a cowork
-// build that predates it. That is the same architecture-boundary mismatch this
-// whole mechanism exists to prevent, pointed at Rooms instead of Telegram.
+// WHY COWORK STILL NEEDS ITS OWN ENTRY. It historically published its prerelease
+// line as `next`; the owner's decision on 2026-08-16 is that it aligns with every
+// other service and publishes `nightly` instead. The entry stays because the map,
+// not a hardcoded string, is what makes such a change one line — and because an
+// UNMAPPED package deliberately falls back to `latest` rather than a guessed tag.
 //
-// SEQUENCING — this is load-bearing. On 2026-08-16 `next` was
-// 0.3.7-nightly.20260815.80ea770, OLDER than `latest` 0.4.0 and without the
-// external-daemon mode. Following it before cowork's post-PR#9 prerelease is
-// published would install a cowork that does not understand what the installer
-// writes. The nightly installer must therefore not be published until cowork's
-// `next` actually carries PR #9 — verify the resolved version, don't assume the
-// tag. See coworkSupportsExternalDaemon for the guard that keeps a pre-#9 build
+// The nightly channel MUST reach cowork's prerelease line: the external-daemon
+// mode the Rooms step configures ships there (cowork PR #9), so a nightly
+// installer taking `latest` would pair a config carrying a `daemon` block with a
+// build that predates it — the same architecture-boundary mismatch this whole
+// mechanism exists to prevent, pointed at Rooms instead of Telegram.
+//
+// SEQUENCING — load-bearing, and not yet satisfied. As of 2026-08-16 cowork
+// publishes NO `nightly` dist-tag at all (its tags are latest=0.4.0 and
+// next=0.3.7-nightly.20260815.80ea770). `npm i -g @ours.network/cowork@nightly`
+// therefore 404s today, and a 404 fails the WHOLE install. So the nightly
+// installer must not be published until cowork's release flow has actually
+// published a `nightly` artifact carrying PR #9. Verify the tag exists AND that
+// the tarball contains the implementation — never trust the tag alone. See
+// coworkSupportsExternalDaemon for the guard that keeps a build without the mode
 // from ever being handed a daemon block.
 export const DEFAULT_CHANNEL = 'latest';
 
@@ -74,7 +81,7 @@ const PKG_CHANNEL_TAGS = {
   codex: { nightly: 'nightly' },
   hermes: { nightly: 'nightly' },
   fleet: { nightly: 'nightly' },
-  cowork: { nightly: 'next' }, // its repo's own name for the prerelease line
+  cowork: { nightly: 'nightly' }, // aligned with every other service (owner, 2026-08-16)
 };
 
 // Normalize a raw channel selection to 'latest' | 'nightly'. Anything unrecognized
@@ -308,7 +315,7 @@ export const COWORK_DAEMON_MODES = ['embedded', 'external'];
 // harmless no-op — and cowork's boot is fail-closed, so the failure surfaces as a
 // Rooms daemon that will not start rather than a warning.
 //
-// The external mode ships on cowork's `next` line. `latest` (0.4.0 at time of
+// The external mode ships on cowork's prerelease line. `latest` (0.4.0 at time of
 // writing) predates it, so the stable installer must keep Rooms EMBEDDED and say
 // so, rather than write a selection the build cannot honour. When a stable cowork
 // carrying PR #9 is published, set COWORK_EXTERNAL_MIN_VERSION to its version and
@@ -320,7 +327,7 @@ export const COWORK_EXTERNAL_MIN_VERSION = '';   // '' = no stable release suppo
 // `npm ls -g` reports when it is already on the machine (best effort — an empty
 // string just means "unknown", which never upgrades the answer).
 export function coworkSupportsExternalDaemon(channel = DEFAULT_CHANNEL, installedVersion = '') {
-  if (pkgTag('cowork', channel) === 'next') return true;   // the prerelease line carries it
+  if (pkgTag('cowork', channel) !== 'latest') return true; // the prerelease line carries it
   if (!COWORK_EXTERNAL_MIN_VERSION) return false;          // no stable release has it yet
   return compareVersions(String(installedVersion || ''), COWORK_EXTERNAL_MIN_VERSION) >= 0;
 }

@@ -938,7 +938,7 @@ test('stable channel: Rooms installs cowork@latest and stays EMBEDDED — no blo
   rmSync(root.tmp, { recursive: true, force: true });
 });
 
-test('nightly channel: Rooms installs cowork@next and is wired to the shared daemon in its external shape',
+test('nightly channel: Rooms installs cowork@nightly and is wired to the shared daemon in its external shape',
   { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
   // Port answers in order: shared daemon (Enter), Rooms console (explicit).
   const root = isolatedRoot(
@@ -949,9 +949,10 @@ test('nightly channel: Rooms installs cowork@next and is wired to the shared dae
   const { out, calls } = root.run();
   assert.match(out, /---EXIT 0/);
 
-  // cowork's prerelease line is called `next`, and the external-daemon mode ships on it.
-  assert.match(calls, /npm i -g @ours\.network\/cowork@next/, 'rooms follows cowork\'s own prerelease tag');
-  assert.doesNotMatch(calls, /@ours\.network\/cowork@(latest|nightly)/, 'never `nightly` — that tag does not exist for cowork');
+  // cowork publishes `nightly` alongside every other service, and the external-daemon mode
+  // ships on that line.
+  assert.match(calls, /npm i -g @ours\.network\/cowork@nightly/, 'rooms follows the nightly channel');
+  assert.doesNotMatch(calls, /@ours\.network\/cowork@(latest|next)/, 'no stable, and no historical `next` tag');
   // And the rest of the nightly stack is coherent with it.
   assert.match(calls, /npm i -g @ours\.network\/fleet@nightly/, 'fleet follows the channel');
   assert.match(calls, /npm i -g @ours\.network\/mcp@nightly/);

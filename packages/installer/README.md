@@ -163,19 +163,20 @@ dist-tag. The tag is not the same string everywhere, so the mapping is per packa
 |---|---|---|
 | `mcp`, `tg-connector`, `claude-code`, `codex`, `hermes` | `latest` | `nightly` |
 | `fleet` | `latest` | `nightly` |
-| `cowork` (Rooms) | `latest` | `next` |
+| `cowork` (Rooms) | `latest` | `nightly` |
 
 `fleet` follows the channel: it publishes its own `nightly` dist-tag, and the nightly stack needs
 the fleet build carrying the SDK integration. A nightly installer that quietly installed stable
 fleet is the same split-brain deployment the channel exists to prevent.
 
-`cowork`'s prerelease line is called **`next`**, not `nightly` — which is exactly why this is a
-map rather than one string. The nightly channel must follow it, because the external-daemon mode
-the Rooms step configures ships on that line; taking `latest` there would pair a config carrying
-a `daemon` block with a build that predates it.
+`cowork` publishes `nightly` alongside every other service (it previously used `next`). The
+nightly channel must reach that line, because the external-daemon mode the Rooms step configures
+ships there; taking `latest` would pair a config carrying a `daemon` block with a build that
+predates it.
 
 A package with no mapping for the selected channel installs `@latest` rather than a guessed tag,
-because a 404 fails the *whole* install.
+because a 404 fails the *whole* install — which is also why the nightly installer must not be
+published before every package it names actually has the tag it will ask for.
 
 **With no explicit selection the installer follows its own version.** A published nightly build
 carries the `-nightly.N` suffix the release bump stamps, so `npm i -g @ours.network/install@nightly`
