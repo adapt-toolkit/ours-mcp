@@ -296,10 +296,14 @@ an explicit typed `yes`.
 
 On Nightly, uninstall is profile-aware. Removing a harness removes only its one association and
 managed plugin artifacts. A daemon/profile cannot be forgotten or removed while any harness,
-Telegram, or Rooms still depends on it. Only a profile with `ownership.service: true` may have its
-exact named service uninstalled; external profiles are forgotten as metadata only. Data removal is
-a separate confirmation that requires typing the exact state path and explicitly warns about
-identity/key loss. The global MCP package is retained while any profile/application still needs it.
+Telegram, or Rooms still depends on it. A dependent connector can be explicitly detached (stop its
+service and remove only its daemon target), uninstalled, or reassigned to a different retained
+profile; connector secrets and unrelated settings are preserved. These connector changes roll back
+if exact daemon removal or the registry commit fails. Only a profile with `ownership.service: true`
+may have its exact named service uninstalled; external profiles are forgotten as metadata only.
+Data removal is a separate confirmation that requires typing the exact state path and explicitly
+warns about identity/key loss. The global MCP package is retained while any profile/application
+still needs it.
 
 Headless (no terminal), drive it with environment variables:
 
@@ -317,6 +321,8 @@ OURS_UNINSTALL_DAEMON=yes \
 | `OURS_UNINSTALL_DAEMON` | `yes` — remove the `ours-mcp` daemon |
 | `OURS_UNINSTALL_PROFILE` | Nightly profile id to forget/remove |
 | `OURS_UNINSTALL_FORGET_PROFILE` | Nightly `yes` — forget external/profile metadata only |
+| `OURS_UNINSTALL_TELEGRAM` | Nightly dependency action: `detach`, `uninstall`, or `reassign:<profile-id>` |
+| `OURS_UNINSTALL_ROOMS` | Nightly dependency action: `detach`, `uninstall`, or `reassign:<profile-id>` |
 
 ## Notes
 

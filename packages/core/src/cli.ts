@@ -1160,6 +1160,7 @@ function installSystemd(): void {
   fs.mkdirSync(dirname(unitPath), { recursive: true });
   const unit = buildSystemdUnit({
     instance: SERVICE_INSTANCE,
+    configPath: SERVICE_INSTANCE ? configPath() : undefined,
     port: PORT,
     brokerUrl: BROKER_URL,
     stateDir: STATE_DIR,
@@ -1219,6 +1220,7 @@ function installLaunchd(): void {
   fs.mkdirSync(dirname(plistPath), { recursive: true });
   const plist = buildLaunchdPlist({
     instance: SERVICE_INSTANCE,
+    configPath: SERVICE_INSTANCE ? configPath() : undefined,
     port: PORT,
     brokerUrl: BROKER_URL,
     stateDir: STATE_DIR,

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runNightlyInstaller } from '../lib/nightly-install.mjs';
 import { profilesPath, readRegistry, writeRegistry } from '../lib/profiles.mjs';
+import { COWORK_EXTERNAL_MIN_VERSION } from '../lib/logic.mjs';
 
 const makeDeps = ({ run, runAsync, ask, yes, fetch, probe } = {}) => {
   const calls = [];
@@ -107,7 +108,39 @@ test('idempotent rerun keeps the association and does not update/restart the exi
   assert.equal(readRegistry(registryPath).harnessAssociations.codex, 'default');
 }));
 
-test('new-profile service failure keeps recoverable daemon config/state but never commits app/registry bytes', async () => withHome(async (home) => {
+test('manual existing selection refuses a client config that resolves a different daemon profile', async () => withHome(async (home) => {
+  const selectedState = join(home, '.ours-selected');
+  const configPath = join(home, 'client', 'config.json');
+  mkdirSync(join(home, 'client'), { recursive: true });
+  writeFileSync(configPath, JSON.stringify({
+    port: 3099,
+    stateDir: join(home, '.ours-other'),
+  }) + '\n', { mode: 0o600 });
+  const answers = new Map([
+    ['Choose profile', 'm'],
+    ['Profile id', 'selected'],
+    ['Profile label', 'Selected existing daemon'],
+    ['Host', '127.0.0.1'],
+    ['Port', '3060'],
+    ['Exact state directory', selectedState],
+    ['Existing/client config path', configPath],
+    ['Service instance name', 'selected'],
+  ]);
+  const { deps, calls } = makeDeps({
+    ask: (prompt, def) => [...answers].find(([key]) => prompt.includes(key))?.[1] ?? def,
+    probe: async (candidate) => ({ ...candidate, reachable: true, compatible: true }),
+    fetch: async (url) => String(url).endsWith('/info')
+      ? Response.json({ name: 'ours', stateDir: selectedState })
+      : String(url).endsWith('/version')
+        ? Response.json({ version: '0.16.0-nightly' })
+        : Response.json({ identities: [] }),
+  });
+  await runNightlyInstaller(deps);
+  assert.equal(existsSync(profilesPath(process.env, home)), false, 'a drifted client config is never associated');
+  assert.equal(calls.length, 0, 'no package, harness, service, or identity mutation starts after config drift');
+}));
+
+test('new-profile service failure transactionally records retained config/service/state ownership without associations', async () => withHome(async (home) => {
   process.env.OURS_ASSUME_YES = '1';
   const stateDir = join(home, '.ours');
   const configPath = join(stateDir, 'config.json');
@@ -116,15 +149,22 @@ test('new-profile service failure keeps recoverable daemon config/state but neve
     fetch: async () => { throw new Error('not listening yet'); },
     run: (bin, args) => {
       if (bin === 'ours-mcp' && args[0] === 'start') { starts += 1; return { ok: true, code: 0 }; }
-      if (bin === 'ours-mcp' && args[0] === 'install-service') return { ok: false, code: 1 };
+      if (bin === 'ours-mcp' && args[0] === 'install-service') {
+        const unitDir = join(home, '.config', 'systemd', 'user');
+        mkdirSync(unitDir, { recursive: true });
+        writeFileSync(join(unitDir, 'ours.service'), '[Service]\n');
+        return { ok: false, code: 1 };
+      }
       return { ok: true, code: 0, out: '', err: '' };
     },
   });
   await runNightlyInstaller(deps);
   assert.equal(starts, 2, 'one start plus service-failure recovery');
   assert.equal(existsSync(configPath), true, 'new daemon config is retained for recovered partial state');
-  assert.equal(existsSync(profilesPath(process.env, home)), false, 'registry never committed');
   assert.equal(existsSync(stateDir), true, 'new state directory is retained after partial failure');
+  const recovered = readRegistry(profilesPath(process.env, home));
+  assert.deepEqual(recovered.harnessAssociations, {}, 'no application association commits on partial failure');
+  assert.deepEqual(recovered.profiles.default.ownership, { config: true, service: true, state: true });
 }));
 
 test('Telegram config is written before service snapshot/apply and rolls back on apply failure', async () => withHome(async (home) => {
@@ -172,4 +212,89 @@ test('Telegram config is written before service snapshot/apply and rolls back on
   await runNightlyInstaller(deps);
   assert.equal(readFileSync(tgPath, 'utf8'), original, 'connector config restored byte-for-byte');
   assert.deepEqual(readRegistry(registryPath).harnessAssociations, {}, 'registry remains unchanged');
+}));
+
+test('topology-first Rooms attaches to the exact preselected named profile without provisioning another daemon', async () => withHome(async (home) => {
+  const stateDir = join(home, '.ours-rooms-daemon');
+  const configPath = join(stateDir, 'config.json');
+  writeRegistry(profilesPath(process.env, home), {
+    version: 1,
+    profiles: { work: {
+      label: 'Work daemon', host: '127.0.0.1', port: 3085, configPath, stateDir, serviceName: 'work',
+      ownership: { config: true, service: true, state: true },
+    } },
+    harnessAssociations: {},
+  });
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(configPath, JSON.stringify({ port: 3085, stateDir, serviceName: 'work' }) + '\n');
+  const yes = (prompt, def) => {
+    if (prompt.includes('Use profile')) return false;
+    if (prompt.includes('ours-fleet')) return false;
+    if (prompt.includes('Point Telegram')) return false;
+    if (prompt.includes('Point Rooms')) return true;
+    return def;
+  };
+  const { deps, calls } = makeDeps({
+    ask: (prompt, def) => prompt.includes('Choose profile') ? '1' : def,
+    yes,
+    probe: async (candidate) => ({ ...candidate, reachable: true, compatible: true }),
+    fetch: async (url) => String(url).endsWith('/info')
+      ? Response.json({ name: 'ours', stateDir })
+      : String(url).endsWith('/version')
+        ? Response.json({ version: '0.16.0-nightly' })
+        : Response.json({ identities: [] }),
+    run: (bin, args) => {
+      if (bin === 'npm' && args.includes('@ours.network/cowork')) {
+        return { ok: true, code: 0, out: JSON.stringify({ dependencies: { '@ours.network/cowork': { version: COWORK_EXTERNAL_MIN_VERSION } } }), err: '' };
+      }
+      return { ok: true, code: 0, out: '', err: '' };
+    },
+  });
+  await runNightlyInstaller(deps);
+  const roomsPath = join(home, '.ours-cowork', 'config.json');
+  const rooms = JSON.parse(readFileSync(roomsPath, 'utf8'));
+  assert.deepEqual(rooms.daemon, {
+    mode: 'external', endpoint: 'http://127.0.0.1:3085', stateDir,
+  });
+  assert.ok(calls.some((call) => call.bin === 'ours-cowork' && call.args[0] === 'install-service'));
+  assert.equal(calls.some((call) => call.bin === 'ours-mcp' && ['start', 'install-service'].includes(call.args[0])), false,
+    'an existing selected profile is not replaced by a consumer-specific daemon');
+}));
+
+test('topology-first Rooms rerun preserves operator keys and the exact selected daemon block', async () => withHome(async (home) => {
+  const stateDir = join(home, '.ours');
+  const configPath = join(stateDir, 'config.json');
+  writeRegistry(profilesPath(process.env, home), {
+    version: 1,
+    profiles: { default: {
+      label: 'Default', host: '127.0.0.1', port: 3050, configPath, stateDir, serviceName: '',
+      ownership: { config: true, service: true, state: true },
+    } },
+    harnessAssociations: {},
+  });
+  writeFileSync(configPath, JSON.stringify({ port: 3050, stateDir }) + '\n');
+  const roomsPath = join(home, '.ours-cowork', 'config.json');
+  mkdirSync(join(home, '.ours-cowork'), { recursive: true });
+  const initialRooms = {
+    version: 1, brokerUrl: 'wss://broker1.ours.network', stateDir: join(home, '.ours-cowork'),
+    rest: { enabled: true, port: 3052 }, operatorNote: 'keep me',
+    daemon: { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir },
+  };
+  writeFileSync(roomsPath, JSON.stringify(initialRooms, null, 2) + '\n', { mode: 0o600 });
+  const { deps } = makeDeps({
+    ask: (prompt, def) => prompt.includes('Choose profile') ? '1' : def,
+    yes: (prompt, def) => prompt.includes('Point Rooms') ? true
+      : prompt.includes('Use profile') || prompt.includes('ours-fleet') || prompt.includes('Point Telegram') ? false : def,
+    probe: async (candidate) => ({ ...candidate, reachable: true, compatible: true }),
+    fetch: async (url) => String(url).endsWith('/info')
+      ? Response.json({ name: 'ours', stateDir })
+      : String(url).endsWith('/version')
+        ? Response.json({ version: '0.16.0-nightly' })
+        : Response.json({ identities: [] }),
+    run: (bin, args) => bin === 'npm' && args.includes('@ours.network/cowork')
+      ? { ok: true, code: 0, out: JSON.stringify({ dependencies: { '@ours.network/cowork': { version: COWORK_EXTERNAL_MIN_VERSION } } }), err: '' }
+      : { ok: true, code: 0, out: '', err: '' },
+  });
+  await runNightlyInstaller(deps);
+  assert.deepEqual(JSON.parse(readFileSync(roomsPath, 'utf8')), initialRooms);
 }));

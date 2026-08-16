@@ -77,6 +77,8 @@ export function serviceDescription(instance = ''): string {
 
 export interface ServiceDefinitionInput {
   instance?: string;
+  /** Exact config selected for a named instance. Unnamed services keep the historical implicit default. */
+  configPath?: string;
   port: number;
   brokerUrl: string;
   stateDir: string;
@@ -93,6 +95,7 @@ export interface ServiceDefinitionInput {
 export function buildSystemdUnit(input: ServiceDefinitionInput): string {
   const instance = normalizeInstanceName(input.instance).name;
   const instanceEnv = instance ? `Environment=OURS_SERVICE_NAME=${instance}\n` : '';
+  const configEnv = instance && input.configPath ? `Environment=OURS_CONFIG=${input.configPath}\n` : '';
   return `[Unit]
 Description=${serviceDescription(instance)}
 After=network-online.target
@@ -105,7 +108,7 @@ Environment=OURS_TRANSPORT=http
 Environment=OURS_PORT=${input.port}
 Environment=OURS_BROKER_URL=${input.brokerUrl}
 Environment=OURS_STATE_DIR=${input.stateDir}
-${instanceEnv}Restart=on-failure
+${configEnv}${instanceEnv}Restart=on-failure
 RestartSec=2
 
 [Install]
@@ -118,6 +121,9 @@ export function buildLaunchdPlist(input: ServiceDefinitionInput): string {
   const instance = normalizeInstanceName(input.instance).name;
   const instanceEnv = instance
     ? `    <key>OURS_SERVICE_NAME</key><string>${instance}</string>\n`
+    : '';
+  const configEnv = instance && input.configPath
+    ? `    <key>OURS_CONFIG</key><string>${input.configPath}</string>\n`
     : '';
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -136,7 +142,7 @@ export function buildLaunchdPlist(input: ServiceDefinitionInput): string {
     <key>OURS_PORT</key><string>${input.port}</string>
     <key>OURS_BROKER_URL</key><string>${input.brokerUrl}</string>
     <key>OURS_STATE_DIR</key><string>${input.stateDir}</string>
-${instanceEnv}  </dict>
+${configEnv}${instanceEnv}  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${input.logPath ?? ''}</string>

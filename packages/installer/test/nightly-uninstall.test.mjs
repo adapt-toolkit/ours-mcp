@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planNightlyUninstall, runNightlyUninstaller } from '../lib/nightly-uninstall.mjs';
@@ -33,6 +33,32 @@ test('daemon removal and metadata forgetting refuse while any harness, Telegram,
   assert.throws(() => planNightlyUninstall(withoutHarness, { profileId: 'default', removeDaemon: true }, {
     roomsConfig: { daemon: { endpoint: 'http://localhost:3050', stateDir: '/home/u/.ours' } },
   }), /still required by: rooms/);
+});
+
+test('targeted connector lifecycle actions release only the selected profile dependency', () => {
+  const input = registry({ default: profile('default'), blue: profile('blue') });
+  const configs = {
+    telegramConfig: { botToken: 'preserve', daemonUrl: 'http://127.0.0.1:3060', daemonStateDir: '/home/u/.ours-blue' },
+    roomsConfig: { privateSetting: true, daemon: { endpoint: 'http://127.0.0.1:3060', stateDir: '/home/u/.ours-blue' } },
+  };
+  const plan = planNightlyUninstall(input, {
+    profileId: 'blue', removeDaemon: true,
+    connectorActions: {
+      telegram: { action: 'reassign', profileId: 'default' },
+      rooms: { action: 'detach' },
+    },
+  }, configs);
+  assert.deepEqual(plan.dependencies, []);
+  assert.deepEqual(plan.actions.map((action) => [action.type, action.connector, action.mode, action.toProfileId]), [
+    ['connector-lifecycle', 'telegram', 'reassign', 'default'],
+    ['connector-lifecycle', 'rooms', 'detach', undefined],
+    ['uninstall-service', undefined, undefined, undefined],
+  ]);
+  assert.equal(plan.actions[0].profile.port, 3050, 'reassignment names an exact retained profile');
+  assert.throws(() => planNightlyUninstall(input, {
+    profileId: 'blue', removeDaemon: true,
+    connectorActions: { telegram: { action: 'reassign', profileId: 'blue' }, rooms: { action: 'detach' } },
+  }, configs), /retained profile/);
 });
 
 test('owned daemon removal uninstalls only its exact service; data deletion is a separate action', () => {
@@ -102,6 +128,90 @@ test('runner uninstalls only the selected exact service and commits before globa
     OURS_CONFIG: blue.configPath, OURS_PORT: '3060', OURS_STATE_DIR: blue.stateDir, OURS_SERVICE_NAME: 'blue',
   });
   assert.deepEqual(calls.at(-1).args, ['rm', '-g', '@ours.network/mcp']);
+});
+
+test('runner reassigns Telegram and uninstalls Rooms transactionally while preserving private config keys', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ours-nightly-uninstall-connectors-'));
+  const registryPath = join(home, '.ours', 'installer-profiles.json');
+  const tgPath = join(home, 'telegram.json');
+  const roomsPath = join(home, 'rooms.json');
+  writeRegistry(registryPath, registry({ default: profile('default'), blue: profile('blue') }));
+  writeFileSync(tgPath, JSON.stringify({
+    botToken: 'preserved-secret', daemonUrl: 'http://127.0.0.1:3060', daemonStateDir: '/home/u/.ours-blue',
+  }) + '\n', { mode: 0o600 });
+  writeFileSync(roomsPath, JSON.stringify({
+    privateSetting: 'preserved', daemon: { mode: 'external', endpoint: 'http://127.0.0.1:3060', stateDir: '/home/u/.ours-blue' },
+  }) + '\n', { mode: 0o600 });
+  const before = { ...process.env };
+  Object.assign(process.env, {
+    HOME: home,
+    OURS_INSTALL_PROFILES: registryPath,
+    OURS_TG_CONFIG: tgPath,
+    OURS_COWORK_CONFIG: roomsPath,
+    OURS_UNINSTALL_PROFILE: 'blue',
+    OURS_UNINSTALL_DAEMON: 'yes',
+    OURS_UNINSTALL_TELEGRAM: 'reassign:default',
+    OURS_UNINSTALL_ROOMS: 'uninstall',
+  });
+  const calls = [];
+  try {
+    runNightlyUninstaller({
+      ttyFd: null, write: () => {}, npm: 'npm', assumeYes: true, finish: () => {},
+      run: (bin, args, options = {}) => { calls.push({ bin, args, options }); return { status: 0 }; },
+    });
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in before)) delete process.env[key];
+    Object.assign(process.env, before);
+  }
+  const tg = JSON.parse(readFileSync(tgPath, 'utf8'));
+  assert.equal(tg.botToken, 'preserved-secret');
+  assert.equal(tg.daemonUrl, 'http://127.0.0.1:3050');
+  assert.equal(tg.daemonStateDir, '/home/u/.ours');
+  const rooms = JSON.parse(readFileSync(roomsPath, 'utf8'));
+  assert.equal(rooms.privateSetting, 'preserved');
+  assert.equal(rooms.daemon, undefined, 'uninstalled Rooms no longer blocks the removed profile');
+  assert.deepEqual(Object.keys(readRegistry(registryPath).profiles), ['default']);
+  assert.ok(calls.some((call) => call.bin === 'ours-tg-connector' && call.args[0] === 'install-service'));
+  assert.ok(calls.some((call) => call.bin === 'ours-cowork' && call.args[0] === 'uninstall-service'));
+  assert.ok(calls.some((call) => call.bin === 'npm' && call.args.join(' ') === 'rm -g @ours.network/cowork'));
+});
+
+test('connector detach rolls back config and service when exact daemon removal fails', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ours-nightly-uninstall-detach-'));
+  const registryPath = join(home, '.ours', 'installer-profiles.json');
+  const tgPath = join(home, 'telegram.json');
+  const original = JSON.stringify({
+    botToken: 'preserved-secret', daemonUrl: 'http://127.0.0.1:3060', daemonStateDir: '/home/u/.ours-blue',
+  }) + '\n';
+  writeRegistry(registryPath, registry({ blue: profile('blue') }));
+  writeFileSync(tgPath, original, { mode: 0o600 });
+  const before = { ...process.env };
+  Object.assign(process.env, {
+    HOME: home,
+    OURS_INSTALL_PROFILES: registryPath,
+    OURS_TG_CONFIG: tgPath,
+    OURS_UNINSTALL_PROFILE: 'blue',
+    OURS_UNINSTALL_DAEMON: 'yes',
+    OURS_UNINSTALL_TELEGRAM: 'detach',
+  });
+  const calls = [];
+  try {
+    runNightlyUninstaller({
+      ttyFd: null, write: () => {}, npm: 'npm', assumeYes: true, finish: () => {},
+      run: (bin, args, options = {}) => {
+        calls.push({ bin, args, options });
+        return bin === 'ours-mcp' && args[0] === 'uninstall-service' ? { status: 1 } : { status: 0 };
+      },
+    });
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in before)) delete process.env[key];
+    Object.assign(process.env, before);
+  }
+  assert.equal(readFileSync(tgPath, 'utf8'), original, 'detach rollback restores private config byte-for-byte');
+  assert.ok(readRegistry(registryPath).profiles.blue, 'failed daemon removal never commits registry deletion');
+  assert.deepEqual(calls.filter((call) => call.bin === 'ours-tg-connector').map((call) => call.args[0]), [
+    'uninstall-service', 'install-service',
+  ]);
 });
 
 test('runner treats corrupt connector configuration as an uninstall dependency it cannot safely inspect', () => {

@@ -69,6 +69,10 @@ OURS_CONFIG=~/.ours-tg/config.json OURS_SERVICE_NAME=tg ours-mcp install-service
 # → ours-tg.service  /  solutions.adaptframework.ours.tg
 ```
 
+Named definitions also persist that exact `OURS_CONFIG` path. This is required because visibility,
+API-token source, transcription, GC, and other config-only settings must resolve from the same file
+after reboot; persisting only port/state/broker would not preserve an auth-isolated profile.
+
 With no name — the default, and every existing deployment — the unit and label are exactly what
 they always were. A name must be 1–32 characters of letters, digits, hyphen or underscore,
 starting and ending with a letter or digit; anything else is **refused** rather than rewritten,

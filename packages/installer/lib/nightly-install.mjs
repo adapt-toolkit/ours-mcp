@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { heading, ok, info, warn, c } from './ui.mjs';
@@ -25,6 +25,27 @@ const readObject = (path, { missing = {} } = {}) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${path} must contain a JSON object`);
   return value;
 };
+
+const canonicalPath = (path) => {
+  try { return realpathSync(path); } catch { return resolve(path); }
+};
+
+// Keep this check aligned with the runtime association resolvers: a profile-selected
+// client reads this exact config with the historical 3050 / ~/.ours defaults. A manual
+// profile that merely reaches the requested daemon is still unusable when its client
+// config resolves another port or state directory, so reject it before any mutation.
+function assertClientConfigMatchesProfile(profile, config, home) {
+  const configuredPort = config.port === undefined ? DEFAULT_PORT : Number(config.port);
+  const configuredState = canonicalPath(
+    typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'),
+  );
+  if (configuredPort !== profile.port) {
+    throw new Error(`client config resolves port ${configuredPort}, not selected port ${profile.port}`);
+  }
+  if (configuredState !== canonicalPath(profile.stateDir)) {
+    throw new Error('client config resolves a different state directory than the selected daemon');
+  }
+}
 
 function candidateFromConfig(id, label, configPath, { serviceName = '', ownership } = {}) {
   if (!existsSync(configPath)) return null;
@@ -141,6 +162,20 @@ function exactEnv(profile) {
   };
   if (profile.serviceName) env.OURS_SERVICE_NAME = profile.serviceName;
   return env;
+}
+
+function serviceDefinitionPath(profile, home, platform = process.platform) {
+  if (platform === 'linux') {
+    const unit = profile.serviceName ? `ours-${profile.serviceName}.service` : 'ours.service';
+    return join(home, '.config', 'systemd', 'user', unit);
+  }
+  if (platform === 'darwin') {
+    const label = profile.serviceName
+      ? `solutions.adaptframework.ours.${profile.serviceName}.plist`
+      : 'solutions.adaptframework.ours.plist';
+    return join(home, 'Library', 'LaunchAgents', label);
+  }
+  return '';
 }
 
 function ownerToken(profile, config, env) {
@@ -366,13 +401,24 @@ export async function runNightlyInstaller(deps) {
     line(warn(`Cannot use that daemon profile: ${error.message}`)); finish(ttyFd); return;
   }
 
+  if (selection.kind === 'manual' && !selection.clientConfigNeeded) {
+    try {
+      assertClientConfigMatchesProfile(selection.profile, readObject(selection.profile.configPath), home);
+    } catch (error) {
+      line(warn(`Manual client config does not match the selected daemon: ${error.message}`));
+      line(info('No package, service, harness, identity, or registry changes were made.'));
+      finish(ttyFd); return;
+    }
+  }
+
   if (selection.kind === 'new' && !dry) {
     if (existsSync(selection.profile.configPath)) {
       line(warn(`New profile config path already exists: ${selection.profile.configPath}. It will not be overwritten.`));
       line(info('Choose the discovered/manual-existing flow, or choose a new config path. No changes were made.'));
       finish(ttyFd); return;
     }
-    if (existsSync(selection.profile.stateDir)) {
+    const stateExisted = existsSync(selection.profile.stateDir);
+    if (stateExisted) {
       let entries = [];
       try { entries = readdirSync(selection.profile.stateDir); } catch { entries = ['unreadable']; }
       if (entries.length) {
@@ -380,6 +426,18 @@ export async function runNightlyInstaller(deps) {
         line(info('Choose manual existing for that state, or choose a new empty path. No changes were made.'));
         finish(ttyFd); return;
       }
+    }
+    // An explicitly accepted empty directory may be used, but it remains operator-owned.
+    // Only a state directory absent at preflight can become installer-owned.
+    selection.profile = normalizeProfile(selection.id, {
+      ...selection.profile,
+      ownership: { ...selection.profile.ownership, state: !stateExisted },
+    });
+    const servicePath = serviceDefinitionPath(selection.profile, home);
+    if (servicePath && existsSync(servicePath)) {
+      line(warn(`New profile service definition already exists: ${servicePath}. It will not be overwritten.`));
+      line(info('Choose the discovered/update flow, or choose another service instance name. No changes were made.'));
+      finish(ttyFd); return;
     }
     const exactProbe = await probeProfileCandidate({ id: selection.id, ...selection.profile }, { fetch: deps.fetch });
     if (exactProbe.reachable) {
@@ -433,6 +491,12 @@ export async function runNightlyInstaller(deps) {
     if (!snapshots.some(([p]) => p === path)) snapshots.push([path, snapshotConfig(path), preserveOnFailure]);
   };
   let partial = false;
+  const newArtifactBaseline = selection.kind === 'new' && !dry ? {
+    config: existsSync(selection.profile.configPath),
+    state: existsSync(selection.profile.stateDir),
+    servicePath: serviceDefinitionPath(selection.profile, home),
+    service: !!serviceDefinitionPath(selection.profile, home) && existsSync(serviceDefinitionPath(selection.profile, home)),
+  } : null;
   let daemonReady = !!selection.reachable;
   const appliedApps = [];
   try {
@@ -553,9 +617,27 @@ export async function runNightlyInstaller(deps) {
     await act(`commit profile registry ${registryFile}`, async () => { writeRegistry(registryFile, plannedRegistry); return { ok: true }; });
   } catch (error) {
     if (!dry) rollbackSnapshots(snapshots);
+    let recovery = '';
+    if (newArtifactBaseline) {
+      const ownership = {
+        config: !newArtifactBaseline.config && existsSync(selection.profile.configPath),
+        service: !!newArtifactBaseline.servicePath && !newArtifactBaseline.service && existsSync(newArtifactBaseline.servicePath),
+        state: !newArtifactBaseline.state && existsSync(selection.profile.stateDir),
+      };
+      if (Object.values(ownership).some(Boolean)) {
+        try {
+          const recoveredProfile = normalizeProfile(selection.id, { ...selection.profile, ownership });
+          const recoveredRegistry = upsertProfile(registry, selection.id, recoveredProfile);
+          writeRegistry(registryFile, recoveredRegistry);
+          recovery = ` Recovery metadata recorded installer ownership for: ${Object.entries(ownership).filter(([, owned]) => owned).map(([name]) => name).join(', ')}.`;
+        } catch (recoveryError) {
+          recovery = ` Recovery metadata could not be recorded: ${recoveryError.message}.`;
+        }
+      }
+    }
     line(warn(`Nightly plan did not complete: ${error.message}`));
     line(info(`Snapshotted config/registry bytes were rolled back${partial ? '; completed package/plugin installs were not rolled back' : ''}.`));
-    line(info('New daemon config/state and identities were retained for recovery; inspect the selected service before re-running.'));
+    line(info(`New daemon artifacts and identities were retained for recovery; inspect the selected service before re-running.${recovery}`));
     finish(ttyFd); return;
   }
 
