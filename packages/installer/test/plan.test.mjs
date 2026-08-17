@@ -164,7 +164,8 @@ test('planServiceInstall: a state dir with no usable name refuses instead of gue
 
 test('serviceInstallCommand selects the daemon and lets the CLI name the unit', () => {
   const cmd = serviceInstallCommand({ stateDir: TG });
-  assert.deepEqual(cmd, ['ours', 'daemon', 'install-service', '--yes', '--state-dir', TG, '--config', join(TG, 'config.json')]);
+  assert.deepEqual(cmd, ['ours', 'daemon', 'install-service', '--yes', '--json', '--state-dir', TG, '--config', join(TG, 'config.json')]);
+  assert.ok(cmd.includes('--json'), 'so the caller can read back whether the unit actually changed');
   assert.ok(!cmd.some((a) => /\.service$/.test(a)), 'no unit name is passed — one derivation, in the CLI');
 });
 

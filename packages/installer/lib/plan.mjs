@@ -177,7 +177,10 @@ export function legacyReplacedNotice(unitPath, stateDir) {
  */
 export function serviceInstallCommand({ stateDir, adoptLegacyUnit = false }) {
   const dir = resolve(stateDir);
-  const cmd = ['ours', 'daemon', 'install-service', '--yes', '--state-dir', dir, '--config', join(dir, 'config.json')];
+  // --json so the caller can read back whether the unit actually CHANGED. The
+  // CLI owns that byte-comparison, and an installer that guessed at it would
+  // report "nothing changed" on a run that rewrote a unit.
+  const cmd = ['ours', 'daemon', 'install-service', '--yes', '--json', '--state-dir', dir, '--config', join(dir, 'config.json')];
   // --force is reachable ONLY through this explicit argument, which the
   // orchestrator passes only after the user answered yes to legacyReplacePrompt.
   // It is never a default and never appears in a plan.
