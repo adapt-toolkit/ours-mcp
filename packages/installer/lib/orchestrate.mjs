@@ -33,6 +33,7 @@ import {
 } from './components.mjs';
 import { planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3 } from './extras.mjs';
 import { summarizeRun } from './rerun.mjs';
+import { configJournal, reportRollback } from './journal.mjs';
 import { detectPlatform, resolveChannel, validateBroker } from './logic.mjs';
 import { daemonEnv } from './effects.mjs';
 import { USAGE } from './usage.mjs';
@@ -160,23 +161,79 @@ export async function runDaemonPhase(args, effects) {
     effects.readJson(configPath),
     { port: target.port, stateDir: dir, brokerUrl: args.brokerUrl },
   );
+  // THE BYTES AND THE DAEMON THEY DESCRIBE ARE ONE UNIT OF WORK.
+  //
+  // config.json is written here, and only the two steps AFTER it make what it says
+  // true. Without the journal, a start or a service install that failed left a
+  // file naming a port nothing listens on — and the next run reads that file FIRST
+  // (lib/target.mjs findDaemon), probes the wrong port, and has only the
+  // ours-cli-daemon.json lookup between it and creating a SECOND daemon on this
+  // state directory. Two writers on one state_data.bin is the corruption case that
+  // lookup exists to prevent; this is what stops the installer from setting up the
+  // conditions for it.
+  const journal = configJournal(effects, { dryRun: args.dryRun });
   if (merged.changed) {
+    journal.snapshot(configPath);
     await perform(effects, args.dryRun, `write ${configPath} (port ${target.port})`, () => effects.writeJson(configPath, merged.text));
   } else {
     effects.out(ok(`${configPath} already correct — not touched`));
   }
   steps.push({ id: 'config', changed: merged.changed, reason: merged.changed ? undefined : 'already correct' });
 
-  if (creating) {
-    await perform(effects, args.dryRun, `start the daemon on port ${target.port}`, () => effects.run('ours', ['daemon', 'start', '--config', configPath]));
-    steps.push({ id: 'start', changed: true });
+  try {
+    if (creating) {
+      await perform(effects, args.dryRun, `start the daemon on port ${target.port}`, () => effects.run('ours', ['daemon', 'start', '--config', configPath]));
+      steps.push({ id: 'start', changed: true });
+    }
+
+    const service = await runServicePhase(args, effects, dir);
+    if (service.refused) {
+      // A REFUSAL IS A FAILURE TO REACH THE STATE, not a special case. An unknown
+      // unit file stops the run just as a failed start does, and it stops it with
+      // config.json already rewritten — indistinguishable to the operator. Same
+      // rollback, same report. Every exit path that leaves written bytes
+      // describing a state we did not reach gets this treatment.
+      rollBack(effects, journal, args, 'the daemon did not reach the state its config describes — putting the config back');
+      return { target, refused: service.refused, steps };
+    }
+    steps.push(service.step);
+  } catch (error) {
+    rollBack(effects, journal, args, 'the daemon did not reach the state its config describes — putting the config back', {
+      replacedUnit: error?.servicePlan?.action === 'adopt' ? error.servicePlan.unitPath : null,
+    });
+    throw error;
   }
 
-  const service = await runServicePhase(args, effects, dir);
-  if (service.refused) return { target, refused: service.refused, steps };
-  steps.push(service.step);
-
   return { target, steps };
+}
+
+/**
+ * One rollback, one report, one function — because a rollback whose report is
+ * missing reads to the operator exactly like a run that quietly did nothing, and
+ * with four call sites the way to guarantee the report is to make it impossible to
+ * skip.
+ *
+ * Package installs are deliberately named as not-rolled-back: by every call site
+ * at least one has run, and saying so is the honest boundary rather than an
+ * apology.
+ *
+ * `replacedUnit` is the substitute for something this package must NOT do. A
+ * legacy ours-mcp unit adopted under --force cannot be put back: writing unit
+ * bytes into ~/.config/systemd/user would break the invariant that systemd is
+ * reached only through `ours daemon install-service`, and without a daemon-reload
+ * it would not even mean anything. So the unit is NAMED instead — the one
+ * informational line the operator already scrolled past, repeated at the moment it
+ * matters. This is a report, not a fix, and it is recorded as still-open in the
+ * behaviour inventory rather than allowed to look covered.
+ */
+function rollBack(effects, journal, args, why, { packagesInstalled = true, replacedUnit = null } = {}) {
+  if (args.dryRun) return;
+  effects.out(warn(why));
+  const reported = reportRollback(effects, journal.restoreAll(), { packagesInstalled });
+  if (replacedUnit) {
+    effects.out(warn(`${replacedUnit} was already replaced with the CLI-managed unit and is NOT restored — the older ours-mcp unit is gone. Your state directory is untouched; re-run ours-install once the cause above is fixed.`));
+  }
+  return reported;
 }
 
 /**
@@ -195,7 +252,17 @@ export async function runServicePhase(args, effects, dir) {
   const adopting = plan.action === 'adopt';
   if (adopting) effects.out(info(plan.notice));
   const command = serviceInstallCommand({ stateDir: dir, adoptLegacyUnit: adopting });
-  const outcome = await perform(effects, args.dryRun, `boot service ${plan.unit} installed and enabled`, () => effects.run(command[0], command.slice(1)));
+  let outcome;
+  try {
+    outcome = await perform(effects, args.dryRun, `boot service ${plan.unit} installed and enabled`, () => effects.run(command[0], command.slice(1)));
+  } catch (error) {
+    // The plan travels with the failure so the caller's rollback can say WHICH
+    // unit was replaced. It cannot re-derive that afterwards: once --force has
+    // rewritten the file, classifying it again reports a cli-managed unit and the
+    // fact that a legacy one was adopted is gone.
+    error.servicePlan = plan;
+    throw error;
+  }
   // Whether the unit actually changed is the CLI's answer, not ours: it does the
   // byte comparison and returns `changed` in its --json plan. Guessing here would
   // let a run that rewrote a unit report "nothing changed". Unreadable output is
@@ -288,14 +355,28 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
       }
     }
     await perform(effects, args.dryRun, `install ${plan.install[3]}`, () => effects.run(plan.install[0], plan.install.slice(1)));
+    // ONE UNIT OF WORK: these bytes and the service that reads them. If the
+    // service does not come up, the connector's config names this daemon while its
+    // unit still carries the OLD environment — and the phase's own catch would
+    // report one failed line and let the run print "install complete".
+    const journal = configJournal(effects, { dryRun: args.dryRun });
     if (plan.changed) {
       // Written BEFORE the service: install-service bakes these values into the
       // unit as environment, and environment outranks the config file after.
+      journal.snapshot(path);
       await perform(effects, args.dryRun, `write ${path}`, () => effects.writeJson(path, `${JSON.stringify(plan.config, null, 2)}\n`));
     } else {
       effects.out(ok(`${path} already points here — not touched`));
     }
-    await perform(effects, args.dryRun, 'Telegram connector service installed', () => effects.run(plan.service[0], plan.service.slice(1)));
+    try {
+      await perform(effects, args.dryRun, 'Telegram connector service installed', () => effects.run(plan.service[0], plan.service.slice(1)));
+    } catch (error) {
+      // Scoped to THIS component: the daemon came up correctly and is not undone
+      // by a connector that did not. That is the rule this journal's per-unit scope
+      // exists to keep.
+      rollBack(effects, journal, args, 'the Telegram connector service did not come up — putting its config back');
+      throw error;
+    }
     return { key: 'tg', state: 'installed' };
   }
 
@@ -320,12 +401,22 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
     effects.out(warn(`cowork: ${plan.message}`));
     return { key: 'cowork', state: 'skipped', reason: plan.reason };
   }
+  // Same unit of work, and cowork's version is the worse failure: its boot is
+  // fail-closed on this block, so a written block with a service that never came up
+  // does not fall back to embedded mode — it does not start at all.
+  const journal = configJournal(effects, { dryRun: args.dryRun });
   if (plan.changed) {
+    journal.snapshot(path);
     await perform(effects, args.dryRun, `write ${path}`, () => effects.writeJson(path, `${JSON.stringify(plan.config, null, 2)}\n`));
   } else {
     effects.out(ok(`${path} already points here — not touched`));
   }
-  await perform(effects, args.dryRun, 'cowork service installed', () => effects.run(plan.service[0], plan.service.slice(1)));
+  try {
+    await perform(effects, args.dryRun, 'cowork service installed', () => effects.run(plan.service[0], plan.service.slice(1)));
+  } catch (error) {
+    rollBack(effects, journal, args, 'the cowork service did not come up — putting its config back, which leaves cowork embedded as it was');
+    throw error;
+  }
   return { key: 'cowork', state: 'installed' };
 }
 

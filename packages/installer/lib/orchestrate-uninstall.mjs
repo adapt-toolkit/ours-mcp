@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import { parseInstallArgs, InstallUsageError } from './target.mjs';
 import { planUninstall, planComponentDetach, planStatePurge, stripManagedBlock } from './uninstall.mjs';
 import { tgConfigPath, coworkConfigPath } from './components.mjs';
+import { configJournal, reportRollback } from './journal.mjs';
 import { UNINSTALL_USAGE } from './usage.mjs';
 import { ok, info, warn, heading } from './ui.mjs';
 
@@ -117,23 +118,41 @@ export async function runUninstall(argv, effects) {
 
   // 2. Component services and configs. The FILE is kept — it also holds the
   //    operator's bot token and settings, which were never ours.
+  //
+  // THE UNIT OF WORK HERE SPANS STEPS 2 THROUGH 4, and that is what makes it
+  // different from the install-side journals. A detached connector's stripped
+  // config says "no longer attached to this daemon", and only the daemon's actual
+  // removal makes that true. If step 3 or 4 fails, the operator is left with a
+  // stopped, detached connector NEXT TO A DAEMON THAT IS STILL THERE — a world the
+  // bytes no longer describe.
+  const journal = configJournal(effects, { dryRun: args.dryRun });
+  const detached = [];
   for (const component of plan.detach) {
     const path = component.key === 'tg' ? tgConfigPath(effects.home, effects.env) : coworkConfigPath(effects.home, effects.env);
     const detach = planComponentDetach(component.key, effects.readJson(path));
     if (detach.behaviourChange) effects.out(warn(`${component.key}: ${detach.behaviourChange}`));
     await perform(effects, args.dryRun, `${component.service.join(' ')}`, () => effects.run(component.service[0], component.service.slice(1)));
+    // Recorded whether or not its config changed: the SERVICE was stopped either
+    // way, so a rollback owes it a re-apply either way.
+    detached.push({ key: component.key, path, service: [component.service[0], 'install-service'] });
     if (detach.removed.length > 0) {
+      journal.snapshot(path);
       await perform(effects, args.dryRun, `remove ${detach.removed.join(', ')} from ${path} (file kept)`, () => effects.writeJson(path, `${JSON.stringify(detach.config, null, 2)}\n`));
     }
   }
 
   // 3-4. The boot service, then the daemon. Both delegate their refusals.
-  for (const step of plan.daemon) {
-    if (step.command === null) {
-      effects.out(info(`${step.note} — nothing signalled`));
-      continue;
+  try {
+    for (const step of plan.daemon) {
+      if (step.command === null) {
+        effects.out(info(`${step.note} — nothing signalled`));
+        continue;
+      }
+      await perform(effects, args.dryRun, step.command.join(' '), () => effects.run(step.command[0], step.command.slice(1)));
     }
-    await perform(effects, args.dryRun, step.command.join(' '), () => effects.run(step.command[0], step.command.slice(1)));
+  } catch (error) {
+    await rollBackDetach(effects, journal, detached, args);
+    throw error;
   }
 
   // 5. The harness plugins the installer wrote.
@@ -151,6 +170,42 @@ export async function runUninstall(argv, effects) {
     }
   }
   return EXIT_OK;
+}
+
+/**
+ * Undo a detach when the daemon it was detaching FROM did not go away.
+ *
+ * THIS ONE NEEDS A COMMAND, NOT JUST BYTES, and that is the whole reason it is a
+ * separate function from the install side's rollback. The detach stopped the
+ * connector's service before stripping its config, so restoring the bytes under a
+ * stopped service is a HALF rollback — and half-states are exactly what this
+ * feature exists to eliminate. The config goes back and then `install-service` is
+ * re-applied, which is what the nightly uninstaller does
+ * (lib/nightly-uninstall.mjs `rollbackConnectorLifecycles`), rather than a second
+ * approach invented here.
+ *
+ * Every failure inside the recovery is REPORTED and none is thrown: the caller is
+ * already on a failure path, and a recovery failure must never be what the
+ * operator sees instead of the real fault. The original error is what propagates.
+ */
+export async function rollBackDetach(effects, journal, detached, args) {
+  if (args.dryRun || detached.length === 0) return { restored: [], reapplied: [], failed: [] };
+  effects.out(warn('the daemon was not removed, so the connectors are still attached to it — putting them back'));
+  const outcome = journal.restoreAll();
+  const reapplied = [];
+  const failed = [];
+  for (const component of detached.slice().reverse()) {
+    try {
+      await effects.run(component.service[0], component.service.slice(1));
+      effects.out(ok(`${component.service.join(' ')} — ${component.key} is attached and running again`));
+      reapplied.push(component.key);
+    } catch (error) {
+      failed.push(component.key);
+      effects.out(warn(`could NOT re-apply ${component.key}'s service: ${error instanceof Error ? error.message : String(error)} — its config is back but the service is down; run '${component.service.join(' ')}' yourself`));
+    }
+  }
+  reportRollback(effects, outcome, { packagesInstalled: false });
+  return { ...outcome, reapplied, failed };
 }
 
 /**

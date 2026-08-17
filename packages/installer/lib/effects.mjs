@@ -15,7 +15,7 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo, platform as osPlatform, release as osRelease } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { atomicWriteConfig } from './config.mjs';
+import { atomicWriteConfig, snapshotConfig, restoreConfig } from './config.mjs';
 import { askYesNo, askLine as askLineOnTty } from './prompt.mjs';
 import { classifyHarnessProbe } from './logic.mjs';
 
@@ -235,6 +235,15 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       atomicWriteConfig(path, text);
     },
+    // The two halves of a config rollback (lib/journal.mjs). Deliberately the
+    // SAME pair the nightly installer uses, from lib/config.mjs, rather than a
+    // second implementation: `snapshot` records bytes and mode, and `restore`
+    // either writes those bytes back at their original mode or DELETES a file
+    // that did not exist before this run. Both are ordinary reads and writes of a
+    // file this installer was already writing — no new class of side effect
+    // enters the package here.
+    snapshot: (path) => snapshotConfig(path),
+    restore: (path, snapshot) => restoreConfig(path, snapshot),
     // `extraEnv` is the daemon pair (see daemonEnv). It is applied to THIS
     // invocation only and never to the installer's own process: a state
     // directory selected by one run must not leak into anything the operator
