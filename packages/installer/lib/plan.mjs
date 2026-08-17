@@ -62,12 +62,14 @@ export function unitPathForStateDir(stateDir, home) {
  *                 --force, so spec §4 step 4 fails for every existing Linux user.
  *   foreign     — unmarked and NOT recognisably ours-mcp's. Someone else's file.
  *
- * The legacy/foreign split is the whole point. For `legacy` we know exactly what
- * the file is and can name the one command that clears it. For `foreign` we do
- * NOT know what it is, so the installer stops and says so — it must never offer
- * to remove a file it cannot identify, and must never pass --force on the user's
- * behalf in either case. The guard exists for a reason; bypassing it invisibly is
- * how the next silent clobber ships.
+ * The legacy/foreign split is the whole point, and a later reader must not
+ * collapse the two into one "unmarked unit" case for tidiness. For `legacy` we
+ * know exactly what the file is, so the installer may offer to replace it — after
+ * showing the path and getting a yes. For `foreign` we do NOT know what it is, so
+ * the installer stops, offers no command, and does not even prompt: a
+ * confirmation dialogue over an unidentified file in someone's systemd directory
+ * is how you talk a user into destroying something. Neither case ever passes
+ * --force without an answer.
  */
 export function classifyUnit(text) {
   if (text === null || text === undefined) return { kind: 'absent' };
@@ -83,14 +85,20 @@ export function classifyUnit(text) {
  * What this run should do about the boot service (spec §4 step 4).
  *
  * Returns one of:
- *   { action: 'install' }                       — call the CLI; it does the rest
- *   { action: 'migrate-unit', command, unit }    — legacy ours-mcp unit in the way
- *   { action: 'refuse', exitCode: 2, … }         — unknown unit, or unusable state dir
+ *   { action: 'install' }                        — call the CLI; it does the rest
+ *   { action: 'confirm-replace', prompt, … }     — a legacy ours-mcp unit is in the
+ *                                                  way and may be adopted, but only
+ *                                                  after the user says yes to the
+ *                                                  exact file path being replaced
+ *   { action: 'refuse', exitCode: 2, … }         — unknown unit, unusable state dir,
+ *                                                  or a legacy unit under assume-yes
  *
- * `migrate-unit` is deliberately NOT an automatic --force. The caller shows the
- * user what is there and what will happen, and either runs the named command with
- * their consent or stops. Non-interactively it is a refusal, because
- * OURS_ASSUME_YES suppresses questions and never suppresses a refusal (spec §9).
+ * NOTHING here silently replaces anything. `confirm-replace` carries no command:
+ * the --force that adopts a legacy unit comes from
+ * serviceInstallCommand({ adoptLegacyUnit: true }), which the orchestrator calls
+ * only after the answer. A `foreign` unit gets no prompt at all — a confirmation
+ * dialogue over a file we cannot identify is just a way to talk someone into
+ * overwriting it.
  */
 export function planServiceInstall({ stateDir, home, readText, assumeYes = false }) {
   const derived = unitPathForStateDir(stateDir, home);
@@ -111,24 +119,55 @@ export function planServiceInstall({ stateDir, home, readText, assumeYes = false
       message: `${derived.path} already exists and was not written by ours. Refusing to touch it. Inspect it, and remove it yourself if it is no longer wanted.`,
     };
   }
+  // The legacy case: a unit we POSITIVELY identify as the one published ours-mcp
+  // wrote. The installer may adopt and rewrite it itself, so an ordinary user is
+  // not sent away to run a command — but only behind an explicit yes, and only
+  // after being shown the exact file it would replace. There is no silent
+  // replacement, in either direction.
   const plan = {
-    action: 'migrate-unit',
+    action: 'confirm-replace',
     unit: derived.unit,
     unitPath: derived.path,
     instance: derived.instance,
-    command: ['ours-mcp', 'uninstall-service'],
-    message: `${derived.path} is the boot service written by an older ours-mcp. It has to be removed before the new one can be installed; \`ours daemon install-service\` will not overwrite a unit it does not manage.`,
+    stateDir: resolve(stateDir),
+    prompt: legacyReplacePrompt(derived.path, resolve(stateDir)),
+    // Deliberately NOT the command itself. The --force that adopts this unit is
+    // produced by serviceInstallCommand({ adoptLegacyUnit: true }) and exists
+    // nowhere in this plan, so no caller can reach it without passing through the
+    // confirmation above. The "no --force in any plan" test pins that boundary.
+    message: `${derived.path} is the boot service an older ours-mcp installed. Replacing it is what completes the upgrade.`,
   };
   if (assumeYes) {
+    // OURS_ASSUME_YES suppresses questions; it never suppresses a refusal, and an
+    // unattended run must not take a confirmation it never received (spec §9).
     return {
-      ...plan,
       action: 'refuse',
       exitCode: 2,
       reason: 'legacy-unit-needs-consent',
-      message: `${plan.message} Run \`ours-mcp uninstall-service\` and re-run the installer. This is not done automatically in non-interactive mode.`,
+      unit: derived.unit,
+      unitPath: derived.path,
+      message: `${derived.path} is the boot service an older ours-mcp installed. Replacing it needs an explicit confirmation, which a non-interactive run cannot give. Re-run interactively, or remove it yourself with \`ours-mcp uninstall-service\`.`,
     };
   }
   return plan;
+}
+
+/**
+ * The confirmation text for adopting a legacy unit.
+ *
+ * It names the exact FILE being replaced, and it says plainly that the state
+ * directory and keys are untouched. That second half is not reassurance, it is
+ * accuracy: replacing a systemd unit does not touch a single byte under the
+ * state directory, and a "your data may be lost" warning here would be FALSE and
+ * would push people into reinstalling — which is the one outcome that really
+ * would cost them their identities.
+ */
+export function legacyReplacePrompt(unitPath, stateDir) {
+  return [
+    `${unitPath} was installed by an older ours-mcp and has to be replaced with the new one.`,
+    `Only that unit file changes. Your state directory ${stateDir} is not touched — identities, keys, contacts and message history all stay exactly as they are.`,
+    'Replace it?',
+  ].join('\n');
 }
 
 /**
@@ -138,9 +177,14 @@ export function planServiceInstall({ stateDir, home, readText, assumeYes = false
  * itself" no longer applies — neither, it selects the daemon and the CLI names
  * the unit. One derivation, in one place.
  */
-export function serviceInstallCommand({ stateDir }) {
+export function serviceInstallCommand({ stateDir, adoptLegacyUnit = false }) {
   const dir = resolve(stateDir);
-  return ['ours', 'daemon', 'install-service', '--yes', '--state-dir', dir, '--config', join(dir, 'config.json')];
+  const cmd = ['ours', 'daemon', 'install-service', '--yes', '--state-dir', dir, '--config', join(dir, 'config.json')];
+  // --force is reachable ONLY through this explicit argument, which the
+  // orchestrator passes only after the user answered yes to legacyReplacePrompt.
+  // It is never a default and never appears in a plan.
+  if (adoptLegacyUnit) cmd.push('--force');
+  return cmd;
 }
 
 // -----------------------------------------------------------------------------
