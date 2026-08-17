@@ -727,7 +727,12 @@ async function main() {
   line(info('over Telegram so they talk to each other — and it all configures maximally easily.'));
   const goFleet = yes('  Install it?', true);
   if (goFleet) {
-    // ours-fleet is ALWAYS @latest — it has no nightly tag (pkgSpec pins it even under OURS_CHANNEL=nightly).
+    // ours-fleet FOLLOWS the channel, like everything else here: it publishes its own
+    // nightly dist-tag from adapt-toolkit/ours-fleet, and lib/logic.mjs maps it
+    // accordingly. (This comment used to claim the opposite — that fleet had no nightly
+    // tag and was pinned to @latest even under OURS_CHANNEL=nightly — which stopped
+    // being true when the map gained its `fleet` entry. The code always followed the
+    // map; only the comment was stale, which is the more dangerous of the two.)
     await actSpin(`installing ${spec('fleet')}…`, `npm i -g ${spec('fleet')}`, () => runAsync(NPM, ['i', '-g', spec('fleet')]));
     const init = await act('ours-fleet init (one-time host setup: units, dirs, linger)', async () => run('ours-fleet', ['init']));
     if (!init.ok) line(warn(`ours-fleet host setup didn't finish — retry '${c.cyan('ours-fleet init')}'.`));
