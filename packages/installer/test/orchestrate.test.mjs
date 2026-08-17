@@ -599,3 +599,53 @@ test('a left-over profile registry is NAMED as dead, and never deleted', async (
   assert.match(said(e), /It is left alone/);
   assert.deepEqual(e.recorder.removed ?? [], [], 'nothing deleted');
 });
+
+// ------------------------------------------ daemon recovery after a failed unit --
+
+test('a failed install-service does not leave the daemon down without trying to bring it back', async () => {
+  // install-service can STOP a running daemon before it fails: it installs a unit
+  // that will own the process. v3 just ended the run there, so a person who typed
+  // ours-install and got an error was also, silently, left without the daemon they
+  // had before.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' } },
+    net: { 3050: { ok: true, stateDir: OURS } },
+    runFails: ['install-service'],
+    env: { OURS_ASSUME_YES: '1' },
+  });
+  await assert.rejects(() => runInstall([], e));
+  const started = e.recorder.ran.filter((c) => c.join(' ').includes('daemon start'));
+  assert.equal(started.length, 1, 'exactly one recovery attempt');
+  assert.deepEqual(started[0], ['ours', 'daemon', 'start', '--config', join(OURS, 'config.json')]);
+  assert.match(said(e), /your daemon is running again/);
+});
+
+test('the two outcomes are told apart, because only one of them needs a human now', async () => {
+  // "The service failed but the daemon is back" is a bad evening. "The service
+  // failed AND it will not come back" is the one that needs someone tonight.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' } },
+    net: { 3050: { ok: true, stateDir: OURS } },
+    runFails: ['install-service', 'daemon start'],
+    env: { OURS_ASSUME_YES: '1' },
+  });
+  await assert.rejects(() => runInstall([], e));
+  assert.match(said(e), /the daemon did NOT come back up/);
+  assert.match(said(e), /ours daemon start --config .*config\.json/, 'and the exact command to fix it');
+});
+
+test('a daemon that never started is not "recovered" — there is nothing to recover', async () => {
+  // Running start after a failed start would fail again and stack a second, less
+  // useful error on top of the first.
+  const e = fx({ runFails: ['daemon start'], env: { OURS_ASSUME_YES: '1' } });
+  await assert.rejects(() => runInstall([], e));
+  const starts = e.recorder.ran.filter((c) => c.join(' ').includes('daemon start'));
+  assert.equal(starts.length, 1, 'the original attempt only — no retry');
+  assert.doesNotMatch(said(e), /running again|did NOT come back up/);
+});
+
+test('a dry run recovers nothing, because it stopped nothing', async () => {
+  const e = fx({ runFails: ['install-service'], env: { OURS_ASSUME_YES: '1' } });
+  await runInstall(['--dry-run'], e);
+  assert.deepEqual(e.recorder.ran, [], 'a dry run performs nothing at all');
+});

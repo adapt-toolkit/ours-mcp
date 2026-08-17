@@ -265,13 +265,51 @@ export async function runDaemonPhase(args, effects) {
     }
     steps.push(service.step);
   } catch (error) {
+    // THE DAEMON MAY BE DOWN, AND NOT BECAUSE ANYTHING ASKED IT TO BE.
+    //
+    // `install-service` can STOP a running daemon before it fails — it installs a
+    // unit that will own the process, and a failure after that point leaves nothing
+    // running. v3 simply ended the run there, so a person who typed ours-install
+    // and got an error was also, silently, left without the daemon they had before.
+    // The nightly flow re-runs `start` and, crucially, tells the two outcomes
+    // apart: "the service failed but the daemon is back" is a bad evening, and "the
+    // service failed AND it will not come back" is the one that needs a human now.
+    const recovery = error?.servicePlan ? await recoverDaemon(args, effects, dir, configPath) : null;
     rollBack(effects, journal, args, 'the daemon did not reach the state its config describes — putting the config back', {
       replacedUnit: error?.servicePlan?.action === 'adopt' ? error.servicePlan.unitPath : null,
     });
+    if (recovery) {
+      effects.out(recovery.recovered
+        ? ok('your daemon is running again — nothing was committed, and the service is unchanged')
+        : warn('and the daemon did NOT come back up — start it yourself before anything else: '
+          + `ours daemon start --config ${configPath}`));
+    }
     throw error;
   }
 
   return { target, steps };
+}
+
+/**
+ * Put the daemon back after a failed boot-service install.
+ *
+ * Only attempted when the failure came from the SERVICE step (`error.servicePlan`
+ * is what says so) — a daemon that never started has nothing to recover, and
+ * running `start` after a failed `start` would just fail again with a second, less
+ * useful error on top of the first.
+ *
+ * A dry run recovers nothing because it stopped nothing. The recovery's own failure
+ * is REPORTED, never thrown: the caller is already carrying the real error, and
+ * losing it to a second one would hide what actually went wrong.
+ */
+async function recoverDaemon(args, effects, dir, configPath) {
+  if (args.dryRun) return null;
+  try {
+    await effects.run('ours', ['daemon', 'start', '--config', configPath]);
+    return { recovered: true };
+  } catch (recoveryError) {
+    return { recovered: false, reason: reason(recoveryError) };
+  }
 }
 
 /**
