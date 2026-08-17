@@ -654,8 +654,31 @@ export async function runFleetPhase(args, effects, { target, isDefaultStateDir }
     return { key: 'fleet', label: plan.label, state: 'skipped' };
   }
   const install = await attempt(effects, args.dryRun, plan.install.join(' '), () => effects.run(plan.install[0], plan.install.slice(1)));
+  // THE PAIR IS PASSED AS DELIBERATE INSURANCE AGAINST AN UNRESOLVED
+  // CONTRADICTION, not because the question was settled.
+  //
+  // Two written analyses disagree, and NEITHER was verified — ours-fleet is not in
+  // this repo:
+  //   lib/nightly-install.mjs:611 says fleet resolves its daemon from
+  //     OURS_CONFIG / OURS_PORT / OURS_STATE_DIR and has no concept of a registry,
+  //     so an `init` run without the pair points every role at the historical
+  //     default daemon — which, when the selected daemon is not the default, may
+  //     be one the user does not even have.
+  //   lib/extras.mjs:180 says `init` takes no daemon argument of any kind, reads no
+  //     daemon config, and resolves per role through
+  //     resolveEndpoint({ ...process.env, ...role.env }) — so the pair is
+  //     unnecessary here.
+  // Passing it is harmless if extras.mjs is right and load-bearing if
+  // nightly-install.mjs is. When the cheap action is safe under both readings and
+  // the expensive one is only safe under one, take the cheap one. (Coordinator
+  // ruling, 2026-08-17.)
+  //
+  // Passed for EVERY state directory, not only a non-default one, exactly as the
+  // nightly flow does: `init` is a one-time host setup and the pair is what names
+  // the daemon it was set up beside.
+  const initEnv = daemonEnv(target.stateDir, target.port);
   const init = install.ok
-    ? await attempt(effects, args.dryRun, `${plan.init.join(' ')} (one-time host setup: units, dirs, linger)`, () => effects.run(plan.init[0], plan.init.slice(1)))
+    ? await attempt(effects, args.dryRun, `${plan.init.join(' ')} (one-time host setup: units, dirs, linger)`, () => effects.run(plan.init[0], plan.init.slice(1), { env: initEnv }))
     : install;
   if (!init.ok) {
     effects.out(info(`retry manually: ${plan.init.join(' ')}`));
