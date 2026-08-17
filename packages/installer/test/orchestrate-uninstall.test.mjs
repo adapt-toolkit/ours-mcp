@@ -492,3 +492,34 @@ test('OURS_UNINSTALL_TELEGRAM=reassign refuses on its OWN account, not step 1’
   assert.deepEqual(e.recorder.wrote, [], 'and the connector is not detached as a consolation prize');
   assert.match(said(e), /OURS_UNINSTALL_TELEGRAM/);
 });
+
+// ---------------------- the step-7 recomputation, and what it must carry -----
+
+test('the recomputed package list still carries the confirmed connector', async () => {
+  // Step 7 recomputes planGlobalPackages from what the plugin phase ACTUALLY
+  // removed, because a kept harness keeps its launcher. That recomputation has a
+  // second input it does not own — detachedComponents, which decides whether a
+  // confirmed connector's package goes with it. Dropping it from the call is
+  // textually clean, internally consistent, and silently reverts that behaviour.
+  // Nothing but this test stops it being dropped again.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG, [TG_CFG]: { daemonStateDir: OURS, botToken: 's' } },
+    answers: [true],
+    known: [OURS],
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
+  const npm = e.recorder.ran.filter((c) => c[0] === 'npm').map((c) => c[c.length - 1]);
+  assert.deepEqual(npm, ['@ours.network/cli', '@ours.network/mcp', '@ours.network/tg-connector']);
+});
+
+test('a connector confirmed while ANOTHER daemon survives keeps its package through step 7', async () => {
+  // The other half of the same rule, so the test above cannot be satisfied by
+  // always appending the connector.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG, [TG_CFG]: { daemonStateDir: OURS, botToken: 's' } },
+    answers: [true],
+    known: [OURS, resolve(HOME, '.ours-tg')],
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
+  assert.deepEqual(e.recorder.ran.filter((c) => c[0] === 'npm'), [], 'nothing global removed at all');
+});
