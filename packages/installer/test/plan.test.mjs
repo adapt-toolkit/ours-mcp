@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import {
   unitNameForStateDir, unitPathForStateDir, classifyUnit, planServiceInstall,
-  serviceInstallCommand, planDaemonConfig, planDaemonSteps, legacyReplacePrompt,
+  serviceInstallCommand, planDaemonConfig, planDaemonSteps, legacyReplacedNotice,
   CLI_UNIT_MARKER, DEFAULT_SYSTEMD_UNIT,
 } from '../lib/plan.mjs';
 
@@ -89,32 +89,32 @@ test('planServiceInstall: an existing CLI-managed unit is not special-cased', ()
   assert.equal(p.action, 'install', 'the CLI owns idempotence and the baked-state-dir guard from here');
 });
 
-test('planServiceInstall: a legacy ours-mcp unit is REPLACED ONLY AFTER an explicit yes', () => {
+test('planServiceInstall: a legacy ours-mcp unit is adopted silently, with one line of output', () => {
   const p = planServiceInstall({ stateDir: OURS, home: HOME, readText: texts({ [unitPath('ours.service')]: LEGACY_UNIT }) });
-  assert.equal(p.action, 'confirm-replace', 'never a silent replacement');
+  assert.equal(p.action, 'adopt', 'no prompt: an upgrading user has no manual step');
+  assert.ok(!p.prompt, 'no question is asked');
   assert.equal(p.unitPath, unitPath('ours.service'));
-  assert.ok(p.prompt.includes(unitPath('ours.service')), 'the user is shown the specific file being replaced');
+  assert.ok(p.notice.includes(unitPath('ours.service')), 'the replacement is not literally invisible');
 });
 
-test('the confirmation is ACCURATE: it says the state directory and keys are untouched', () => {
-  // Verified by the 0.16.0 -> ours-sdk migration test: state, keys, contacts and
-  // delegation all survive. A "your data may be lost" warning here would be FALSE
-  // and would push people into reinstalling — the one thing that really would
-  // cost them their identities.
-  const prompt = legacyReplacePrompt(unitPath('ours.service'), OURS);
-  assert.ok(prompt.includes(unitPath('ours.service')), 'names the exact unit file');
-  assert.ok(prompt.includes(OURS), 'names the state directory it is NOT touching');
-  assert.match(prompt, /not touched/);
-  assert.match(prompt, /identities, keys, contacts and message history all stay/);
-  assert.doesNotMatch(prompt, /lost|delete|erase|wipe|destroy/i, 'no false data-loss warning');
+test('the replaced-unit line is ACCURATE and carries no data-loss wording', () => {
+  // Verified by the 0.16.0 -> ours-sdk migration run: state, keys, contacts and
+  // delegation all survive. A "your data may be lost" line here would be FALSE and
+  // would push people into reinstalling — the one thing that really would cost
+  // them their identities. This negative assertion exists to stop a later
+  // "improvement" that adds a scary warning.
+  const notice = legacyReplacedNotice(unitPath('ours.service'), OURS);
+  assert.ok(notice.includes(unitPath('ours.service')), 'names the exact unit file');
+  assert.ok(notice.includes(OURS), 'names the state directory it is NOT touching');
+  assert.match(notice, /untouched/);
+  assert.equal(notice.split('\n').length, 1, 'one line, informational — not a warning and not a question');
+  assert.doesNotMatch(notice, /lost|delete|erase|wipe|destroy/i, 'no false data-loss warning');
 });
 
 test('planServiceInstall NEVER passes --force: no plan can reach it without an answer', () => {
   for (const text of [null, CLI_UNIT, LEGACY_UNIT, '[Unit]\nDescription=stranger\n']) {
-    for (const assumeYes of [false, true]) {
-      const p = planServiceInstall({ stateDir: OURS, home: HOME, assumeYes, readText: texts({ [unitPath('ours.service')]: text }) });
-      assert.ok(!JSON.stringify(p).includes('--force'), 'the guard is never bypassed on the user\'s behalf');
-    }
+    const p = planServiceInstall({ stateDir: OURS, home: HOME, readText: texts({ [unitPath('ours.service')]: text }) });
+    assert.ok(!JSON.stringify(p).includes('--force'), '--force never leaks into a plan');
   }
   assert.ok(!serviceInstallCommand({ stateDir: OURS }).includes('--force'), '--force is never a default');
 });
@@ -135,14 +135,16 @@ test('a FOREIGN unit gets no confirmation prompt at all', () => {
   assert.ok(!p.command, 'no command');
 });
 
-test('planServiceInstall: non-interactive turns the legacy case into a refusal, not a silent removal', () => {
-  // OURS_ASSUME_YES suppresses questions; it never suppresses a refusal (spec §9).
-  const p = planServiceInstall({ stateDir: OURS, home: HOME, assumeYes: true, readText: texts({ [unitPath('ours.service')]: LEGACY_UNIT }) });
-  assert.equal(p.action, 'refuse');
-  assert.equal(p.exitCode, 2);
-  assert.equal(p.reason, 'legacy-unit-needs-consent');
-  assert.ok(!p.prompt, 'an unattended run must not take a confirmation it never received');
-  assert.match(p.message, /needs an explicit confirmation/);
+test('an unattended run behaves EXACTLY like an interactive one', () => {
+  // With no consent to withhold there must be no difference between the two, so
+  // planServiceInstall takes no assumeYes at all — a dead flag would be an
+  // invitation to reintroduce one.
+  const args = { stateDir: OURS, home: HOME, readText: texts({ [unitPath('ours.service')]: LEGACY_UNIT }) };
+  assert.deepEqual(planServiceInstall(args), planServiceInstall({ ...args, assumeYes: true }));
+  // The FOREIGN case is still a refusal, interactive or not.
+  const foreign = { stateDir: OURS, home: HOME, readText: texts({ [unitPath('ours.service')]: '[Unit]\nDescription=stranger\n' }) };
+  assert.equal(planServiceInstall(foreign).action, 'refuse');
+  assert.equal(planServiceInstall({ ...foreign, assumeYes: true }).action, 'refuse');
 });
 
 test('planServiceInstall: an unidentifiable unit stops the run and is never removed', () => {
