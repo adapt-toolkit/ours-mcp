@@ -40,7 +40,8 @@ import {
   coworkSupportsExternalDaemon, COWORK_EXTERNAL_MIN_VERSION,
 } from './lib/logic.mjs';
 import { atomicWriteConfig } from './lib/config.mjs';
-import { runNightlyInstaller } from './lib/nightly-install.mjs';
+import { realEffects } from './lib/effects.mjs';
+import { runInstall as runInstallV3 } from './lib/orchestrate.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
 // Release channel: OURS_CHANNEL=nightly installs each package's PRERELEASE dist-tag —
@@ -239,6 +240,28 @@ Env: OURS_ASSUME_YES=1 (accept defaults, no prompts) · OURS_INSTALL_DRY_RUN=1 �
 // ===============================================================================================
 async function main() {
   const argv = process.argv.slice(2);
+
+  // ─── THE CHANNEL FORK ───────────────────────────────────────────────────────
+  // Nightly is the v3 installer, end to end. Owner ruling 2026-08-17: v3 SUBSUMES
+  // the nightly flow rather than being hosted by it, so this hands the whole run
+  // over — arguments, screens, refusals and exit code — and never returns.
+  //
+  // FIRST IN main(), BEFORE --help/--version, ON PURPOSE. Those used to be
+  // answered by the v2 body above, which would have printed v2's usage describing
+  // v2's flags for a run that is about to be v3's. Whatever prints the help must
+  // be whatever runs.
+  //
+  // The latest/stable body below is untouched and still serves that channel byte
+  // for byte; nothing a stable user does changes.
+  if (CHANNEL === 'nightly') {
+    const ttyFd = openTty();
+    const code = await runInstallV3(argv, realEffects({
+      write: makeWriter(ttyFd), ttyFd, env: process.env, version: pkgVersion(),
+    }));
+    finish(ttyFd);
+    process.exit(code);
+  }
+
   if (argv.includes('--help') || argv.includes('-h')) { process.stdout.write(USAGE + '\n'); return; }
   if (argv.includes('--version') || argv.includes('-V')) { process.stdout.write(`ours-install v${pkgVersion()}\n`); return; }
   if (argv.includes('--dry-run')) DRY = true;
@@ -315,16 +338,6 @@ async function main() {
     line(warn('No Claude Code, Codex, or Hermes found on this machine.'));
     line(info('Install one of them first, then re-run ours-install to wire it up.'));
     finish(ttyFd); return;
-  }
-
-  // HARD RELEASE BOUNDARY. Nightly owns the topology-first profile flow. The
-  // latest/stable consumer-first implementation below remains untouched and
-  // never reads or writes installer-profiles.json or emits --application.
-  if (CHANNEL === 'nightly') {
-    return runNightlyInstaller({
-      harnesses, ttyFd, interactive, write, yes, ask, cont, dry: DRY,
-      npm: NPM, run, runAsync, act, actSpin, finish,
-    });
   }
 
   // Daemon state up front (decides first-install vs update, and whether Step 0 runs at all).

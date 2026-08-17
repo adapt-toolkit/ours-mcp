@@ -20,7 +20,8 @@ import { join } from 'node:path';
 import { banner, heading, c, openTty, makeWriter, closeSync } from './lib/ui.mjs';
 import { askLine, checkboxSelect } from './lib/prompt.mjs';
 import { canonHarnesses, resolveChannel } from './lib/logic.mjs';
-import { runNightlyUninstaller } from './lib/nightly-uninstall.mjs';
+import { realEffects } from './lib/effects.mjs';
+import { runUninstall as runUninstallV3 } from './lib/orchestrate-uninstall.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
 const HOME = homedir();
@@ -116,17 +117,29 @@ function confirmDestructive(write, fd, what) {
 }
 
 // ===============================================================================================
-function main() {
+async function main() {
   const ttyFd = openTty();
   const write = makeWriter(ttyFd);
+
+  // ─── THE CHANNEL FORK ───────────────────────────────────────────────────────
+  // The partner to install.mjs's, and it has to move in the SAME commit. v3
+  // installing while this body uninstalls would run the old flow against state it
+  // no longer understands — the kind of half-state that only surfaces when someone
+  // tries to undo something.
+  //
+  // Before the banner, so the screen the operator sees is the one belonging to the
+  // flow that is about to run.
+  if (CHANNEL === 'nightly') {
+    const code = await runUninstallV3(process.argv.slice(2), realEffects({
+      write, ttyFd, env: process.env, version: packageVersion,
+    }));
+    finish(ttyFd);
+    process.exit(code);
+  }
 
   line(banner());
   line(c.bold('  ours.network uninstaller'));
   say('Removes only what the ours installers created. Nothing is removed until you confirm.');
-
-  if (CHANNEL === 'nightly') {
-    return runNightlyUninstaller({ ttyFd, write, run, npm: NPM, assumeYes: ASSUME_YES, finish });
-  }
 
   // --- 1) choose what to remove ----------------------------------------------------------------
   let selected = [];
@@ -208,4 +221,10 @@ function main() {
 
 function finish(ttyFd) { if (ttyFd != null) { try { closeSync(ttyFd); } catch { /* ignore */ } } }
 
-main();
+// `main` became async when the nightly fork moved in: the v3 uninstaller is async
+// all the way down. An unhandled rejection here would exit 0 with no output, so the
+// failure is caught and reported like the installer's.
+main().catch((error) => {
+  say(`unexpected error: ${String(error)}`);
+  process.exitCode = 1;
+});
