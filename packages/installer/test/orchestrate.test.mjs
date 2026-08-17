@@ -327,3 +327,138 @@ test('a failed component on nightly hands back a NIGHTLY retry command', async (
   assert.deepEqual(summary.failed.map((f) => f.retry), ['npm i -g @ours.network/mcp@nightly'],
     'a stable retry command would walk the operator into the split-brain by hand');
 });
+
+// ------------------------------------------------- the config journal (L2) ---
+//
+// v3 could write a config file describing a daemon it then failed to bring up,
+// print one warning, and go on to say "install complete". The bytes and the daemon
+// they describe are ONE unit of work; these pin that they are treated as one.
+
+test('a daemon that fails to start does not leave a config naming its port', async () => {
+  // The failure state that decides this: the next run reads config.json FIRST
+  // (target.mjs findDaemon), probes the port nothing listens on, and has only the
+  // ours-cli-daemon.json lookup between it and creating a SECOND daemon on this
+  // state directory — two writers on one state_data.bin.
+  const e = fx({ runFails: ['daemon start'] });
+  await assert.rejects(() => runInstall([], e));
+  assert.deepEqual(e.recorder.restored.map(([p]) => p), [join(OURS, 'config.json')]);
+  assert.match(said(e), /did not reach the state its config describes/);
+  assert.match(said(e), /removed .*config\.json — this run created it and did not finish/);
+});
+
+test('an existing config is rolled back to its PREVIOUS bytes, not deleted', async () => {
+  const before = { port: 3050, stateDir: OURS, brokerUrl: 'wss://old.example', keepThis: true };
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: before },
+    net: { 3050: { ok: true, stateDir: OURS } },
+    runFails: ['install-service'],
+    env: { OURS_ASSUME_YES: '1' },
+  });
+  await assert.rejects(() => runInstall([], e));
+  const [path, snapshot] = e.recorder.restored[0];
+  assert.equal(path, join(OURS, 'config.json'));
+  assert.equal(snapshot.exists, true);
+  assert.equal(JSON.parse(snapshot.text).keepThis, true, 'the operator keys come back too');
+  assert.match(said(e), /rolled back .*config\.json to its previous contents/);
+});
+
+test('the rollback states what it could NOT undo', async () => {
+  const e = fx({ runFails: ['daemon start'] });
+  await assert.rejects(() => runInstall([], e));
+  assert.match(said(e), /completed package installs were not rolled back/,
+    'the CLI package install always ran by this point; saying so is the honest boundary');
+});
+
+test('a REFUSAL after the config write rolls it back too', async () => {
+  // An unknown unit file stops the run exactly as a failed start does, and it
+  // stops it with config.json already rewritten. Same rollback, same report.
+  const e = fx({ text: { [unitPath('ours.service')]: '[Unit]\nDescription=somebody elses thing\n' } });
+  const code = await runInstall([], e);
+  assert.equal(code, EXIT_REFUSED);
+  assert.deepEqual(e.recorder.restored.map(([p]) => p), [join(OURS, 'config.json')]);
+});
+
+test('a failed rollback is REPORTED, never swallowed and never thrown over the real error', async () => {
+  const e = fx({ runFails: ['daemon start'], restoreFails: [join(OURS, 'config.json')] });
+  // The original failure must be what propagates: losing it to a second error
+  // raised by the recovery would hide the thing that actually went wrong.
+  await assert.rejects(() => runInstall([], e), /ours exited 1/, 'the original failure survives');
+  assert.match(said(e), /could NOT roll back .*config\.json: permission denied/);
+});
+
+test('a --dry-run snapshots nothing, because it wrote nothing', async () => {
+  const e = fx({ runFails: ['daemon start'] });
+  const code = await runInstall(['--dry-run'], e);
+  assert.equal(code, EXIT_OK, 'a dry run never reaches a real failure');
+  assert.deepEqual(e.recorder.restored, []);
+  assert.ok(!said(e).includes('rolled back'), 'and says nothing about rolling back');
+});
+
+test('a connector whose service fails does not keep a config pointing at this daemon', async () => {
+  // The config names this daemon while the unit still carries the OLD environment,
+  // and the component phase would report one failed line and let the run finish.
+  const e = fx({
+    json: { [join(HOME, '.ours-telegram', 'config.json')]: { botToken: 'secret', daemonUrl: 'http://127.0.0.1:9999', daemonStateDir: '/elsewhere' } },
+    runFails: ['ours-tg-connector install-service'],
+    answers: [true],   // yes, repoint it — the case that writes the most dangerous bytes
+  });
+  const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
+    { answers: { tg: true }, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+    e,
+    { stateDir: OURS, port: 3050 },
+  );
+  assert.deepEqual(summary.failed.map((f) => f.key), ['tg']);
+  const [path, snapshot] = e.recorder.restored[0];
+  assert.equal(path, join(HOME, '.ours-telegram', 'config.json'));
+  assert.equal(JSON.parse(snapshot.text).daemonUrl, 'http://127.0.0.1:9999', 'back to the daemon it was on');
+  assert.equal(JSON.parse(snapshot.text).botToken, 'secret');
+});
+
+test('a component rollback NEVER touches the daemon that came up correctly', async () => {
+  // The whole reason the journal is scoped per unit of work rather than per run:
+  // nightly's run-wide journal, copied here, would undo the daemon's own config
+  // because a connector failed.
+  const e = fx({ runFails: ['ours-cowork install-service'], versions: { '@ours.network/cowork': '0.5.0' } });
+  await (await import('../lib/orchestrate.mjs')).runComponentPhase(
+    { answers: { cowork: true }, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+    e,
+    { stateDir: OURS, port: 3050 },
+  );
+  assert.deepEqual(
+    e.recorder.restored.map(([p]) => p),
+    [join(HOME, '.ours-cowork', 'config.json')],
+    'only cowork\'s own config — never the daemon config.json',
+  );
+  assert.match(said(e), /leaves cowork embedded as it was/);
+});
+
+test('a config that did not change is not snapshotted, so nothing is "rolled back"', async () => {
+  // Restoring a file this run never wrote would be a change dressed as a recovery.
+  const already = { daemon: { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir: OURS } };
+  const e = fx({
+    json: { [join(HOME, '.ours-cowork', 'config.json')]: already },
+    runFails: ['ours-cowork install-service'],
+    versions: { '@ours.network/cowork': '0.5.0' },
+  });
+  await (await import('../lib/orchestrate.mjs')).runComponentPhase(
+    { answers: { cowork: true }, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+    e,
+    { stateDir: OURS, port: 3050 },
+  );
+  assert.deepEqual(e.recorder.restored, [], 'the file was already correct and was never touched');
+});
+
+test('the replaced legacy unit is NAMED in the rollback, because it cannot be restored', async () => {
+  // Writing unit bytes back into ~/.config/systemd/user would break the invariant
+  // that systemd is reached only through `ours daemon install-service`, and without
+  // a daemon-reload it would not even mean anything. So it is reported, not fixed.
+  const e = fx({
+    text: { [unitPath('ours.service')]: LEGACY_UNIT },
+    runFails: ['install-service'],
+  });
+  await assert.rejects(() => runInstall([], e));
+  assert.match(said(e), /is NOT restored — the older ours-mcp unit is gone/);
+  assert.match(said(e), /state directory .* is untouched|state directory is untouched/);
+  assert.deepEqual(e.recorder.restored.map(([p]) => p), [join(OURS, 'config.json')],
+    'the config still goes back; only the unit does not');
+});

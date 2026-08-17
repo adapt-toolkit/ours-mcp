@@ -13,8 +13,8 @@ const OURS = resolve(HOME, '.ours');
 const TG_CFG = join(HOME, '.ours-telegram', 'config.json');
 const COWORK_CFG = join(HOME, '.ours-cowork', 'config.json');
 
-function fx({ json = {}, text = {}, env = {}, answers = [], typed = null, known = [OURS], isStateDir = true, present = () => false } = {}) {
-  const recorder = { ran: [], wrote: [], out: [], asked: [], removed: [], wroteText: [] };
+function fx({ json = {}, text = {}, env = {}, answers = [], typed = null, known = [OURS], isStateDir = true, present = () => false, runFails = [] } = {}) {
+  const recorder = { ran: [], wrote: [], out: [], asked: [], removed: [], wroteText: [], restored: [] };
   let i = 0;
   return {
     recorder,
@@ -22,7 +22,16 @@ function fx({ json = {}, text = {}, env = {}, answers = [], typed = null, known 
     env,
     readJson: (p) => (Object.prototype.hasOwnProperty.call(json, p) ? json[p] : null),
     writeJson: (p, body) => { recorder.wrote.push([p, body]); },
-    run: async (cmd, a) => { recorder.ran.push([cmd, ...a]); return { ok: true, code: 0, stdout: '' }; },
+    run: async (cmd, a) => {
+      recorder.ran.push([cmd, ...a]);
+      if (runFails.some((f) => [cmd, ...a].join(' ').includes(f))) throw new Error(`${cmd} exited 1`);
+      return { ok: true, code: 0, stdout: '' };
+    },
+    // The rollback seam, seeded from `json` exactly as readJson is, and RECORDED
+    // rather than performed — so a test proves the bytes went back without a
+    // filesystem.
+    snapshot: (p) => ({ exists: Object.prototype.hasOwnProperty.call(json, p), text: Object.prototype.hasOwnProperty.call(json, p) ? `${JSON.stringify(json[p], null, 2)}\n` : '', mode: 0o600 }),
+    restore: (p, snap) => { recorder.restored.push([p, snap]); },
     removeDir: async (p) => { recorder.removed.push(p); },
     removeFile: async (p) => { recorder.removed.push(p); },
     readText: (p) => (Object.prototype.hasOwnProperty.call(text, p) ? text[p] : null),
@@ -254,4 +263,69 @@ test('the corrupt-config refusal is not asked away, and beats even --purge', asy
   assert.equal(await runUninstall(['--state-dir', OURS, '--purge'], e), EXIT_REFUSED);
   assert.deepEqual(e.recorder.removed, [], 'the irreversible step is never reached');
   assert.deepEqual(e.recorder.asked, [], 'and the operator is not offered a way to consent past it');
+});
+
+// --------------------------------------- the detach journal (L2, site 4) -----
+
+test('a daemon that will not go away leaves its connectors attached, not detached', async () => {
+  // The bytes said "no longer attached to this daemon" and only the daemon's
+  // removal made that true. It did not happen, so they go back — AND the service is
+  // re-applied, because a config restored under a stopped service is a half
+  // rollback, and half-states are what this eliminates.
+  const e = fx({
+    json: {
+      [join(OURS, 'config.json')]: CFG,
+      [TG_CFG]: { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: OURS, botToken: 'secret' },
+    },
+    answers: [true],
+    runFails: ['daemon uninstall-service'],
+  });
+  await assert.rejects(() => runUninstall(['--state-dir', OURS], e), /ours exited 1/,
+    'the original failure is what propagates, never the recovery');
+  const [path, snapshot] = e.recorder.restored[0];
+  assert.equal(path, TG_CFG);
+  assert.equal(JSON.parse(snapshot.text).daemonUrl, 'http://127.0.0.1:3050', 'attached again');
+  assert.equal(JSON.parse(snapshot.text).botToken, 'secret');
+  assert.ok(
+    e.recorder.ran.some((c) => c.join(' ') === 'ours-tg-connector install-service'),
+    'and its service is put back up, as nightly does',
+  );
+  assert.match(said(e), /attached and running again/);
+});
+
+test('a re-apply that itself fails is reported and does not replace the real fault', async () => {
+  const e = fx({
+    json: {
+      [join(OURS, 'config.json')]: CFG,
+      [COWORK_CFG]: { stateDir: '/home/me/.ours-cowork', daemon: { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir: OURS } },
+    },
+    answers: [true],
+    runFails: ['daemon uninstall-service', 'ours-cowork install-service'],
+  });
+  await assert.rejects(() => runUninstall(['--state-dir', OURS], e), /ours exited 1/);
+  assert.deepEqual(e.recorder.restored.map(([p]) => p), [COWORK_CFG], 'the bytes still went back');
+  assert.match(said(e), /could NOT re-apply cowork's service/);
+  assert.match(said(e), /run 'ours-cowork install-service' yourself/);
+});
+
+test('nothing is rolled back when the daemon removal succeeds', async () => {
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG, [TG_CFG]: { daemonStateDir: OURS, botToken: 's' } },
+    answers: [true],
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
+  assert.deepEqual(e.recorder.restored, []);
+  assert.ok(!e.recorder.ran.some((c) => c.join(' ') === 'ours-tg-connector install-service'),
+    'and the connector is NOT put back up — it was meant to come down');
+});
+
+test('a dry-run detach journals nothing, because it wrote nothing', async () => {
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG, [TG_CFG]: { daemonStateDir: OURS } },
+    answers: [true],
+    runFails: ['daemon uninstall-service'],
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS, '--dry-run'], e), EXIT_OK);
+  assert.deepEqual(e.recorder.restored, []);
+  assert.deepEqual(e.recorder.ran, [], 'a dry run never reaches a real failure');
 });

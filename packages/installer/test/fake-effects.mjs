@@ -19,9 +19,9 @@ export const TG = resolve(HOME, '.ours-tg');
 export function fx({
   json = {}, text = {}, net = {}, taken = [], versions = {}, env = {}, answers = [],
   unitUnchanged = false, harnesses = [], lines = [], platform = 'linux', nodeVersion = '22.0.0',
-  runFails = [], voiceReady = false, interactiveOk = true,
+  runFails = [], voiceReady = false, interactiveOk = true, restoreFails = [],
 } = {}) {
-  const recorder = { ran: [], ranEnv: [], wrote: [], out: [], asked: [], askedLines: [], interactive: [] };
+  const recorder = { ran: [], ranEnv: [], wrote: [], out: [], asked: [], askedLines: [], interactive: [], restored: [] };
   let answerIndex = 0;
   let lineIndex = 0;
   const fails = (cmd) => runFails.some((f) => cmd.join(' ').includes(f));
@@ -43,6 +43,16 @@ export function fx({
     readJson: (p) => (Object.prototype.hasOwnProperty.call(json, p) ? json[p] : null),
     readText: (p) => (Object.prototype.hasOwnProperty.call(text, p) ? text[p] : null),
     writeJson: (p, body) => { recorder.wrote.push([p, body]); },
+    // The rollback seam. `snapshot` returns what the file looked like before the
+    // run — seeded from `json`, exactly as readJson is, so a test does not have to
+    // describe the same file twice — and `restore` is RECORDED rather than done,
+    // which is what lets a test assert that the bytes went back without a
+    // filesystem. `restoreFails` makes the failure path reachable.
+    snapshot: (p) => ({ exists: Object.prototype.hasOwnProperty.call(json, p), text: Object.prototype.hasOwnProperty.call(json, p) ? `${JSON.stringify(json[p], null, 2)}\n` : '', mode: 0o600 }),
+    restore: (p, snap) => {
+      if (restoreFails.includes(p)) throw new Error('permission denied');
+      recorder.restored.push([p, snap]);
+    },
     run: async (cmd, cmdArgs, opts = {}) => {
       const invocation = [cmd, ...cmdArgs];
       recorder.ran.push(invocation);
