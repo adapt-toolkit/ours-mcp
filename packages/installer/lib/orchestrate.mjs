@@ -34,7 +34,7 @@ import {
 import { planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3, restartHints } from './extras.mjs';
 import { summarizeRun } from './rerun.mjs';
 import { configJournal, reportRollback } from './journal.mjs';
-import { detectDaemons, planDaemonSelection, resolveSelection } from './detect.mjs';
+import { detectDaemons, planDaemonSelection, resolveSelection, legacyRegistryPath } from './detect.mjs';
 import { detectPlatform, resolveChannel, validateBroker } from './logic.mjs';
 import { daemonEnv } from './effects.mjs';
 import { USAGE } from './usage.mjs';
@@ -111,6 +111,14 @@ function pairFor(plan, target) {
  * not know a screen happened, which is what keeps the flags path byte-identical.
  */
 export async function runSelectionPhase(args, effects) {
+  // Said once, and only when the file is actually there: a file that looks live is
+  // worse than a file that says it is not. Never deleted — quietly removing
+  // something that describes an operator's daemons is not this installer's
+  // business.
+  const legacy = legacyRegistryPath(effects.home);
+  if (effects.exists(legacy)) {
+    effects.out(info(`${legacy} is left over from the older nightly installer and is no longer read — this run detects daemons directly. It is left alone; you can delete it.`));
+  }
   const detected = detectDaemons({
     candidates: effects.knownStateDirs(),
     exists: effects.exists,

@@ -585,3 +585,17 @@ test('picking "create a new one" targets the DERIVED directory, not the default'
   assert.match(said(e), /creating a new daemon at .*\.ours-2/);
   assert.ok(e.recorder.wrote.some(([p]) => p === join(HOME, '.ours-2', 'config.json')));
 });
+
+test('a left-over profile registry is NAMED as dead, and never deleted', async () => {
+  // Anyone who used the nightly installer has one, and after the switch nothing
+  // reads it. Deleting a file that describes someone's daemons is not an
+  // installer's business — but leaving it looking live is worse than saying it is
+  // not.
+  const registry = join(OURS, 'installer-profiles.json');
+  const e = fx({ json: { [join(OURS, 'config.json')]: { port: 3050 } } });
+  const withRegistry = { ...e, exists: (p) => p === registry };
+  await runInstall([], withRegistry);
+  assert.match(said(e), /installer-profiles\.json is left over .* no longer read/);
+  assert.match(said(e), /It is left alone/);
+  assert.deepEqual(e.recorder.removed ?? [], [], 'nothing deleted');
+});
