@@ -19,7 +19,7 @@
 
 import { join } from 'node:path';
 import { parseInstallArgs, InstallUsageError } from './target.mjs';
-import { planUninstall, planComponentDetach, planStatePurge, stripManagedBlock } from './uninstall.mjs';
+import { planUninstall, planComponentDetach, planStatePurge, stripManagedBlock, planHarnessSelection, selectHarnesses, planGlobalPackages } from './uninstall.mjs';
 import { tgConfigPath, coworkConfigPath } from './components.mjs';
 import { configJournal, reportRollback } from './journal.mjs';
 import { UNINSTALL_USAGE } from './usage.mjs';
@@ -156,16 +156,32 @@ export async function runUninstall(argv, effects) {
   }
 
   // 5. The harness plugins the installer wrote.
-  await runPluginPhase(plan.plugins, { args, effects });
+  const pluginOutcome = await runPluginPhase(plan.plugins, { args, effects });
 
   // 6. State. Last, because it is the only irreversible thing here.
   await runPurgePhase({ dir, purge, args, effects });
 
   // 7. Global packages, only when this was the last daemon.
-  if (plan.packages.action === 'keep') {
-    effects.out(info(`@ours.network/cli kept — ${plan.packages.reason}`));
+  //
+  // Recomputed from what the plugin phase ACTUALLY removed, not from what it
+  // found. A harness the operator kept keeps its launcher: removing the package
+  // out from under a plugin that is still registered is the same broken
+  // half-state, one layer down.
+  const packages = planGlobalPackages({
+    stateDir: dir,
+    otherStateDirsWithConfig: effects.knownStateDirs(),
+    pluginPackages: pluginOutcome.packages,
+    // The plugin packages are recomputed; the CONNECTOR packages are not. They
+    // are decided by what the operator confirmed detaching, which the plugin
+    // phase does not touch, so this repeats the plan's own answer rather than
+    // inventing a second one — and rather than dropping it, which would quietly
+    // undo the connector-package removal one line up the file.
+    detachedComponents: plan.detach.map((d) => d.key),
+  });
+  if (packages.action === 'keep') {
+    effects.out(info(`@ours.network/cli kept — ${packages.reason}`));
   } else {
-    for (const pkg of plan.packages.packages) {
+    for (const pkg of packages.packages) {
       await perform(effects, args.dryRun, `npm rm -g ${pkg}`, () => effects.run('npm', ['rm', '-g', pkg]));
     }
   }
@@ -224,24 +240,45 @@ export async function rollBackDetach(effects, journal, detached, args) {
  * harnesses still need these plugins — the same condition that keeps the global
  * packages, decided once.
  */
-export async function runPluginPhase(plugins, { args, effects }) {
+export async function runPluginPhase(plugins, { args, effects, selection = null }) {
   effects.out(heading('Harness plugins'));
-  for (const step of plugins.manual) {
-    // Never a dead end, and never a claim: Claude Code's plugin is not ours to
-    // remove, so the run says so and prints the two commands that do it.
-    effects.out(info(`${step.label} — ${step.reason}. Inside Claude Code, run:`));
-    for (const command of step.steps) effects.out(info(`  ${command}`));
-  }
   if (plugins.action === 'keep') {
+    for (const step of plugins.manual) announceManual(step, effects);
     effects.out(info(`harness plugins kept — ${plugins.reason}`));
-    return;
-  }
-  if (plugins.harnesses.length === 0) {
-    effects.out(info('no Hermes or Codex plugin files found — nothing of ours to remove'));
-    return;
+    return { removed: [], packages: [] };
   }
 
-  for (const harness of plugins.harnesses) {
+  // WHICH harnesses (item 9.5). Asked before the first block is stripped, so a
+  // "no" costs nothing and a "yes" is the operator's, not this file's.
+  const choice = planHarnessSelection(plugins, { selection, assumeYes: args.assumeYes });
+  let chosen = choice.chosen;
+  if (choice.mode === 'ask') {
+    chosen = [];
+    for (const harness of choice.offered) {
+      if (await effects.ask(`Remove the ${harness.label}?`, true)) chosen.push(harness.key);
+    }
+  }
+  for (const name of choice.ignored) {
+    effects.out(info(`${name} was named for removal but no ${name} plugin is installed here — nothing to do for it`));
+  }
+  if (choice.mode === 'keep') {
+    effects.out(info(`harness plugins kept — ${choice.reason}`));
+    effects.out(info(choice.hint));
+    return { removed: [], packages: [] };
+  }
+
+  const selected = selectHarnesses(plugins, chosen);
+  for (const step of selected.manual) announceManual(step, effects);
+  if (selected.harnesses.length === 0) {
+    effects.out(info(
+      chosen.length === 0
+        ? 'no harness plugin selected — none removed'
+        : 'no Hermes or Codex plugin files found — nothing of ours to remove',
+    ));
+    return { removed: chosen, packages: [] };
+  }
+
+  for (const harness of selected.harnesses) {
     for (const block of harness.blocks) {
       const before = effects.readText(block.path);
       if (before === null) continue;
@@ -265,6 +302,16 @@ export async function runPluginPhase(plugins, { args, effects }) {
       await perform(effects, args.dryRun, `remove ${file}`, () => effects.removeFile(file));
     }
   }
+  return { removed: chosen, packages: selected.packages };
+}
+
+/**
+ * Never a dead end, and never a claim: Claude Code's plugin is not ours to
+ * remove, so the run says so and prints the two commands that do it.
+ */
+function announceManual(step, effects) {
+  effects.out(info(`${step.label} — ${step.reason}. Inside Claude Code, run:`));
+  for (const command of step.steps) effects.out(info(`  ${command}`));
 }
 
 /**

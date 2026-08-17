@@ -10,6 +10,7 @@ import {
   planUninstall, NON_INTERACTIVE_ANSWERS, refusalSurvivesAssumeYes,
   stripManagedBlock, planPluginRemoval, YAML_BLOCK,
   inspectComponentConfig, unreadableComponentConfigs,
+  planHarnessSelection, selectHarnesses, HARNESS_ORDER,
 } from '../lib/uninstall.mjs';
 
 const HOME = '/home/me';
@@ -174,7 +175,7 @@ test('global packages are removed only when this was the last daemon', () => {
 
 test('assume-yes never turns a component on, never moves one, never deletes state', () => {
   assert.deepEqual(NON_INTERACTIVE_ANSWERS, {
-    daemon: true, mcp: true, tg: false, cowork: false, repointExistingConnector: false, purge: false,
+    daemon: true, mcp: true, tg: false, cowork: false, repointExistingConnector: false, plugins: false, purge: false,
   });
 });
 
@@ -365,4 +366,53 @@ test('a component pointing here that was NOT confirmed refuses before packages a
   });
   assert.equal(p.action, 'refuse');
   assert.deepEqual(p.components.map((c) => c.key), ['cowork']);
+});
+
+// ------------------------ item 9.5 — choosing which harnesses to detach ------
+
+test('a named selection removes exactly those harnesses, and their packages follow them', () => {
+  const found = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: true });
+  const choice = planHarnessSelection(found, { selection: ['codex'] });
+  assert.equal(choice.mode, 'explicit');
+  assert.deepEqual(choice.chosen, ['codex']);
+
+  const narrowed = selectHarnesses(found, choice.chosen);
+  assert.deepEqual(narrowed.harnesses.map((h) => h.key), ['codex']);
+  assert.deepEqual(narrowed.packages, ['@ours.network/codex'],
+    'the kept harness keeps its launcher — removing it would break a plugin that is still registered');
+  assert.deepEqual(narrowed.manual, [], 'Claude Code was not named, so its removal is not announced');
+});
+
+test('a harness named for removal that is not installed is REPORTED, not silently dropped', () => {
+  // exists() false everywhere: no Hermes or Codex files on this machine.
+  const found = planPluginRemoval({ home: HOME, exists: () => false, lastDaemon: true });
+  const choice = planHarnessSelection(found, { selection: ['hermes', 'claude-code'] });
+  assert.deepEqual(choice.chosen, ['claude-code']);
+  assert.deepEqual(choice.ignored, ['hermes']);
+});
+
+test('unattended with no selection keeps every plugin, and says how to select one', () => {
+  const found = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: true });
+  const choice = planHarnessSelection(found, { selection: null, assumeYes: true });
+  assert.equal(choice.mode, 'keep');
+  assert.deepEqual(choice.chosen, [], 'a run nobody is watching does not decide this on its own');
+  assert.match(choice.hint, /OURS_UNINSTALL=/);
+});
+
+test('a terminal with no selection is ASKED, one question per harness, in a stable order', () => {
+  const found = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: true });
+  const choice = planHarnessSelection(found, { selection: null, assumeYes: false });
+  assert.equal(choice.mode, 'ask');
+  assert.equal(choice.chosen, null, 'nothing is chosen until the operator answers');
+  assert.deepEqual(choice.offered.map((h) => h.key), HARNESS_ORDER);
+});
+
+test('an explicit selection outranks the another-daemon keep, which was a guess on the operator’s behalf', () => {
+  const guessed = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: false });
+  assert.equal(guessed.action, 'keep', 'unasked, a second daemon keeps the plugins');
+
+  const answered = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: false, explicitSelection: true });
+  assert.equal(answered.action, 'remove');
+  assert.deepEqual(answered.harnesses.map((h) => h.key).sort(), ['codex', 'hermes'],
+    'the operator named them, so the guess does not get to answer over them');
 });

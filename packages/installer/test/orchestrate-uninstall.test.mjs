@@ -41,7 +41,11 @@ function fx({ json = {}, text = {}, env = {}, answers = [], typed = null, known 
     // file exist", so a test can leave the plugin phase with nothing to do.
     exists: (p) => (String(p).includes('.hermes') || String(p).includes('.codex') || String(p).includes('skills') ? present(p) : isStateDir),
     out: (l) => recorder.out.push(String(l)),
-    ask: async (p) => { recorder.asked.push(p); return answers[i++] ?? false; },
+    // The real `ask` takes a DEFAULT, and questions in this file disagree about
+    // what it is — the component confirmation defaults to no, the per-harness
+    // plugin question to yes. A fake that hardcoded `false` would silently answer
+    // half of them the wrong way and pass anyway.
+    ask: async (p, def = false) => { recorder.asked.push(p); return answers[i] === undefined ? def : answers[i++]; },
     askLine: async (p) => { recorder.asked.push(p); return typed; },
   };
 }
@@ -328,4 +332,67 @@ test('a dry-run detach journals nothing, because it wrote nothing', async () => 
   assert.equal(await runUninstall(['--state-dir', OURS, '--dry-run'], e), EXIT_OK);
   assert.deepEqual(e.recorder.restored, []);
   assert.deepEqual(e.recorder.ran, [], 'a dry run never reaches a real failure');
+});
+
+// -------------------- item 9.5 — the operator chooses which harnesses go ------
+
+const CODEX_TOML = join(HOME, '.codex', 'config.toml');
+const HERMES_SKILL = join(HOME, '.hermes', 'skills', 'communication', 'ours');
+const CODEX_SKILL = join(HOME, '.agents', 'skills', 'ours');
+
+test('saying no to a harness leaves its files, its directories and its launcher alone', async () => {
+  // Both plugins are on disk. Answers are asked in canonical order —
+  // claude-code, codex, hermes — so this removes codex and keeps hermes.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    text: {
+      [HERMES_CFG]: `theirs\n${BLOCK.join('\n')}\n`,
+      [CODEX_TOML]: `theirs\n${BLOCK.join('\n')}\n`,
+    },
+    present: () => true,
+    answers: [false, true, false],
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
+
+  assert.deepEqual(e.recorder.wroteText.map(([p]) => p), [CODEX_TOML],
+    'only the harness that was said yes to had its config touched');
+  assert.ok(e.recorder.removed.includes(CODEX_SKILL));
+  assert.ok(!e.recorder.removed.some((p) => String(p).includes('.hermes')),
+    'nothing under the kept harness was deleted');
+  const npm = e.recorder.ran.filter((c) => c[0] === 'npm').map((c) => c[c.length - 1]);
+  assert.ok(npm.includes('@ours.network/codex'));
+  assert.ok(!npm.includes('@ours.network/hermes'),
+    'a kept plugin keeps its launcher — removing it would break a registration that is still there');
+});
+
+test('an unattended run removes no harness plugin unless one was named', async () => {
+  // The regression this closes: v3 removed every plugin artefact it found in a
+  // run with nobody watching, which leaving OURS_UNINSTALL unset used to prevent.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    text: { [HERMES_CFG]: `theirs\n${BLOCK.join('\n')}\n` },
+    present: () => true,
+    env: { OURS_ASSUME_YES: '1' },
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
+  assert.deepEqual(e.recorder.wroteText, [], 'no plugin config rewritten');
+  assert.deepEqual(e.recorder.removed, [], 'no skills directory deleted');
+  assert.deepEqual(e.recorder.asked, [], 'and nobody was asked, because there was nobody to ask');
+  const npm = e.recorder.ran.filter((c) => c[0] === 'npm').map((c) => c[c.length - 1]);
+  assert.deepEqual(npm, ['@ours.network/cli', '@ours.network/mcp'],
+    'the daemon still goes; only the harness plugins are left to the operator');
+});
+
+test('pressing Enter through the questions removes what v3 removes today', async () => {
+  // The per-harness question DEFAULTS TO YES: the daemon these plugins talk to is
+  // going away, so a plugin left behind advertises tools that no longer resolve.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    text: { [HERMES_CFG]: `theirs\n${BLOCK.join('\n')}\n` },
+    present: (p) => String(p).includes('.hermes'),
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
+  assert.equal(e.recorder.wroteText.length, 1);
+  assert.ok(e.recorder.removed.includes(HERMES_SKILL));
+  assert.ok(e.recorder.ran.some((c) => c.join(' ') === 'npm rm -g @ours.network/hermes'));
 });

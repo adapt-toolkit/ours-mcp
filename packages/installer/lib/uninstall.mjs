@@ -307,11 +307,26 @@ export function stripManagedBlock(text, markers) {
 }
 
 /**
+ * The three harnesses this uninstaller knows, in the order they are offered.
+ * Same names and same order as the nightly picker and as `canonHarnesses`, so a
+ * selection written for one is a selection for the other.
+ */
+export const HARNESS_ORDER = ['claude-code', 'codex', 'hermes'];
+
+/**
  * What the harness-plugin half of an uninstall removes.
  *
  * `lastDaemon` is the same condition planGlobalPackages decides on, passed in
  * rather than recomputed: while another daemon is still on this machine its
  * harnesses still need their plugins, so nothing here is touched at all.
+ *
+ * `explicitSelection` OVERRIDES that keep, and only that. The keep is a guess
+ * made on the operator's behalf — "another daemon is here, so you probably still
+ * want these". When the operator has named the harnesses themselves (the picker,
+ * or OURS_UNINSTALL), the guess has been answered and must not outrank the
+ * answer. Nothing else about the plan changes: WHICH of the discovered harnesses
+ * are then acted on is decided by the caller, not here, so this stays the single
+ * description of what exists on disk.
  *
  * Claude Code is deliberately manual-only. Its plugin lives in the in-app
  * marketplace, and there is no file on disk we own — so this prints the two
@@ -321,7 +336,7 @@ export function stripManagedBlock(text, markers) {
  * Every path is EXACT — the precise file or directory the plugin installer
  * writes. Nothing here is a glob, and nothing walks a tree looking for matches.
  */
-export function planPluginRemoval({ home, env = {}, exists = () => false, lastDaemon = true } = {}) {
+export function planPluginRemoval({ home, env = {}, exists = () => false, lastDaemon = true, explicitSelection = false } = {}) {
   const hermesDir = env.HERMES_DIR || join(home, '.hermes');
   const codexDir = env.CODEX_DIR || join(home, '.codex');
   const skillsDir = env.SKILLS_DIR || join(home, '.agents', 'skills');
@@ -333,7 +348,7 @@ export function planPluginRemoval({ home, env = {}, exists = () => false, lastDa
     reason: "its plugin lives in Claude Code's in-app marketplace, so nothing on disk is ours to remove",
     steps: ['/plugin uninstall ours', '/plugin marketplace remove adapt-toolkit/ours-claude-marketplace'],
   };
-  if (!lastDaemon) {
+  if (!lastDaemon && !explicitSelection) {
     return {
       action: 'keep',
       reason: 'another daemon on this machine still uses these plugins',
@@ -380,13 +395,88 @@ export function planPluginRemoval({ home, env = {}, exists = () => false, lastDa
 }
 
 /**
+ * §8 — WHICH harnesses to detach (inventory item 9.5).
+ *
+ * The nightly uninstaller let the operator choose: a `checkboxSelect` picker on a
+ * terminal, `OURS_UNINSTALL` without one, and NOTHING removed when it had
+ * neither. v3 had no choice at all — it removed every plugin artefact it found
+ * whenever this was the last daemon. A user who wanted to detach one harness had
+ * no way to say so, and an unattended run removed plugins that leaving
+ * `OURS_UNINSTALL` unset used to protect.
+ *
+ * This decides the three cases; the orchestrator only does the asking, so the
+ * rule and the terminal I/O stay apart.
+ *
+ *   explicit — a selection was given (OURS_UNINSTALL, or the answers to the
+ *              per-harness questions). Exactly those, intersected with what is
+ *              actually there. A name for a harness that is not installed is
+ *              reported as `ignored`, not silently dropped.
+ *   keep     — unattended with no selection. Nothing is removed, and the caller
+ *              says how to select. This is the conservative side: an uninstall
+ *              nobody is watching does not decide on its own that a harness
+ *              should lose its plugin.
+ *   ask      — a terminal and no selection. One question per harness, DEFAULTING
+ *              TO YES, because the daemon these plugins talk to is going away
+ *              and a plugin left behind advertises tools that no longer resolve.
+ *              An operator who just presses Enter gets exactly what v3 does
+ *              today; the only new thing is that they can now say no.
+ *
+ * A checkbox picker would match nightly's chrome more closely, but the effects
+ * contract this uninstaller runs on has `ask`, not `checkboxSelect` — and the
+ * question here is which harnesses, not which widget.
+ */
+export function planHarnessSelection(plugins, { selection = null, assumeYes = false } = {}) {
+  const offered = [...(plugins.manual ?? []), ...(plugins.harnesses ?? [])]
+    .map((h) => ({ key: h.key, label: h.label }))
+    .sort((a, b) => HARNESS_ORDER.indexOf(a.key) - HARNESS_ORDER.indexOf(b.key));
+  if (selection !== null) {
+    const keys = offered.map((o) => o.key);
+    return {
+      mode: 'explicit',
+      offered,
+      chosen: keys.filter((k) => selection.includes(k)),
+      ignored: selection.filter((k) => !keys.includes(k)),
+    };
+  }
+  if (assumeYes) {
+    return {
+      mode: 'keep',
+      offered,
+      chosen: [],
+      ignored: [],
+      reason: 'no OURS_UNINSTALL was set and there is nobody to ask',
+      hint: `set OURS_UNINSTALL="${HARNESS_ORDER.join(' ')}" (or a subset, or "all") to remove harness plugins unattended`,
+    };
+  }
+  return { mode: 'ask', offered, chosen: null, ignored: [] };
+}
+
+/**
+ * Narrow a plugin plan to the chosen harnesses. Pure, so the orchestrator never
+ * decides what "chosen" means to a plan — it only supplies the answers.
+ *
+ * `packages` follows the harnesses it narrows to: a plugin package belongs to
+ * the harness that was removed, so a harness that was kept keeps its package.
+ */
+export function selectHarnesses(plugins, chosen) {
+  const keep = (h) => chosen.includes(h.key);
+  const harnesses = (plugins.harnesses ?? []).filter(keep);
+  return {
+    ...plugins,
+    harnesses,
+    manual: (plugins.manual ?? []).filter(keep),
+    packages: harnesses.map((h) => h.pkg),
+  };
+}
+
+/**
  * The whole §8 order, refusing at step 1 rather than starting and stopping
  * half-way.
  */
-export function planUninstall({ home, env = {}, endpoint, stateDir, purge = false, assumeYes = false, confirmedComponents = [], readJson, readText, exists = () => true, cliStartedIt = true, otherStateDirsWithConfig = [], typedConfirmation = null }) {
+export function planUninstall({ home, env = {}, endpoint, stateDir, purge = false, assumeYes = false, confirmedComponents = [], readJson, readText, exists = () => true, cliStartedIt = true, otherStateDirsWithConfig = [], typedConfirmation = null, explicitHarnessSelection = false }) {
   const dir = resolve(stateDir);
   const lastDaemon = otherStateDirsWithConfig.map((d) => resolve(d)).filter((d) => d !== dir).length === 0;
-  const plugins = planPluginRemoval({ home, env, exists, lastDaemon });
+  const plugins = planPluginRemoval({ home, env, exists, lastDaemon, explicitSelection: explicitHarnessSelection });
 
   // BEFORE the pointing question, and not resolvable by confirming anything: a
   // component config that will not parse cannot be proven not to name this
@@ -442,11 +532,16 @@ export function planUninstall({ home, env = {}, endpoint, stateDir, purge = fals
 /**
  * What each question answers to under OURS_ASSUME_YES.
  *
- * The two `false` entries are the point of the table: assume-yes never turns a
- * component on that was off, never MOVES one that already exists, and never
- * deletes state. It suppresses questions; it does not consent on the operator's
- * behalf to anything irreversible or to anything that changes where an existing
- * component is pointing.
+ * The `false` entries are the point of the table: assume-yes never turns a
+ * component on that was off, never MOVES one that already exists, never removes
+ * a harness's plugin, and never deletes state. It suppresses questions; it does
+ * not consent on the operator's behalf to anything irreversible or to anything
+ * that changes where an existing component is pointing.
+ *
+ * `plugins: false` is the one that answers a question this uninstaller used to
+ * answer the other way. A harness plugin is not this daemon's to give away
+ * unasked, and the operator has a way to ask for it by name — OURS_UNINSTALL —
+ * which is precisely the interface an unattended run should have to go through.
  */
 export const NON_INTERACTIVE_ANSWERS = {
   daemon: true,
@@ -454,6 +549,7 @@ export const NON_INTERACTIVE_ANSWERS = {
   tg: false,
   cowork: false,
   repointExistingConnector: false,
+  plugins: false,
   purge: false,
 };
 
