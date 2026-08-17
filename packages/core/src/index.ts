@@ -810,6 +810,38 @@ async function enrollPendingChildren(root: Identity, cpCid: string): Promise<voi
   }
 }
 
+// FLEET-004. `resolve_contact` (core a2a_messaging.mm) ABORTS the whole
+// send_message transaction on the first send of any contact edge that does not
+// exist yet, and the daemon recovers by re-sending through the auto-connect
+// path below. Deciding whether an abort IS that case used to be a bare
+// `/Unknown contact/` substring test on the error text, which is wrong in one
+// specific way: send_message's FORCED monitoring copy fires
+// `send_encrypted_tx` at `monitoring_proxy`, so a send to a perfectly ordinary
+// contact can abort with `Unknown contact: <proxy_cid>` — a DIFFERENT ref. The
+// substring test cannot tell the two apart, so it would swallow a
+// monitoring-proxy fault and auto-connect the user's contact instead (core
+// warns about the sibling hazard at a2a_messaging.mm:862-864).
+//
+// So: extract every ref the abort names and only take the auto-connect path
+// when they all name the contact the caller actually asked for. `ref` is the
+// remainder of the line because a name may contain spaces ("Name@host").
+//
+// Exported for test/contact-miss-classify.test.mjs.
+export function classifyContactMiss(
+  errText: string,
+  requestedContact: string,
+): { miss: boolean; refs: string[] } {
+  if (!/Unknown contact/.test(errText)) return { miss: false, refs: [] };
+  const refs = [...errText.matchAll(/Unknown contact:[ \t]*([^\n\r]*)/g)]
+    .map((m) => m[1].trim())
+    .filter((r) => r !== '');
+  // "Unknown contact" with no parseable ref: keep the pre-FLEET-004 behaviour
+  // rather than turning a working first send into a hard failure.
+  if (refs.length === 0) return { miss: true, refs };
+  const want = requestedContact.trim();
+  return { miss: refs.every((r) => r === want), refs };
+}
+
 // Intra-root fallback of send_message (Ring 1): when both the sender and the
 // target belong to this host's hierarchy (the root or a delegated role),
 // connect via the sibling path — no book entry needed, no approval queue.
@@ -4610,7 +4642,15 @@ function createMcpServer(getSessionId: () => string): McpServer {
             return textResult(`Message sent to "${contact}" (wire_id ${v.wireId}).`);
         }
       } catch (e) {
-        if (!/Unknown contact/.test(String(e))) {
+        const { miss, refs } = classifyContactMiss(String(e), contact);
+        if (!miss) {
+          // FLEET-004: an unknown-contact abort naming something OTHER than the
+          // requested contact is a real fault (typically the forced monitoring
+          // copy at an unregistered proxy), not a first-send miss. Surface it
+          // instead of silently auto-connecting the wrong edge.
+          if (refs.length > 0) {
+            log(`[contact-miss] MISDIRECTED cid_or_name=${refs.join(',')} requested="${contact}" — not auto-connecting`);
+          }
           return textResult(`send_message failed: ${String(e)}`, true);
         }
         // Not a contact — intra-root siblings first (cert-based, works even for
@@ -4622,9 +4662,38 @@ function createMcpServer(getSessionId: () => string): McpServer {
           const sent = sibling
             ? await sendViaSibling(id!, sibling, text)
             : await sendViaLocalBook(id!, contact, text);
-          return textResult(sent);
+          // FLEET-004 known gap, tracked separately: connect_sibling /
+          // connect_local carry only $text, so the introduction-carried first
+          // message is deposited with wire_id "" and no reply pointer. Say so
+          // rather than reporting a plain success the caller cannot thread.
+          const caveat = reply_to
+            ? ' NOTE: this was a first send, so it rode the introduction — the reply pointer ' +
+              'could NOT be carried and the recipient sees it as a new message, not a reply.'
+            : '';
+          return textResult(`${sent}${caveat}`);
         } catch (e2) {
-          return textResult(`send_message failed: ${String(e2)}`, true);
+          // FLEET-004 severity case: resolution missed AND no auto-connect path
+          // applies (raw container id of a remote peer, an unpublished peer, or
+          // no registrar). Nothing was sent and nothing was queued — this is the
+          // abandoned send. Today it is only inferable from the ABSENCE of a
+          // later success in the journal; make it a first-class, greppable event.
+          log(
+            `[contact-miss] UNREACHABLE contact="${contact}" identity="${id!.name}" ` +
+            `sibling=no local_book=no — MESSAGE NOT SENT, NOT QUEUED: ${String(e2)}`,
+          );
+          appendNotifyLog(id!, {
+            event: 'send_unreachable',
+            contact,
+            reason: String(e2),
+          });
+          return textResult(
+            `NOT SENT to "${contact}": it is not a contact, it is not an intra-root sibling, ` +
+            `and it has no local contact-book entry, so there is no way to establish the ` +
+            `connection. The message was NOT sent and NOT queued — nothing will retry it, and ` +
+            `re-sending as-is will fail the same way. Use generate_invite/add_contact for a ` +
+            `remote peer, or list_local_contact_book to find a local one. (${String(e2)})`,
+            true,
+          );
         }
       }
     },
