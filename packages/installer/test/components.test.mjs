@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import {
   COMPONENTS, COWORK_DAEMON_FLOOR, TG_REGISTRY_FILES, TG_ROUTE_FILES, TG_STATE_DIR_NAME,
   tgConfigPath, coworkConfigPath, planComponentSelection, planMcpAttachment,
-  planTgAttachment, planCoworkAttachment, atLeastVersion, summarizeComponentRun,
+  planTgAttachment, planCoworkAttachment, atLeastVersion, summarizeComponentRun, componentSpec,
 } from '../lib/components.mjs';
 
 const HOME = '/home/me';
@@ -170,4 +170,58 @@ test('one component failing does not stop the others or undo the daemon', () => 
   assert.deepEqual(summary.failed, [{ key: 'tg', reason: 'npm exited 1', retry: 'npm i -g @ours.network/tg-connector' }]);
   assert.deepEqual(summary.skipped, ['cowork']);
   assert.equal(summary.continued, true, 'a failed component is never a reason to undo a successful one');
+});
+
+// ------------------------------------------------------------------- channel --
+//
+// THE DEFECT THESE PIN. `args.channel` was resolved in the orchestrator and then
+// reached only lib/extras.mjs's two planners, while these three packages were
+// installed by their bare names — so `CHANNEL=nightly` installed the NIGHTLY
+// Codex/Hermes plugins and NIGHTLY ours-fleet beside a STABLE MCP server. That is
+// the split-brain deployment the channel exists to prevent, and it is the same
+// class of bug the extras.mjs channel-map correction fixed for ours-fleet, one
+// package over. All three packages publish a real `nightly` dist-tag, verified
+// against the registry on 2026-08-17, so none of these pins can 404.
+
+test('every component install carries the nightly tag on the nightly channel', () => {
+  const mcp = planMcpAttachment({ stateDir: OURS, isDefaultStateDir: true, channel: 'nightly' });
+  const tg = planTgAttachment({ existing: null, endpoint: 'http://127.0.0.1:3050', stateDir: OURS, brokerUrl: 'wss://b', channel: 'nightly' });
+  const cowork = planCoworkAttachment({ existing: null, endpoint: 'http://127.0.0.1:3050', stateDir: OURS, installedVersion: '0.5.0', channel: 'nightly' });
+  assert.deepEqual(mcp.install, ['npm', 'i', '-g', '@ours.network/mcp@nightly']);
+  assert.deepEqual(tg.install, ['npm', 'i', '-g', '@ours.network/tg-connector@nightly']);
+  assert.deepEqual(cowork.install, ['npm', 'i', '-g', '@ours.network/cowork@nightly']);
+});
+
+test('the stable channel installs the bare name, byte for byte what shipped before', () => {
+  // `npm i -g pkg` and `npm i -g pkg@latest` are the same install, so the stable
+  // path is deliberately left alone: the nightly channel was the broken case and
+  // is the only one that changes.
+  const mcp = planMcpAttachment({ stateDir: OURS, isDefaultStateDir: true });
+  const tg = planTgAttachment({ existing: null, endpoint: 'http://127.0.0.1:3050', stateDir: OURS, brokerUrl: 'wss://b' });
+  const cowork = planCoworkAttachment({ existing: null, endpoint: 'http://127.0.0.1:3050', stateDir: OURS, installedVersion: '0.5.0' });
+  assert.deepEqual(mcp.install, ['npm', 'i', '-g', '@ours.network/mcp']);
+  assert.deepEqual(tg.install, ['npm', 'i', '-g', '@ours.network/tg-connector']);
+  assert.deepEqual(cowork.install, ['npm', 'i', '-g', '@ours.network/cowork']);
+  assert.deepEqual(
+    planMcpAttachment({ stateDir: OURS, isDefaultStateDir: true, channel: 'latest' }).install,
+    ['npm', 'i', '-g', '@ours.network/mcp'],
+    'an explicit latest is the same as none',
+  );
+});
+
+test("a component's `pkg` stays BARE, because that is what reads a version back", () => {
+  // Pinning the tag into `pkg` would make installedVersion('…/mcp@nightly')
+  // return null forever: `npm ls -g` knows nothing about the dist-tag something
+  // was installed from. That fails the cowork floor CLOSED and blanks the version
+  // column — a regression that reads as "cowork is too old".
+  for (const component of COMPONENTS) {
+    assert.ok(!component.pkg.includes('@', 1), `${component.key}: pkg must carry no dist-tag`);
+    assert.equal(componentSpec(component, 'nightly'), `${component.pkg}@nightly`);
+    assert.equal(componentSpec(component, 'latest'), component.pkg);
+  }
+});
+
+test('an unmapped channel falls back to latest rather than inventing a tag', () => {
+  const p = planMcpAttachment({ stateDir: OURS, isDefaultStateDir: true, channel: 'banana' });
+  assert.deepEqual(p.install, ['npm', 'i', '-g', '@ours.network/mcp'], 'never @banana — that would 404');
 });

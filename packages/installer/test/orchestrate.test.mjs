@@ -260,3 +260,70 @@ test('lib/effects.mjs never reaches for systemctl or a unit file', async () => {
     assert.ok(!beforeThePair.includes(key), `${key} must only be named by the pair constructor, not by ${'realEffects'}`);
   }
 });
+
+// ----------------------------------------------------------------- §5 channel --
+
+test('CHANNEL=nightly installs the NIGHTLY component packages, not stable ones beside nightly plugins', async () => {
+  // The whole point, asserted on the recorded invocation rather than on a screen
+  // line: a nightly run that installs a stable MCP server produces exactly the
+  // split-brain deployment the channel exists to prevent, and it looked like
+  // success because the plugins and ours-fleet WERE nightly.
+  const e = fx({ env: { OURS_CHANNEL: 'nightly', OURS_ASSUME_YES: '1' } });
+  await runInstall([], e);
+  const installs = e.recorder.ran.filter((c) => c.join(' ').startsWith('npm i -g')).map((c) => c[c.length - 1]);
+  assert.ok(installs.includes('@ours.network/mcp@nightly'), `mcp must be nightly, got: ${installs.join(', ')}`);
+  assert.ok(
+    !installs.includes('@ours.network/mcp'),
+    'and never the untagged name on a nightly run — that installs @latest',
+  );
+});
+
+test('a nightly run selecting the connector and cowork tags BOTH of them too', async () => {
+  const e = fx({
+    env: { OURS_CHANNEL: 'nightly' },
+    versions: { '@ours.network/cowork': '0.5.0' },
+  });
+  await (await import('../lib/orchestrate.mjs')).runComponentPhase(
+    { answers: { mcp: true, tg: true, cowork: true }, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'nightly' },
+    e,
+    { stateDir: OURS, port: 3050 },
+  );
+  const installs = e.recorder.ran.filter((c) => c.join(' ').startsWith('npm i -g')).map((c) => c[c.length - 1]);
+  assert.deepEqual(installs, [
+    '@ours.network/mcp@nightly',
+    '@ours.network/tg-connector@nightly',
+    '@ours.network/cowork@nightly',
+  ]);
+});
+
+test('the version column and the cowork floor still read the BARE package name', async () => {
+  // The trap in the fix rather than in the bug: keying the version lookup by the
+  // tagged spec returns null forever, which fails the cowork floor closed and
+  // reports "too old" for a build that is new enough.
+  const asked = [];
+  const base = fx({ env: { OURS_CHANNEL: 'nightly' }, versions: { '@ours.network/cowork': '0.5.0' } });
+  const e = { ...base, installedVersion: (pkg) => { asked.push(pkg); return base.installedVersion(pkg); } };
+  const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
+    { answers: { cowork: true }, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'nightly' },
+    e,
+    { stateDir: OURS, port: 3050 },
+  );
+  assert.deepEqual(asked, ['@ours.network/cowork'], 'no dist-tag in a version lookup');
+  assert.ok(summary.installed.includes('cowork'), 'so the floor passes and the block is written');
+});
+
+test('a failed component on nightly hands back a NIGHTLY retry command', async () => {
+  const e = fx({ env: { OURS_CHANNEL: 'nightly' } });
+  const failing = { ...e, run: async (cmd, a) => {
+    e.recorder.ran.push([cmd, ...a]);
+    if (a.some((x) => String(x).startsWith('@ours.network/mcp'))) throw new Error('npm exited 1');
+    return { ok: true };
+  } };
+  const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
+    { answers: { mcp: true }, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'nightly' },
+    failing,
+    { stateDir: OURS, port: 3050 },
+  );
+  assert.deepEqual(summary.failed.map((f) => f.retry), ['npm i -g @ours.network/mcp@nightly'],
+    'a stable retry command would walk the operator into the split-brain by hand');
+});

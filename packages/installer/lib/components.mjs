@@ -11,12 +11,54 @@
 // installed here.
 
 import { join, resolve } from 'node:path';
+import { pkgSpec, resolveChannel } from './logic.mjs';
 
+// `pkg` is the package's IDENTITY — bare, no dist-tag — because that is what
+// `npm ls -g --json <pkg>` needs to read an installed version back, and what a
+// component is keyed by in every summary. `specKey` is the same package's name
+// in lib/logic.mjs's channel map, and `componentSpec` below is the only thing
+// that turns the two into an `npm i -g` argument.
+//
+// THE TWO MUST STAY SEPARATE. Putting the tag in `pkg` would make
+// effects.installedVersion('@ours.network/mcp@nightly') return null forever,
+// which fails the cowork version floor CLOSED and blanks the version column —
+// a silent regression that looks like "cowork is too old".
 export const COMPONENTS = [
-  { key: 'mcp', label: 'MCP server', pkg: '@ours.network/mcp', default: true },
-  { key: 'tg', label: 'Telegram connector', pkg: '@ours.network/tg-connector', default: false },
-  { key: 'cowork', label: 'cowork', pkg: '@ours.network/cowork', default: false },
+  { key: 'mcp', label: 'MCP server', pkg: '@ours.network/mcp', specKey: 'mcp', default: true },
+  { key: 'tg', label: 'Telegram connector', pkg: '@ours.network/tg-connector', specKey: 'tg-connector', default: false },
+  { key: 'cowork', label: 'cowork', pkg: '@ours.network/cowork', specKey: 'cowork', default: false },
 ];
+
+/**
+ * The `npm i -g` argument for one component on one channel.
+ *
+ * WHY THIS EXISTS AT ALL. `args.channel` was resolved in the orchestrator and
+ * then reached only lib/extras.mjs's two planners, while these three packages
+ * were installed by their bare names. So `CHANNEL=nightly` installed the NIGHTLY
+ * Codex/Hermes plugins and NIGHTLY ours-fleet beside a STABLE MCP server — the
+ * split-brain deployment the channel exists to prevent, and the same class of
+ * bug the extras.mjs channel-map correction fixed for ours-fleet one package
+ * over. Every install path for these three now goes through here.
+ *
+ * All three publish a real `nightly` dist-tag (verified against the registry,
+ * 2026-08-17), so none of these pins can 404. `pkgSpec` falls back to `latest`
+ * for anything unmapped rather than inventing a tag, so an unknown component
+ * degrades to today's behaviour instead of failing.
+ *
+ * ON THE STABLE CHANNEL THIS RETURNS THE BARE NAME, byte for byte what shipped
+ * before. `npm i -g pkg` and `npm i -g pkg@latest` are the same install, so
+ * appending the tag would have bought nothing and changed every stable screen
+ * line and assertion. The nightly channel is the case that was broken; it is the
+ * only case that changes.
+ */
+export const componentByKey = (key) => COMPONENTS.find((c) => c.key === key);
+
+export function componentSpec(component, channel = 'latest') {
+  const key = typeof component === 'string' ? component : component?.specKey ?? component?.key;
+  const name = typeof component === 'string' ? null : component?.pkg ?? null;
+  if (resolveChannel(channel) === 'latest') return name ?? `@ours.network/${String(key).replace(/^@ours\.network\//, '')}`;
+  return pkgSpec(key, channel);
+}
 
 // cowork must be at least this build to understand an external-daemon block.
 export const COWORK_DAEMON_FLOOR = '0.4.1-nightly.20260816.4aaf940';
@@ -96,11 +138,11 @@ export function planComponentSelection({ answers = {}, installed = {}, assumeYes
  * defaulted" unreachable. Several harnesses can each point at a different daemon
  * precisely because the pair lives in each registration.
  */
-export function planMcpAttachment({ stateDir, isDefaultStateDir }) {
+export function planMcpAttachment({ stateDir, isDefaultStateDir, channel = 'latest' }) {
   const dir = resolve(stateDir);
   return {
     key: 'mcp',
-    install: ['npm', 'i', '-g', '@ours.network/mcp'],
+    install: ['npm', 'i', '-g', componentSpec(componentByKey('mcp'), channel)],
     service: null, // deliberate: per-session stdio proxy, never a unit
     harnessEnv: isDefaultStateDir ? {} : { OURS_CONFIG: join(dir, 'config.json') },
     writes: ['the harness MCP registration'],
@@ -127,7 +169,7 @@ export function planMcpAttachment({ stateDir, isDefaultStateDir }) {
  * case it is not recoverable by re-running: the operator's routes would be
  * talking to a daemon they did not choose.
  */
-export function planTgAttachment({ existing, endpoint, stateDir, brokerUrl, assumeYes = false }) {
+export function planTgAttachment({ existing, endpoint, stateDir, brokerUrl, assumeYes = false, channel = 'latest' }) {
   const dir = resolve(stateDir);
   const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
   const desired = { daemonUrl: endpoint, daemonStateDir: dir, brokerUrl };
@@ -148,7 +190,7 @@ export function planTgAttachment({ existing, endpoint, stateDir, brokerUrl, assu
   }
   const plan = {
     key: 'tg',
-    install: ['npm', 'i', '-g', '@ours.network/tg-connector'],
+    install: ['npm', 'i', '-g', componentSpec(componentByKey('tg'), channel)],
     changed: changes.length > 0,
     changes,
     config: merged,
@@ -206,7 +248,7 @@ export function atLeastVersion(actual, floor) {
  * alone; only `daemon.stateDir` is the ours daemon's. Confusing the two fails
  * closed at boot, which is why they are never touched in the same write.
  */
-export function planCoworkAttachment({ existing, endpoint, stateDir, installedVersion }) {
+export function planCoworkAttachment({ existing, endpoint, stateDir, installedVersion, channel = 'latest' }) {
   const dir = resolve(stateDir);
   if (!endpoint || !stateDir) {
     return { key: 'cowork', action: 'refuse', reason: 'half-formed-block', message: 'a cowork daemon block needs both an endpoint and a state directory; refusing to write half of one' };
@@ -230,7 +272,7 @@ export function planCoworkAttachment({ existing, endpoint, stateDir, installedVe
   return {
     key: 'cowork',
     action: unchanged ? 'unchanged' : 'attach',
-    install: ['npm', 'i', '-g', '@ours.network/cowork'],
+    install: ['npm', 'i', '-g', componentSpec(componentByKey('cowork'), channel)],
     changed: !unchanged,
     // The top-level stateDir is cowork's own; it is copied through untouched.
     config: { ...base, daemon },

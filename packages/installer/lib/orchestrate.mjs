@@ -29,7 +29,7 @@ import { planDaemonConfig, planServiceInstall, serviceInstallCommand } from './p
 import {
   COMPONENTS,
   planComponentSelection, planMcpAttachment, planTgAttachment, planCoworkAttachment,
-  tgConfigPath, coworkConfigPath, summarizeComponentRun,
+  tgConfigPath, coworkConfigPath, summarizeComponentRun, componentSpec,
 } from './components.mjs';
 import { planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3 } from './extras.mjs';
 import { summarizeRun } from './rerun.mjs';
@@ -242,7 +242,10 @@ export async function runComponentPhase(args, effects, target) {
       results.push(await attachComponent(component, { args, effects, dir, endpoint, isDefaultStateDir }));
     } catch (error) {
       // Reported with its reason and the exact manual command; the run continues.
-      const retry = `npm i -g ${component.pkg}`;
+      // The retry carries the CHANNEL — a nightly run that hands the operator a
+      // stable retry command sends them straight into the split-brain install
+      // this phase exists to avoid.
+      const retry = `npm i -g ${componentSpec(component, args.channel)}`;
       effects.out(warn(`${component.label} failed: ${error instanceof Error ? error.message : String(error)}`));
       effects.out(info(`retry manually: ${retry}`));
       results.push({ key: component.key, state: 'failed', reason: String(error?.message ?? error), retry });
@@ -253,8 +256,8 @@ export async function runComponentPhase(args, effects, target) {
 
 async function attachComponent(component, { args, effects, dir, endpoint, isDefaultStateDir }) {
   if (component.key === 'mcp') {
-    const plan = planMcpAttachment({ stateDir: dir, isDefaultStateDir });
-    await perform(effects, args.dryRun, `install ${component.pkg}`, () => effects.run(plan.install[0], plan.install.slice(1)));
+    const plan = planMcpAttachment({ stateDir: dir, isDefaultStateDir, channel: args.channel });
+    await perform(effects, args.dryRun, `install ${plan.install[3]}`, () => effects.run(plan.install[0], plan.install.slice(1)));
     if (Object.keys(plan.harnessEnv).length > 0) {
       effects.out(info(`harness registration carries OURS_CONFIG=${plan.harnessEnv.OURS_CONFIG}`));
     }
@@ -269,6 +272,7 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
       stateDir: dir,
       brokerUrl: args.brokerUrl,
       assumeYes: args.assumeYes,
+      channel: args.channel,
     });
     if (plan.action === 'skip-repoint') {
       effects.out(info('the Telegram connector points at another daemon; never repointed non-interactively'));
@@ -283,7 +287,7 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
         return { key: 'tg', state: 'skipped' };
       }
     }
-    await perform(effects, args.dryRun, `install ${component.pkg}`, () => effects.run(plan.install[0], plan.install.slice(1)));
+    await perform(effects, args.dryRun, `install ${plan.install[3]}`, () => effects.run(plan.install[0], plan.install.slice(1)));
     if (plan.changed) {
       // Written BEFORE the service: install-service bakes these values into the
       // unit as environment, and environment outranks the config file after.
@@ -296,14 +300,21 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
   }
 
   const path = coworkConfigPath(effects.home, effects.env);
-  await perform(effects, args.dryRun, `install ${component.pkg}`, () => effects.run('npm', ['i', '-g', component.pkg]));
+  // cowork is the ONE component installed before its plan exists, because the
+  // version floor applies to what is now on disk rather than what was requested
+  // — so the spec is built here rather than read off the plan. It still goes
+  // through componentSpec, so the channel reaches it like every other package.
+  const spec = componentSpec(component, args.channel);
+  await perform(effects, args.dryRun, `install ${spec}`, () => effects.run('npm', ['i', '-g', spec]));
   // The installed version is read AFTER installing, because the floor applies to
-  // what is now on disk rather than what was requested.
+  // what is now on disk rather than what was requested. Read by the BARE package
+  // name: `npm ls -g` knows nothing about the dist-tag it was installed from.
   const plan = planCoworkAttachment({
     existing: effects.readJson(path),
     endpoint,
     stateDir: dir,
     installedVersion: effects.installedVersion(component.pkg),
+    channel: args.channel,
   });
   if (plan.action === 'refuse' || plan.action === 'leave-embedded') {
     effects.out(warn(`cowork: ${plan.message}`));
