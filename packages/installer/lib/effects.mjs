@@ -12,7 +12,7 @@
 // unit file or the service manager directly.
 
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo, platform as osPlatform, release as osRelease } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { atomicWriteConfig } from './config.mjs';
@@ -202,6 +202,16 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
     // pattern and no parent: the caller passes ONE resolved directory that the
     // pure planner already gated four ways, and this deletes exactly that.
     removeDir: (path) => { rmSync(resolve(path), { recursive: true, force: true }); },
+    removeFile: (path) => { rmSync(resolve(path), { force: true }); },
+    // Rewrites a config file we do NOT own, so it keeps the file's own mode
+    // rather than imposing 0600: tightening the permissions of somebody else's
+    // ~/.codex/config.toml is a side effect nobody asked this to have.
+    writeText: (path, text) => {
+      const mode = (() => { try { return statSync(path).mode & 0o777; } catch { return 0o644; } })();
+      const temp = `${path}.tmp-${process.pid}`;
+      writeFileSync(temp, text, { encoding: 'utf8', mode });
+      renameSync(temp, path);
+    },
     username: () => { try { return userInfo().username || 'me'; } catch { return 'me'; } },
     detectHarnesses: () => [
       ...DRIVEN_HARNESSES.map((h) => detectDrivenHarness(h, env)),

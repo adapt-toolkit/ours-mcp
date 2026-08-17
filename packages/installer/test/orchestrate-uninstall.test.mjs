@@ -13,8 +13,8 @@ const OURS = resolve(HOME, '.ours');
 const TG_CFG = join(HOME, '.ours-telegram', 'config.json');
 const COWORK_CFG = join(HOME, '.ours-cowork', 'config.json');
 
-function fx({ json = {}, env = {}, answers = [], typed = null, known = [OURS], isStateDir = true } = {}) {
-  const recorder = { ran: [], wrote: [], out: [], asked: [], removed: [] };
+function fx({ json = {}, text = {}, env = {}, answers = [], typed = null, known = [OURS], isStateDir = true, present = () => false } = {}) {
+  const recorder = { ran: [], wrote: [], out: [], asked: [], removed: [], wroteText: [] };
   let i = 0;
   return {
     recorder,
@@ -24,8 +24,13 @@ function fx({ json = {}, env = {}, answers = [], typed = null, known = [OURS], i
     writeJson: (p, body) => { recorder.wrote.push([p, body]); },
     run: async (cmd, a) => { recorder.ran.push([cmd, ...a]); return { ok: true, code: 0, stdout: '' }; },
     removeDir: async (p) => { recorder.removed.push(p); },
+    removeFile: async (p) => { recorder.removed.push(p); },
+    readText: (p) => (Object.prototype.hasOwnProperty.call(text, p) ? text[p] : null),
+    writeText: (p, body) => { recorder.wroteText.push([p, body]); },
     knownStateDirs: () => known,
-    exists: () => isStateDir,
+    // `isStateDir` answers the purge gate; `present` answers "does this plugin
+    // file exist", so a test can leave the plugin phase with nothing to do.
+    exists: (p) => (String(p).includes('.hermes') || String(p).includes('.codex') || String(p).includes('skills') ? present(p) : isStateDir),
     out: (l) => recorder.out.push(String(l)),
     ask: async (p) => { recorder.asked.push(p); return answers[i++] ?? false; },
     askLine: async (p) => { recorder.asked.push(p); return typed; },
@@ -171,4 +176,53 @@ test('global packages go only when this was the last daemon', async () => {
   await runUninstall(['--state-dir', OURS], e);
   const removals = e.recorder.ran.filter((c) => c.includes('rm')).map((c) => c[c.length - 1]);
   assert.deepEqual(removals, ['@ours.network/cli', '@ours.network/mcp']);
+});
+
+// ------------------------------------------------- the harness plugin phase --
+
+const HERMES_CFG = join(HOME, '.hermes', 'config.yaml');
+const BLOCK = ['# >>> ours.network plugin (managed block)', 'mcpServers:', '# <<< ours.network plugin'];
+
+test('the plugin phase strips only our block, and keeps the file', async () => {
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    text: { [HERMES_CFG]: `theirs\n${BLOCK.join('\n')}\nalso theirs\n` },
+    present: (p) => String(p).includes('.hermes'),
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
+  const [path, body] = e.recorder.wroteText.find(([p]) => p === HERMES_CFG);
+  assert.equal(path, HERMES_CFG);
+  assert.equal(body, 'theirs\nalso theirs\n', 'the file is kept — only our span goes');
+  assert.ok(e.recorder.ran.some((c) => c.join(' ') === 'npm rm -g @ours.network/hermes'));
+});
+
+test('an unterminated block is reported and the file is never written', async () => {
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    text: { [HERMES_CFG]: '# >>> ours.network plugin (managed block)\nmcpServers:\ntheir own settings\n' },
+    present: (p) => String(p).includes('.hermes'),
+  });
+  await runUninstall(['--state-dir', OURS], e);
+  assert.deepEqual(e.recorder.wroteText, [], 'damage we cannot bound is damage we do not do');
+  assert.match(said(e), /no closing marker/);
+});
+
+test('a second daemon leaves every plugin file alone', async () => {
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    text: { [HERMES_CFG]: `theirs\n${BLOCK.join('\n')}\n` },
+    present: () => true,
+    known: [OURS, resolve(HOME, '.ours-tg')],
+  });
+  await runUninstall(['--state-dir', OURS], e);
+  assert.deepEqual(e.recorder.wroteText, []);
+  assert.deepEqual(e.recorder.removed, []);
+  assert.match(said(e), /harness plugins kept/);
+});
+
+test("Claude Code's own removal is always printed, even when nothing else is", async () => {
+  const e = fx({ json: { [join(OURS, 'config.json')]: CFG } });
+  await runUninstall(['--state-dir', OURS], e);
+  assert.match(said(e), /\/plugin uninstall ours/);
+  assert.match(said(e), /nothing on disk is ours to remove/);
 });

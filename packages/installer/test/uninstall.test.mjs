@@ -8,6 +8,7 @@ import {
   STATE_DIR_EVIDENCE, looksLikeStateDir, componentsPointingHere,
   planComponentDetach, planDaemonRemoval, planStatePurge, planGlobalPackages,
   planUninstall, NON_INTERACTIVE_ANSWERS, refusalSurvivesAssumeYes,
+  stripManagedBlock, planPluginRemoval, YAML_BLOCK,
 } from '../lib/uninstall.mjs';
 
 const HOME = '/home/me';
@@ -180,4 +181,62 @@ test('assume-yes suppresses questions, never a refusal', () => {
   const refusal = { action: 'refuse', reason: 'component-still-points-here' };
   assert.equal(refusalSurvivesAssumeYes(refusal).exitCode, 2);
   assert.equal(refusalSurvivesAssumeYes({ action: 'uninstall' }).exitCode, undefined);
+});
+
+// -------------------------------------------- the harness plugins we wrote ---
+
+test('a managed block is removed only when BOTH sentinels are found', () => {
+  const file = `keep me\n${YAML_BLOCK.start}\nours: stuff\n${YAML_BLOCK.end}\nkeep me too\n`;
+  const r = stripManagedBlock(file, YAML_BLOCK);
+  assert.equal(r.action, 'strip');
+  assert.equal(r.text, 'keep me\nkeep me too\n');
+});
+
+test('a file with no ours block is left completely alone', () => {
+  const r = stripManagedBlock('somebody else’s config\n', YAML_BLOCK);
+  assert.equal(r.action, 'absent');
+});
+
+test('an UNTERMINATED ours block is refused, not truncated to end of file', () => {
+  // v2 deleted to EOF here, which takes everything the user wrote after our
+  // block with it. Damage we cannot bound is damage we do not do.
+  const file = `keep me\n${YAML_BLOCK.start}\nours: stuff\ntheir own settings\n`;
+  const r = stripManagedBlock(file, YAML_BLOCK);
+  assert.equal(r.action, 'refuse');
+  assert.match(r.reason, /no closing marker/);
+});
+
+test('plugin removal is skipped entirely while another daemon still needs the plugins', () => {
+  const plan = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: false });
+  assert.equal(plan.action, 'keep');
+  assert.deepEqual(plan.harnesses, []);
+  assert.deepEqual(plan.packages, []);
+  assert.equal(plan.manual.length, 1, 'Claude Code is still told how to remove its own plugin');
+});
+
+test('plugin removal names exact paths, never a glob or a parent', () => {
+  const plan = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: true });
+  const all = plan.harnesses.flatMap((h) => [...h.dirs, ...h.files, ...h.blocks.map((b) => b.path)]);
+  assert.ok(all.length > 0);
+  for (const p of all) {
+    assert.ok(!p.includes('*'), `never a glob: ${p}`);
+    assert.ok(p.startsWith(HOME) && p !== HOME, `never the home directory itself: ${p}`);
+  }
+  assert.deepEqual(plan.packages.sort(), ['@ours.network/codex', '@ours.network/hermes']);
+});
+
+test('Claude Code is manual-only, and the run says so rather than pretending', () => {
+  const plan = planPluginRemoval({ home: HOME, exists: () => false, lastDaemon: true });
+  assert.deepEqual(plan.harnesses, [], 'nothing on disk, nothing removed');
+  assert.equal(plan.manual[0].key, 'claude-code');
+  assert.deepEqual(plan.manual[0].steps, ['/plugin uninstall ours', '/plugin marketplace remove adapt-toolkit/ours-claude-marketplace']);
+});
+
+test('the plugin packages follow the SAME rule as the daemon packages, not a second one', () => {
+  const kept = planGlobalPackages({ stateDir: OURS, otherStateDirsWithConfig: [TG], pluginPackages: ['@ours.network/hermes'] });
+  assert.equal(kept.action, 'keep');
+  assert.deepEqual(kept.packages, [], 'one condition decides all of them');
+
+  const removed = planGlobalPackages({ stateDir: OURS, otherStateDirsWithConfig: [], pluginPackages: ['@ours.network/hermes'] });
+  assert.deepEqual(removed.packages, ['@ours.network/cli', '@ours.network/mcp', '@ours.network/hermes']);
 });

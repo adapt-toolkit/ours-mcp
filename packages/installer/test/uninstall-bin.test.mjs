@@ -177,3 +177,107 @@ test('uninstall.sh ships every module the v3 bin imports', async () => {
   for (const f of needed) assert.ok(sh.includes(f), `uninstall.sh must fetch ${f}`);
   assert.match(sh, /node "\$MJS" "\$@"/, 'and it must pass --state-dir/--purge through');
 });
+
+// ------------------------------- the harness plugins the installer wrote -----
+
+const YAML_START = '# >>> ours.network plugin (managed block)';
+const YAML_END = '# <<< ours.network plugin';
+const MD_START = '<!-- >>> ours.network plugin (managed block) -->';
+const MD_END = '<!-- <<< ours.network plugin -->';
+
+/** A temp home carrying exactly what the plugin installers write. */
+function withPlugins(h, { unterminated = false } = {}) {
+  const hermes = join(h.tmp, '.hermes');
+  const codex = join(h.tmp, '.codex');
+  const skills = join(h.tmp, '.agents', 'skills');
+  mkdirSync(join(hermes, 'skills', 'communication', 'ours'), { recursive: true });
+  mkdirSync(join(hermes, 'skills', 'communication', 'writing-agent-bios'), { recursive: true });
+  mkdirSync(join(skills, 'ours'), { recursive: true });
+  mkdirSync(codex, { recursive: true });
+  writeFileSync(join(hermes, 'skills', 'communication', 'ours', 'SKILL.md'), 'ours\n');
+  writeFileSync(join(hermes, 'ours-connector.env'), 'OURS_PORT=3050\n');
+  writeFileSync(join(hermes, 'config.yaml'),
+    `mine: keep\n${YAML_START}\nmcpServers:\n  ours: {}\n${unterminated ? '' : `${YAML_END}\n`}also-mine: keep\n`);
+  writeFileSync(join(codex, 'config.toml'), `mine = "keep"\n${YAML_START}\nours = 1\n${YAML_END}\nalso = "keep"\n`);
+  writeFileSync(join(codex, 'AGENTS.md'), `# mine\n${MD_START}\nours\n${MD_END}\n# also mine\n`);
+  return { hermes, codex, skills };
+}
+
+test('the last daemon takes the harness plugins with it — blocks, skills and launchers', async () => {
+  const h = host();
+  const p = withPlugins(h);
+  const { out, code } = await runBin(['--state-dir', h.dir()], h.env);
+  assert.equal(code, 0);
+
+  // Only OUR span is gone; everything the user wrote around it survives.
+  const hermesConfig = readFileSync(join(p.hermes, 'config.yaml'), 'utf8');
+  assert.equal(hermesConfig, 'mine: keep\nalso-mine: keep\n');
+  assert.equal(readFileSync(join(p.codex, 'config.toml'), 'utf8'), 'mine = "keep"\nalso = "keep"\n');
+  assert.equal(readFileSync(join(p.codex, 'AGENTS.md'), 'utf8'), '# mine\n# also mine\n');
+
+  assert.equal(existsSync(join(p.hermes, 'skills', 'communication', 'ours')), false);
+  assert.equal(existsSync(join(p.skills, 'ours')), false);
+  assert.equal(existsSync(join(p.hermes, 'ours-connector.env')), false);
+  // The directories the plugins live IN are not ours and stay.
+  assert.equal(existsSync(p.hermes), true);
+  assert.equal(existsSync(p.codex), true);
+
+  assert.match(h.calls(), /npm rm -g @ours\.network\/hermes/);
+  assert.match(h.calls(), /npm rm -g @ours\.network\/codex/);
+  assert.match(out, /\/plugin uninstall ours/, "Claude Code's own removal is printed, never faked");
+  rmSync(h.tmp, { recursive: true, force: true });
+});
+
+test('an UNTERMINATED ours block is reported and the file is left exactly as it was', async () => {
+  const h = host();
+  const p = withPlugins(h, { unterminated: true });
+  const before = readFileSync(join(p.hermes, 'config.yaml'), 'utf8');
+  const { out, code } = await runBin(['--state-dir', h.dir()], h.env);
+  assert.equal(code, 0);
+  assert.equal(readFileSync(join(p.hermes, 'config.yaml'), 'utf8'), before,
+    'a block we cannot bound is never truncated to end-of-file');
+  assert.match(out, /no closing marker/);
+  assert.match(out, /Remove it by hand/);
+  rmSync(h.tmp, { recursive: true, force: true });
+});
+
+test('a config with no ours block is never edited', async () => {
+  const h = host();
+  const hermes = join(h.tmp, '.hermes');
+  mkdirSync(hermes, { recursive: true });
+  const theirs = 'entirely their own config\n';
+  writeFileSync(join(hermes, 'config.yaml'), theirs);
+  const { out, code } = await runBin(['--state-dir', h.dir()], h.env);
+  assert.equal(code, 0);
+  assert.equal(readFileSync(join(hermes, 'config.yaml'), 'utf8'), theirs);
+  assert.match(out, /carries no ours block — left untouched/);
+  rmSync(h.tmp, { recursive: true, force: true });
+});
+
+test('a SECOND daemon keeps the harness plugins as well as the packages', async () => {
+  // One condition, not two: while another daemon is here, its harnesses still
+  // need these plugins, so nothing of theirs is touched either.
+  const h = host({ stateDirs: ['.ours', '.ours-tg'] });
+  const p = withPlugins(h);
+  const before = readFileSync(join(p.hermes, 'config.yaml'), 'utf8');
+  const { out, code } = await runBin(['--state-dir', h.dir('.ours')], h.env);
+  assert.equal(code, 0);
+  assert.equal(readFileSync(join(p.hermes, 'config.yaml'), 'utf8'), before);
+  assert.equal(existsSync(join(p.skills, 'ours')), true);
+  assert.doesNotMatch(h.calls(), /npm rm -g/);
+  assert.match(out, /harness plugins kept/);
+  rmSync(h.tmp, { recursive: true, force: true });
+});
+
+test('--dry-run touches no plugin file either', async () => {
+  const h = host();
+  const p = withPlugins(h);
+  const before = readFileSync(join(p.codex, 'AGENTS.md'), 'utf8');
+  const { out, code } = await runBin(['--state-dir', h.dir(), '--dry-run'], h.env);
+  assert.equal(code, 0);
+  assert.equal(readFileSync(join(p.codex, 'AGENTS.md'), 'utf8'), before);
+  assert.equal(existsSync(join(p.skills, 'ours')), true);
+  assert.equal(h.calls(), '');
+  assert.match(out, /\[dry-run\] would: remove the ours managed block from/);
+  rmSync(h.tmp, { recursive: true, force: true });
+});

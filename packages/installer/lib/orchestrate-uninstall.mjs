@@ -19,7 +19,7 @@
 
 import { join } from 'node:path';
 import { parseInstallArgs, InstallUsageError } from './target.mjs';
-import { planUninstall, planComponentDetach, planStatePurge } from './uninstall.mjs';
+import { planUninstall, planComponentDetach, planStatePurge, stripManagedBlock } from './uninstall.mjs';
 import { tgConfigPath, coworkConfigPath } from './components.mjs';
 import { UNINSTALL_USAGE } from './usage.mjs';
 import { ok, info, warn, heading } from './ui.mjs';
@@ -127,10 +127,13 @@ export async function runUninstall(argv, effects) {
     await perform(effects, args.dryRun, step.command.join(' '), () => effects.run(step.command[0], step.command.slice(1)));
   }
 
-  // 5. State. Last, because it is the only irreversible thing here.
+  // 5. The harness plugins the installer wrote.
+  await runPluginPhase(plan.plugins, { args, effects });
+
+  // 6. State. Last, because it is the only irreversible thing here.
   await runPurgePhase({ dir, purge, args, effects });
 
-  // 6. Global packages, only when this was the last daemon.
+  // 7. Global packages, only when this was the last daemon.
   if (plan.packages.action === 'keep') {
     effects.out(info(`@ours.network/cli kept — ${plan.packages.reason}`));
   } else {
@@ -139,6 +142,65 @@ export async function runUninstall(argv, effects) {
     }
   }
   return EXIT_OK;
+}
+
+/**
+ * The harness plugins: the managed config blocks, the ours skills directories,
+ * and the plugin launchers on npm.
+ *
+ * Without this, a v3 uninstall is a capability REGRESSION against the v2 one —
+ * it would remove the daemon and leave every harness still advertising ours
+ * tools that no longer resolve.
+ *
+ * Two rules, both inherited rather than invented. A config file is edited only
+ * when both our sentinels are found, and an unterminated block is REPORTED and
+ * left alone rather than truncated to end-of-file (which is what v2 did, and it
+ * would take everything the user wrote after our block with it). And the whole
+ * phase is skipped while another daemon is still on this machine, because its
+ * harnesses still need these plugins — the same condition that keeps the global
+ * packages, decided once.
+ */
+export async function runPluginPhase(plugins, { args, effects }) {
+  effects.out(heading('Harness plugins'));
+  for (const step of plugins.manual) {
+    // Never a dead end, and never a claim: Claude Code's plugin is not ours to
+    // remove, so the run says so and prints the two commands that do it.
+    effects.out(info(`${step.label} — ${step.reason}. Inside Claude Code, run:`));
+    for (const command of step.steps) effects.out(info(`  ${command}`));
+  }
+  if (plugins.action === 'keep') {
+    effects.out(info(`harness plugins kept — ${plugins.reason}`));
+    return;
+  }
+  if (plugins.harnesses.length === 0) {
+    effects.out(info('no Hermes or Codex plugin files found — nothing of ours to remove'));
+    return;
+  }
+
+  for (const harness of plugins.harnesses) {
+    for (const block of harness.blocks) {
+      const before = effects.readText(block.path);
+      if (before === null) continue;
+      const stripped = stripManagedBlock(before, block.markers);
+      if (stripped.action === 'absent') {
+        effects.out(info(`${block.path} carries no ours block — left untouched`));
+        continue;
+      }
+      if (stripped.action === 'refuse') {
+        effects.out(warn(`${block.path}: ${stripped.reason}. Remove it by hand.`));
+        continue;
+      }
+      await perform(effects, args.dryRun, `remove the ours managed block from ${block.path} (file kept)`, () => effects.writeText(block.path, stripped.text));
+    }
+    for (const dir of harness.dirs) {
+      if (!effects.exists(dir)) continue;
+      await perform(effects, args.dryRun, `remove ${dir}`, () => effects.removeDir(dir));
+    }
+    for (const file of harness.files) {
+      if (!effects.exists(file)) continue;
+      await perform(effects, args.dryRun, `remove ${file}`, () => effects.removeFile(file));
+    }
+  }
 }
 
 /**

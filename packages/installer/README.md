@@ -99,6 +99,15 @@ itself: never a default, never non-interactive, refused for a directory with no 
 markers at all, and it asks you to **type the full path** — those identity keys exist nowhere
 else and no peer can give them back.
 
+When it is the last daemon on the machine it also removes the harness plugins the installer
+wrote: the ours **managed block** from `~/.hermes/config.yaml`, `~/.codex/config.toml` and
+`~/.codex/AGENTS.md`, the ours **skills directories**, and the plugin launchers on npm. It edits a
+config file only when it finds **both** of our sentinels — a block with no closing marker is
+reported and left alone rather than truncated to end of file — and every path it removes is exact,
+never a glob. Claude Code's plugin lives in its in-app marketplace, so the run prints
+`/plugin uninstall ours` and claims nothing. While a second daemon is still present none of this
+happens: its harnesses still need those plugins.
+
 ## Non-interactive / CI / safe dry-run
 
 ```sh
