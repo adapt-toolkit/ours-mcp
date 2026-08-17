@@ -316,3 +316,53 @@ test('a JSON array or scalar in a component config is corrupt, not a config', ()
 test('without a text reader the unreadable check reports nothing rather than guessing', () => {
   assert.deepEqual(unreadableComponentConfigs({ home: HOME }), []);
 });
+
+// -------------------------- the connector packages (10.5) --------------------
+
+test("a confirmed connector's global package goes with it, when this was the last daemon", () => {
+  const p = planGlobalPackages({ stateDir: OURS, otherStateDirsWithConfig: [], detachedComponents: ['tg'] });
+  assert.deepEqual(p.packages, ['@ours.network/cli', '@ours.network/mcp', '@ours.network/tg-connector']);
+});
+
+test('a connector detached while ANOTHER daemon survives keeps its package', () => {
+  // That daemon may still be using it. One condition decides every package here,
+  // not a second rule for connectors.
+  const p = planGlobalPackages({ stateDir: OURS, otherStateDirsWithConfig: [TG], detachedComponents: ['tg', 'cowork'] });
+  assert.equal(p.action, 'keep');
+  assert.deepEqual(p.packages, []);
+});
+
+test('a connector that was never confirmed keeps its package even on the last daemon', () => {
+  const p = planGlobalPackages({ stateDir: OURS, otherStateDirsWithConfig: [], detachedComponents: [] });
+  assert.deepEqual(p.packages, ['@ours.network/cli', '@ours.network/mcp']);
+});
+
+test('confirmed connectors reach the package list through the whole plan', () => {
+  const readJson = files({
+    [TG_CFG]: { daemonStateDir: OURS },
+    [COWORK_CFG]: { daemon: { endpoint: 'http://127.0.0.1:3050', stateDir: OURS } },
+  });
+  const p = planUninstall({
+    home: HOME, endpoint: 'http://127.0.0.1:3050', stateDir: OURS, readJson,
+    confirmedComponents: ['tg', 'cowork'], otherStateDirsWithConfig: [], exists: isStateDir,
+  });
+  assert.equal(p.action, 'uninstall');
+  assert.ok(p.packages.packages.includes('@ours.network/tg-connector'));
+  assert.ok(p.packages.packages.includes('@ours.network/cowork'));
+});
+
+test('a component pointing here that was NOT confirmed refuses before packages are considered', () => {
+  // Which is why "confirmed but only pointing" is unreachable through the whole
+  // plan: step 1 stops the run first. The discrimination is still pinned directly
+  // on planGlobalPackages above, where it is reachable.
+  const readJson = files({
+    [TG_CFG]: { daemonStateDir: OURS },
+    [COWORK_CFG]: { daemon: { endpoint: 'http://127.0.0.1:3050', stateDir: OURS } },
+  });
+  const p = planUninstall({
+    home: HOME, endpoint: 'http://127.0.0.1:3050', stateDir: OURS, readJson,
+    confirmedComponents: ['tg'], otherStateDirsWithConfig: [], exists: isStateDir,
+  });
+  assert.equal(p.action, 'refuse');
+  assert.deepEqual(p.components.map((c) => c.key), ['cowork']);
+});
