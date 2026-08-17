@@ -36,14 +36,34 @@ export function planConfigInstall(text) {
 
 // Render the managed YAML block: just the ours MCP server, pointing at the globally-installed
 // ours-mcp proxy. No webhook/route/secret — reactivity is in-session `ours-mcp watch`.
-export function renderConfigBlock() {
+//
+// `oursConfig` names ONE daemon's config.json, and it is the only reason this
+// function takes an argument. A daemon is identified by its state directory, and
+// `ours-mcp proxy` falls back to ~/.ours when nothing says otherwise — so a
+// Hermes installed for a non-default state directory would silently attach to
+// the DEFAULT daemon while the operator was told a different one was chosen.
+// Emitting it here is what makes the endpoint and the state directory travel
+// together, and Hermes is the only one of the three harnesses where that is
+// possible: Claude Code's marketplace plugin is command+args with no env key,
+// and Codex's env_vars is an allowlist of names rather than a value map. This
+// writer is ours, so this one can be real.
+//
+// Omitted (the default state directory, and every install before this change) →
+// the block is unchanged, byte for byte.
+export function renderConfigBlock({ oursConfig = null } = {}) {
+  const cfg = typeof oursConfig === 'string' ? oursConfig.trim() : '';
+  const env = cfg
+    ? `    env:
+      OURS_CONFIG: ${JSON.stringify(cfg)}
+`
+    : '';
   return `${SENTINEL}
 # Added by @ours.network/hermes install.sh. Remove this whole block to uninstall.
 mcp_servers:
   ours:
     command: "ours-mcp"
     args: ["proxy"]
-    enabled: true
+${env}    enabled: true
 ${SENTINEL_END}
 `;
 }
@@ -51,7 +71,10 @@ ${SENTINEL_END}
 function main() {
   const cfgPath = process.env.HERMES_CONFIG || join(homedir(), '.hermes', 'config.yaml');
   const existing = existsSync(cfgPath) ? readFileSync(cfgPath, 'utf8') : '';
-  const block = renderConfigBlock();
+  // Taken from THIS process's environment rather than a flag: the installer
+  // hands the daemon pair to the invocation it spawns, so the value is already
+  // here, and a flag would be a second way to say the same thing.
+  const block = renderConfigBlock({ oursConfig: process.env.OURS_CONFIG ?? null });
   const plan = planConfigInstall(existing);
 
   if (plan.action === 'noop') {

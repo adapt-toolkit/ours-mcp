@@ -37,7 +37,6 @@ test('the default state directory changes NOTHING about a harness install', () =
     assert.deepEqual(p.env, {});
     assert.equal(p.envLine, null);
     assert.equal(p.claimsPair, true);
-    assert.equal(p.requiresHermesEnvWriter, false);
   }
 });
 
@@ -62,14 +61,14 @@ test('a non-default state directory: Hermes carries the pair, Claude and Codex o
   }
 });
 
-test("Hermes' applied pair is pinned to the writer that has to exist for it", () => {
-  // The ruling makes Hermes real by adding an `env:` block to renderConfigBlock,
-  // which is a packages/hermes change and NOT in this PR. If that never lands,
-  // 'applied' is a lie — so the requirement is data, not a comment.
-  const nonDefault = by(planHarnessPlugins({ harnesses: all(), stateDir: TG, isDefaultStateDir: false }), 'hermes');
-  assert.equal(nonDefault.requiresHermesEnvWriter, true);
-  const dflt = by(planHarnessPlugins({ harnesses: all(), stateDir: OURS, isDefaultStateDir: true }), 'hermes');
-  assert.equal(dflt.requiresHermesEnvWriter, false, 'the default path needs no new writer');
+test("Hermes' pair reaches the invocation that writes ~/.hermes/config.yaml", () => {
+  // 'applied' is only honest if something carries the value to the writer. The
+  // writer's own half is pinned in packages/hermes; this is the installer's
+  // half — the env is on the plan, attached to the ours-hermes-install step.
+  const hermes = by(planHarnessPlugins({ harnesses: all(), stateDir: TG, isDefaultStateDir: false }), 'hermes');
+  assert.equal(hermes.envSupport, 'applied');
+  assert.deepEqual(hermes.env, { OURS_CONFIG: TG_CFG });
+  assert.ok(hermes.steps.some((s) => s[0] === 'ours-hermes-install'), 'and there is an invocation to carry it');
   assert.equal(HARNESS_ENV_SUPPORT['claude-code'], 'printed');
   assert.equal(HARNESS_ENV_SUPPORT.codex, 'printed');
 });

@@ -47,16 +47,17 @@ export const HARNESSES = [
  *   Codex        .mcp.json's env_vars is an allowlist of NAMES, not a value map
  *                (pinned by packages/codex/test/plugin-package.test.mjs). The
  *                value must already be in the ambient environment.
- *   Hermes       renderConfigBlock emits command/args/enabled — but it is OUR
- *                writer, so it can gain an env block.
+ *   Hermes       renderConfigBlock is OUR writer, and now emits an `env:` block
+ *                carrying OURS_CONFIG — so for Hermes the pair is real.
  *
  * So §5's guarantee is ALREADY unmet today for every non-default state
  * directory, silently: the harness attaches to ~/.ours while the operator was
  * told the run targeted somewhere else. Owner ruling Q1 settles the shape:
  *
  *   default state directory   today's behaviour, byte for byte.
- *   Hermes, non-default       make it real — the pair is passed to
- *                             ours-hermes-install and written into the config.
+ *   Hermes, non-default       real: the pair is handed to ours-hermes-install's
+ *                             invocation and written into ~/.hermes/config.yaml
+ *                             as the ours server's own env block.
  *   Claude / Codex, non-def   install the plugin (it is still the right plugin)
  *                             and PRINT the exact line the operator must add.
  *                             Never claim §5's guarantee in the screen text.
@@ -154,11 +155,6 @@ export function planHarnessPlugins({
       env: applies ? { OURS_CONFIG: config } : {},
       envLine: isDefaultStateDir || applies ? null : `export OURS_CONFIG=${config}`,
       claimsPair: isDefaultStateDir ? true : applies,
-      // Hermes' half of the ruling is only true once renderConfigBlock emits an
-      // `env:` block. That is a packages/hermes change and NOT in this module's
-      // PR, so it is pinned here rather than assumed: the orchestrator must not
-      // ship 'applied' before the writer exists.
-      requiresHermesEnvWriter: applies && name === 'hermes',
       manual: manualSteps[name] ? manualSteps[name](channel) : [],
     };
 
