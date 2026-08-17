@@ -236,3 +236,12 @@ test('a re-run with the same state dir can never reach the foreign-daemon refusa
 test('searchFreePort: returns null instead of looping or reusing a bound port', () => {
   assert.equal(searchFreePort(() => true, { span: 5 }), null);
 });
+
+test('an exhausted free-port band REFUSES rather than widening or reusing', () => {
+  const r = target({ isTaken: () => true });
+  assert.equal(r.action, 'refuse');
+  assert.equal(r.exitCode, 2);
+  assert.equal(r.reason, 'no-free-port');
+  assert.deepEqual(r.searched, { from: 3050, to: 4049 }, 'the message names the band it searched');
+  assert.match(r.message, /pass --port explicitly/);
+});

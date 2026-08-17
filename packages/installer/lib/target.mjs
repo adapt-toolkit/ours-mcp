@@ -15,6 +15,7 @@ import { homedir } from 'node:os';
 export const DEFAULT_STATE_DIR_NAME = '.ours';
 export const INSTALL_DEFAULT_PORT = 3050;
 export const FREE_PORT_FLOOR = 3050;
+export const FREE_PORT_SPAN = 1000;
 
 // Ports that are other components' DEFAULTS, not facts about the machine: 3051
 // is the Telegram connector's, 3052 is cowork's loopback console. The free-port
@@ -153,13 +154,21 @@ export function classifyProbe(probe, targetStateDir) {
  * Two lookups, in order, and the second is the one the spec did not have:
  *
  * 1. The port recorded in <state-dir>/config.json (else the default).
- * 2. **The port in <state-dir>/ours-cli-daemon.json.** A daemon started by hand
- *    with OURS_PORT=3060 and never installed records nothing in config.json, so
- *    lookup 1 misses it and the caller would conclude "no daemon here" and create
- *    a SECOND daemon on the SAME state directory. There is no cross-process lock
- *    on a state directory, and two writers on one state_data.bin is a corruption
- *    case. So any daemon reporting this state directory on ANY port we can learn
- *    about counts as present.
+ * 2. **The port in <state-dir>/ours-cli-daemon.json.** DO NOT REMOVE THIS AS
+ *    REDUNDANT. It exists because "the port RECORDED for a state directory" and
+ *    "the port the daemon is ACTUALLY on" are two different things, and lookup 1
+ *    only knows the first. Two ways they diverge, both real:
+ *      - a daemon started by hand with OURS_PORT=3060 records nothing in
+ *        config.json at all;
+ *      - an operator edits config.json's port and does not restart, so the file
+ *        says one thing and the running daemon another.
+ *    In both cases lookup 1 misses and the caller would conclude "no daemon here"
+ *    and create a SECOND daemon on the SAME state directory. There is no
+ *    cross-process lock on a state directory, and two writers on one
+ *    state_data.bin is a corruption case. So any daemon reporting this state
+ *    directory on ANY port we can learn about counts as present — and a
+ *    disagreeing --port is then refused against the port the daemon is really on,
+ *    not against the stale one in the file.
  *
  * A PID record whose port does not answer is STALE, not present — reported as
  * such so the caller can say why it is creating a daemon.
@@ -261,9 +270,23 @@ export function resolveTarget({ stateDir, port = null, portExplicit = false, pro
       reservedNotice: INSTALL_RESERVED_PORTS.includes(port) ? port : null,
     };
   }
+  const free = searchFreePort(isTaken);
+  if (free === null) {
+    // Consistent with every other decision here: refuse an impossible selection
+    // rather than widen the band, loop, or reuse a bound port.
+    return {
+      action: 'refuse',
+      exitCode: 2,
+      reason: 'no-free-port',
+      port: null,
+      stateDir: target,
+      searched: { from: FREE_PORT_FLOOR, to: FREE_PORT_FLOOR + FREE_PORT_SPAN - 1 },
+      message: `no free port between ${FREE_PORT_FLOOR} and ${FREE_PORT_FLOOR + FREE_PORT_SPAN - 1}; pass --port explicitly to name one`,
+    };
+  }
   return {
     action: 'create',
-    port: searchFreePort(isTaken),
+    port: free,
     stateDir: target,
     stalePidRecord: found.stalePidRecord ?? null,
     reservedNotice: null,
@@ -275,7 +298,7 @@ export function resolveTarget({ stateDir, port = null, portExplicit = false, pro
  * null when the band is exhausted rather than looping or reusing a bound port —
  * the caller reports it.
  */
-export function searchFreePort(isTaken, { floor = FREE_PORT_FLOOR, reserved = INSTALL_RESERVED_PORTS, span = 1000 } = {}) {
+export function searchFreePort(isTaken, { floor = FREE_PORT_FLOOR, reserved = INSTALL_RESERVED_PORTS, span = FREE_PORT_SPAN } = {}) {
   for (let p = floor; p < floor + span; p += 1) {
     if (reserved.includes(p)) continue;
     if (!isTaken(p)) return p;
