@@ -7,6 +7,14 @@ import { runNightlyInstaller } from '../lib/nightly-install.mjs';
 import { profilesPath, readRegistry, writeRegistry } from '../lib/profiles.mjs';
 import { COWORK_EXTERNAL_MIN_VERSION } from '../lib/logic.mjs';
 
+// The default `fetch` for every test: a loud refusal rather than the real network.
+const refuseRealFetch = async (url) => {
+  throw new Error(
+    `test attempted a REAL network request to ${String(url)} — inject a fetch/probe instead. ` +
+    'The installer defaults to 127.0.0.1:3050, which is a live daemon on many hosts.',
+  );
+};
+
 const makeDeps = ({ run, runAsync, ask, yes, fetch, probe } = {}) => {
   const calls = [];
   const runImpl = (bin, args, options) => {
@@ -26,7 +34,16 @@ const makeDeps = ({ run, runAsync, ask, yes, fetch, probe } = {}) => {
       npm: 'npm', run: runImpl, runAsync: asyncImpl,
       act: async (_desc, fn) => fn(), actSpin: async (_label, _desc, fn) => fn(),
       finish: () => {}, ask: ask || ((_prompt, def) => def), yes: yes || ((_prompt, def) => def),
-      fetch, probe,
+      // NEVER let a test fall through to the real network. Left undefined, the
+      // installer's probes use globalThis.fetch, and their default target is
+      // 127.0.0.1:3050 — the ordinary production port, which on a developer's or
+      // fleet host is answered by a REAL daemon. That is how a suite ends up
+      // making live HTTP requests to somebody's running daemon, and how a test can
+      // pass for a reason that has nothing to do with the code: an unexpected
+      // listener changed the installer's path and the assertions held by luck.
+      // A test that means to exercise an endpoint injects one.
+      fetch: fetch ?? refuseRealFetch,
+      probe,
     },
     calls,
   };
@@ -616,3 +633,20 @@ test('ours-fleet init receives the selected profile environment, not the histori
   assert.equal(init.options?.env?.OURS_STATE_DIR, stateDir, 'init is given the selected profile state directory');
   assert.equal(init.options?.env?.OURS_SERVICE_NAME, 'work', 'init is given the selected instance name');
 }));
+// The guard above only works while it is still there. This is what stops it being
+// quietly dropped back to `fetch` (undefined) by a future edit — at which point
+// every probe in this file would silently target 127.0.0.1:3050 again.
+//
+// Provenance: an earlier version of the discovery change disarmed a fail-closed
+// path, and this suite stayed GREEN locally while failing in CI, because the
+// installer fell through to probing 3050 and got a REAL daemon on the developer's
+// machine. It aborted, so nothing was mutated — but "it aborted" was luck, not a
+// property of the test.
+test('the default deps refuse a real network request instead of reaching a live daemon', async () => {
+  const { deps } = makeDeps();
+  await assert.rejects(
+    () => deps.fetch('http://127.0.0.1:3050/info'),
+    /REAL network request/,
+    'an un-injected fetch fails loudly rather than talking to whatever is on 3050',
+  );
+});
