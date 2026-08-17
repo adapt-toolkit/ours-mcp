@@ -47,13 +47,17 @@ function fakeBins(dir, opts = {}) {
   const mcpVersion = daemonInstalled
     ? `[ "$1" = "--version" ] && { ${installedVersion}; exit 0; }\n`
     : `[ "$1" = "--version" ] && { [ -f "$CALLLOG.mcpinstalled" ] && { echo "ours-mcp v9.9.9"; exit 0; } || exit 1; }\n`;
-  const createRoot = opts.rootExists
+  const createRoot = opts.daemonZombie
+    ? `[ "$1" = "create-root" ] && { echo "create-root: the daemon is not running" >&2; exit 1; }\n`
+    : opts.rootExists
     ? `[ "$1" = "create-root" ] && { echo 'create-root: a root identity already exists ("${opts.rootExists}") — nothing to do.'; exit 0; }\n`
     : `[ "$1" = "create-root" ] && { ${opts.serviceFails ? '[ -f "$CALLLOG.up" ] || { echo "create-root: the daemon is not running" >&2; exit 1; }; ' : ''}echo "created root identity"; exit 0; }\n`;
   // serviceFails models core's cmdInstallService faithfully: stop first, THEN fail. The
   // $CALLLOG.up marker is the daemon's real liveness, so status/create-root cannot claim
   // a daemon the install-service step just took down.
-  const lifecycle = opts.serviceFails
+  const lifecycle = opts.daemonZombie
+    ? `[ "$1" = "start" ] && { echo "ours-mcp is already running (pid 4242, port ${port})."; exit 0; }\n`
+    : opts.serviceFails
     ? `[ "$1" = "start" ] && { touch "$CALLLOG.up"; echo "ours-mcp is up"; exit 0; }\n` +
       `[ "$1" = "install-service" ] && { rm -f "$CALLLOG.up"; echo "failed to enable/start the service via systemctl --user." >&2; exit 1; }\n`
     : '';
@@ -61,7 +65,13 @@ function fakeBins(dir, opts = {}) {
   // the previous run persisted (which is probe-dependent — 3050 may be busy on the test machine).
   // Read it back from the config when there is one, exactly as the daemon would.
   const resolvePort = `P=$(grep -o '"port"[^,}]*' "\${OURS_CONFIG:-/nonexistent}" 2>/dev/null | grep -oE '[0-9]+' | head -1); P=\${P:-${port}};`;
-  const statusBody = opts.serviceFails
+  // daemonZombie models core faithfully for a pid file left behind by a previous boot
+  // whose number now belongs to an unrelated live process: cmdStart sees isAlive(pid)
+  // and exits 0 without spawning anything, and cmdStatus prints the pid with
+  // "(port not answering!)" and STILL exits 0 — only its no-pid branch sets exit 1.
+  const statusBody = opts.daemonZombie
+    ? `${resolvePort} echo "ours-mcp: running"; echo "  pid:    4242"; echo "  url:    http://localhost:$P/mcp (port not answering!)"; exit 0;`
+    : opts.serviceFails
     ? `${resolvePort} if [ -f "$CALLLOG.up" ]; then echo "ours-mcp: running"; echo "  pid:    4242"; echo "  url:    http://localhost:$P/mcp (reachable)"; exit 0; else echo "ours-mcp: stopped"; exit 1; fi;`
     : daemonState === 'stopped'
       ? 'echo "ours-mcp: stopped"; exit 1;'
@@ -1056,4 +1066,20 @@ test('install.sh with no Node.js prints friendly per-OS guidance and exits 0', (
   assert.match(out, /nodejs\.org/, 'links nodejs.org');
   assert.doesNotMatch(out, /install\.mjs/, 'must not try to run the Node installer without node');
   rmSync(tmp, { recursive: true, force: true });
+});
+
+// A pid file left by a previous boot can name an unrelated live process. Core's
+// `start` then exits 0 having spawned nothing (it only checks isAlive), and core's
+// `status` exits 0 while printing "(port not answering!)" — its non-zero exit is
+// reserved for the no-pid case. An installer that reads either exit code as
+// readiness tells the user "ours core ready — running on port N. No problems."
+// about a port nothing is bound to, and then spends 2.4s waiting to create an
+// identity against it. Readiness must come from the daemon answering, not from a
+// process existing.
+test('a live pid with a dead port is never reported as a ready daemon', () => {
+  const { out, calls } = runInstall({ daemon: 'absent', daemonZombie: true });
+  assert.doesNotMatch(out, /ours core ready/, 'no readiness claim for an unreachable daemon');
+  assert.match(out, /could not auto-start/, 'says plainly that it could not bring the daemon up');
+  assert.doesNotMatch(calls, /ours-mcp create-root/, 'and does not drive an identity into a daemon that is not there');
+  assert.match(out, /✗ ours core \(daemon\)/, 'the summary row records the failure rather than an install');
 });

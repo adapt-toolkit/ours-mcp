@@ -103,13 +103,23 @@ async function actSpin(label, desc, fn) {
 
 // --- daemon probes (always safe to run — read-only) --------------------------------------------
 const daemonVersionLine = () => (run('ours-mcp', ['--version'], { capture: true }).out.split('\n')[0] || '').trim();
-const daemonStatusText = () => run('ours-mcp', ['status'], { capture: true }).out;
+const daemonStatusText = (env) => run('ours-mcp', ['status'], { capture: true, ...(env ? { env } : {}) }).out;
 function daemonLifecycleState() {
   const status = run('ours-mcp', ['status'], { capture: true });
   if (!status.ok) return 'stopped';
   return /^\s*pid:\s*\d+/m.test(status.out) ? 'managed' : 'external';
 }
 const daemonRunning = () => daemonLifecycleState() !== 'stopped';
+// LISTENING, not merely alive — and the difference is not academic. `ours-mcp start`
+// exits 0 when it only FINDS a live pid in the state directory (core cmdStart: it
+// checks `isAlive(pid)` and nothing else, so a pid file left by a previous boot whose
+// number now belongs to any other process reads as "already running"). `ours-mcp
+// status` then exits 0 for that same pid while printing "(port not answering!)" —
+// core cmdStatus only sets a non-zero exit for the no-pid case. So neither exit code
+// proves a daemon is there, and a readiness line built from one can tell the user
+// "ready — no problems" about a port nothing is bound to. The status line the daemon
+// prints only when the port actually answered is the honest signal, so use it.
+const daemonReachable = (env) => /\(reachable\)/.test(daemonStatusText(env));
 // The installed version of a global package, INCLUDING any prerelease suffix. The
 // suffix is not cosmetic here: the Rooms daemon guard compares against an exact
 // `0.4.1-nightly.<date>.<sha>` floor, and truncating at the dash would make every
@@ -522,13 +532,13 @@ async function main() {
     // WORKING daemon into no daemon at all, while the line below still said "ready": the
     // human identity and every MCP client then fail against a port nothing is listening
     // on. Put the one shared daemon back up and report what is actually true.
-    let running = started.ok;
-    if (!DRY && !svc.ok) {
-      running = daemonRunning();
-      if (!running) {
-        line(info('the boot-service step stopped the daemon before it failed — restarting it.'));
-        running = run('ours-mcp', ['start']).ok || daemonRunning();
-      }
+    // `started.ok` is the exit code of `ours-mcp start`, which is not evidence that
+    // anything is listening (see daemonReachable). Ask the daemon instead.
+    let running = DRY ? started.ok : daemonReachable();
+    if (!DRY && !svc.ok && !running) {
+      line(info('the boot-service step stopped the daemon before it failed — restarting it.'));
+      run('ours-mcp', ['start']);
+      running = daemonReachable();
     }
     if (running) line(ok(`ours core ready — running on port ${chosenPort}. No problems.`));
     else line(warn(`could not auto-start — run '${c.cyan('ours-mcp start')}' to bring it up.`));
@@ -609,9 +619,11 @@ async function main() {
       line(ok(`Your human identity "${name}" is created.`));
       record({ key: 'identity', label: 'Human identity', state: 'installed', note: name });
     } else {
-      // A freshly-started daemon may need a moment to bind its port before create-root can reach it.
-      let reachable = daemonRunning();
-      for (let i = 0; i < 6 && !reachable; i++) { sleepMs(400); reachable = daemonRunning(); }
+      // A freshly-started daemon may need a moment to BIND ITS PORT before create-root
+      // can reach it — which is the one thing a liveness check cannot see, so this
+      // waits on the port answering rather than on a process existing.
+      let reachable = daemonReachable();
+      for (let i = 0; i < 6 && !reachable; i++) { sleepMs(400); reachable = daemonReachable(); }
       const r = reachable ? run('ours-mcp', ['create-root', name], { capture: true }) : { ok: false, out: '', err: 'daemon not running' };
       const outText = `${r.out} ${r.err}`;
       const existing = outText.match(/already exists \("([^"]+)"\)/);
@@ -764,7 +776,7 @@ async function main() {
       // Nothing to change AND it is already up: do not touch it. `install-service` STOPS
       // the daemon before rewriting the unit, so re-running it here would bounce a healthy
       // daemon for no reason.
-      if (!DRY && run('ours-mcp', ['status'], { capture: true, env }).ok) {
+      if (!DRY && daemonReachable(env)) {
         line(ok(`Dedicated ${label} daemon already running on port ${port} — left alone.`));
         return { endpoint: daemonEndpoint(port), stateDir, serviceName, configPath: cfgPath, running: true, port };
       }
@@ -778,12 +790,13 @@ async function main() {
     const svc = await act(`ours-mcp install-service (dedicated ${label} daemon, unit ours-${serviceName})`, async () => run('ours-mcp', ['install-service'], { env }));
     // Same recovery as the shared daemon: install-service STOPS the daemon before it
     // writes the unit, so a failure there leaves nothing listening on this port.
-    let running = started.ok;
+    // Same rule as the shared daemon: an exit code is not evidence of a bound port.
+    let running = DRY ? started.ok : daemonReachable(env);
     if (!DRY && !svc.ok) {
-      running = run('ours-mcp', ['status'], { capture: true, env }).ok;
       if (!running) {
         line(info(`the boot-service step stopped the ${label} daemon before it failed — restarting it.`));
-        running = run('ours-mcp', ['start'], { env }).ok;
+        run('ours-mcp', ['start'], { env });
+        running = daemonReachable(env);
       }
       line(warn(`the ${label} daemon has no boot service — retry '${c.cyan(`OURS_CONFIG=${cfgPath} OURS_SERVICE_NAME=${serviceName} ours-mcp install-service`)}'.`));
     }
