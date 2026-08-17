@@ -6,53 +6,16 @@
 // named by any command this file allows through — asserted, not assumed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { runInstall, runDaemonPhase, runServicePhase, EXIT_OK, EXIT_REFUSED } from '../lib/orchestrate.mjs';
 import { CLI_UNIT_MARKER } from '../lib/plan.mjs';
 import { isWholeDaemonEnv, DAEMON_ENV_KEYS } from '../lib/effects.mjs';
 
-const HOME = '/home/me';
-const OURS = resolve(HOME, '.ours');
-const TG = resolve(HOME, '.ours-tg');
+import { fx, said, HOME, OURS, TG } from './fake-effects.mjs';
+
 const unitPath = (n) => join(HOME, '.config', 'systemd', 'user', n);
 
 const LEGACY_UNIT = '[Unit]\nDescription=ours MCP daemon (secure agent-to-agent messaging over ADAPT)\n[Service]\nExecStart=/usr/bin/node /x/ours-mcp/dist/cli.js serve\n';
-
-// A recording effects layer. `json`/`text` seed the filesystem; `net` seeds the
-// probe; everything mutating is recorded rather than done.
-function fx({ json = {}, text = {}, net = {}, taken = [], versions = {}, env = {}, answers = [], unitUnchanged = false } = {}) {
-  const recorder = { ran: [], ranEnv: [], wrote: [], out: [], asked: [] };
-  let answerIndex = 0;
-  return {
-    recorder,
-    home: HOME,
-    env,
-    brokerUrl: 'wss://broker1.ours.network',
-    now: () => 1,
-    probe: (port) => net[port] ?? { ok: false, reason: 'connection refused' },
-    isTaken: (port) => taken.includes(port),
-    readJson: (p) => (Object.prototype.hasOwnProperty.call(json, p) ? json[p] : null),
-    readText: (p) => (Object.prototype.hasOwnProperty.call(text, p) ? text[p] : null),
-    writeJson: (p, body) => { recorder.wrote.push([p, body]); },
-    run: async (cmd, cmdArgs, opts = {}) => {
-      recorder.ran.push([cmd, ...cmdArgs]);
-      // Recorded separately so the existing deepEqual assertions on `ran` keep
-      // working; the pair invariant is checked against this.
-      recorder.ranEnv.push(opts.env ?? null);
-      // The CLI answers with its plan when asked for --json; the unit-unchanged
-      // case is what a repeat run sees.
-      const stdout = cmdArgs.includes('install-service') && cmdArgs.includes('--json')
-        ? JSON.stringify({ changed: unitUnchanged ? false : true, unitName: 'ours.service' })
-        : '';
-      return { ok: true, code: 0, stdout };
-    },
-    installedVersion: (pkg) => versions[pkg] ?? null,
-    installedVersions: versions,
-    out: (line) => recorder.out.push(String(line)),
-    ask: async (prompt) => { recorder.asked.push(prompt); return answers[answerIndex++] ?? false; },
-  };
-}
-const said = (e) => e.recorder.out.join('\n');
 
 // ------------------------------------------------------ the safety invariant --
 
@@ -101,8 +64,10 @@ test('a bad argument exits 2 before anything happens', async () => {
   assert.match(said(e), /unknown option: --nope/);
 });
 
-test('a foreign daemon on the candidate port exits 2 and names the other directory', async () => {
-  const e = fx({ net: { 3050: { ok: true, stateDir: TG } } });
+test('a foreign daemon on the RECORDED port exits 2 and names the other directory', async () => {
+  // On the port this directory's own config named — which is what makes it an
+  // incoherent selection rather than just a busy machine.
+  const e = fx({ json: { [join(OURS, 'config.json')]: { port: 3050 } }, net: { 3050: { ok: true, stateDir: TG } } });
   assert.equal(await runInstall([], e), EXIT_REFUSED);
   assert.deepEqual(e.recorder.wrote, [], 'nothing written');
   assert.deepEqual(e.recorder.ran, [], 'nothing run');
@@ -180,7 +145,11 @@ test('an unidentifiable unit stops the run and is never forced', async () => {
   const e = fx({ text: { [unitPath('ours.service')]: '[Unit]\nDescription=stranger\n' } });
   assert.equal(await runInstall([], e), EXIT_REFUSED);
   assert.ok(!e.recorder.ran.some((c) => c.includes('--force')), 'never forced over a file we cannot identify');
-  assert.deepEqual(e.recorder.asked, [], 'and never prompted about it either');
+  // Never prompted about it EITHER: an unidentified unit is a refusal, not a
+  // question. (The broker question belongs to the create path and is asked
+  // before this; what must not exist is a prompt offering to overwrite.)
+  assert.ok(!e.recorder.asked.some((p) => /unit|overwrite|force|service/i.test(p)),
+    'and never prompted about it either');
   assert.match(said(e), /Refusing to touch it/);
 });
 
@@ -209,7 +178,11 @@ test('a connector pointing elsewhere is never moved without a yes', async () => 
 
   const declined = fx(seed);
   await runInstall(['--state-dir', TG, '--port', '3051'], { ...declined, ask: async (p) => { declined.recorder.asked.push(p); return false; } });
-  assert.equal(declined.recorder.asked.length, 0, 'tg is not selected by default, so nothing is even asked');
+  // The run asks its own questions (broker, fleet, voice); what it must never
+  // ask unprompted is the one about MOVING the connector, because tg is not
+  // selected by default and an unselected component is not negotiated over.
+  assert.ok(!declined.recorder.asked.some((p) => /Point it at/.test(p)),
+    'tg is not selected by default, so the move is never even raised');
 
   // Now select it explicitly and decline the move.
   const e2 = fx(seed);

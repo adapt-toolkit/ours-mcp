@@ -12,11 +12,12 @@
 // unit file or the service manager directly.
 
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, readFileSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, userInfo, platform as osPlatform, release as osRelease } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { atomicWriteConfig } from './config.mjs';
-import { askYesNo } from './prompt.mjs';
+import { askYesNo, askLine as askLineOnTty } from './prompt.mjs';
+import { classifyHarnessProbe } from './logic.mjs';
 
 /** GET http://127.0.0.1:<port>/state-dir — the unauthenticated identity probe. */
 async function probePort(port, { timeoutMs = 1500 } = {}) {
@@ -73,13 +74,157 @@ function installedVersionOf(pkg) {
 }
 
 /**
+ * A read-only command probe that NEVER throws and NEVER inherits stdio.
+ *
+ * Separate from `run` on purpose. `run` is for mutations and throws on a
+ * non-zero exit, because a failed mutation is news. Detection is the opposite:
+ * a non-zero exit IS the answer, and a hung wrapper must be killed rather than
+ * waited on. Mixing the two would mean either detection crashes a run or a
+ * failed install passes silently.
+ */
+function capture(cmd, args, { timeout, env = process.env } = {}) {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'], env });
+  const timedOut = !!(r.error && (r.error.code === 'ETIMEDOUT' || r.signal === 'SIGTERM'));
+  return {
+    ok: !r.error && r.status === 0,
+    code: r.status ?? -1,
+    stdout: r.stdout ?? '',
+    stderr: r.stderr ?? '',
+    timedOut,
+  };
+}
+
+// The two harnesses that are DRIVEN CLIs. The `name` is the one lib/extras.mjs
+// plans against; the `command` is what actually lives on PATH.
+export const DRIVEN_HARNESSES = [
+  { name: 'claude-code', command: 'claude', label: 'Claude Code' },
+  { name: 'codex', command: 'codex', label: 'Codex' },
+];
+
+/**
+ * Alias-safety, unchanged from v2: three read-only observations, then the pure
+ * classifier decides. The harness is NEVER called in a way that can hang —
+ * `--version` is spawned directly (no shell, so a real PATH binary) under a hard
+ * timeout, and the shell `type` lookup is timeout-guarded too.
+ */
+function detectDrivenHarness({ name, command, label }, env) {
+  const onPath = capture('bash', ['-c', `command -v ${command}`], { env }).ok;
+  const probe = capture(command, ['--version'], { timeout: 6000, env });
+  const versionOk = probe.ok && /\d+\.\d+/.test(probe.stdout);
+  const shell = env.SHELL || '/bin/bash';
+  const typeProbe = capture(shell, ['-ic', `type -t ${command} 2>/dev/null`], { timeout: 4000, env });
+  const verdict = classifyHarnessProbe({
+    onPath, versionOk, timedOut: probe.timedOut, shellType: (typeProbe.stdout || '').trim(),
+  });
+  return { name, command, label, ...verdict };
+}
+
+/**
+ * Hermes is detected DIFFERENTLY, and it is not an inconsistency. Its ours
+ * plugin never calls a `hermes` binary — `ours-hermes-install` writes
+ * ~/.hermes/config.yaml and the skills — so "can we drive it?" is the wrong
+ * question. Per the plugin's own prerequisites, presence IS the config
+ * directory. The CLI probe still runs, purely to enrich detection.
+ */
+function detectHermesHarness(env, home) {
+  const dir = env.HERMES_DIR || join(home, '.hermes');
+  const dirPresent = existsSync(dir);
+  const cli = detectDrivenHarness({ name: 'hermes', command: 'hermes', label: 'Hermes' }, env);
+  return {
+    name: 'hermes',
+    command: 'hermes',
+    label: 'Hermes',
+    status: dirPresent || cli.status === 'ok' ? 'ok' : 'absent',
+    detail: dirPresent ? `config dir ${dir} present` : cli.detail,
+  };
+}
+
+/**
+ * Best-effort clipboard copy (pbcopy / wl-copy / xclip / clip.exe). The hard
+ * timeout is load-bearing: xclip holds the selection and would otherwise keep
+ * the installer alive after its own summary.
+ */
+function copyToClipboard(text) {
+  const tools = [['pbcopy', []], ['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['clip.exe', []]];
+  for (const [bin, args] of tools) {
+    try {
+      const r = spawnSync(bin, args, { input: text, timeout: 2000 });
+      if (!r.error && (r.status === 0 || r.status == null)) return true;
+    } catch { /* try the next one */ }
+  }
+  return false;
+}
+
+/**
+ * Every state directory on this machine that still has a daemon config.
+ *
+ * `ours-uninstall` asks this exactly once, to answer one question: are the
+ * GLOBAL packages still needed by somebody else? Getting it wrong the optimistic
+ * way (reporting none) uninstalls the CLI out from under a second daemon that is
+ * still running, so the search is deliberately conservative — it looks only where
+ * a state directory can actually be, and an unreadable home means "there might be
+ * others", not "there are none".
+ *
+ * Where they can be: the default `~/.ours`, plus any `~/.ours*` sibling, which is
+ * the shape every other part of this installer uses for a second daemon. A state
+ * directory somewhere else entirely will not be found, and that is a KNOWN limit
+ * rather than a claim — the failure is keeping a global package that could have
+ * been removed, which is the harmless direction.
+ */
+function knownStateDirsIn(home) {
+  const found = [];
+  const consider = (dir) => { if (existsSync(join(dir, 'config.json'))) found.push(dir); };
+  consider(join(home, '.ours'));
+  try {
+    for (const entry of readdirSync(home, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('.ours') || entry.name === '.ours') continue;
+      consider(join(home, entry.name));
+    }
+  } catch { /* an unreadable home is not evidence that there are no others */ }
+  return found;
+}
+
+/**
  * Build the real effects. `write` and `ttyFd` come from the caller's UI layer so
  * the orchestrator never reaches for a terminal itself.
  */
-export function realEffects({ write, ttyFd, env = process.env, home = homedir(), out } = {}) {
+export function realEffects({ write, ttyFd, env = process.env, home = homedir(), out, version = null } = {}) {
   return {
     home,
     env,
+    version,
+    // Preflight reads the machine rather than asking the orchestrator to.
+    platform: { platform: osPlatform(), release: osRelease() },
+    nodeVersion: process.versions.node,
+    exists: (path) => existsSync(path),
+    knownStateDirs: () => knownStateDirsIn(home),
+    // The only irreversible effect in this package, and the reason it takes no
+    // pattern and no parent: the caller passes ONE resolved directory that the
+    // pure planner already gated four ways, and this deletes exactly that.
+    removeDir: (path) => { rmSync(resolve(path), { recursive: true, force: true }); },
+    removeFile: (path) => { rmSync(resolve(path), { force: true }); },
+    // Rewrites a config file we do NOT own, so it keeps the file's own mode
+    // rather than imposing 0600: tightening the permissions of somebody else's
+    // ~/.codex/config.toml is a side effect nobody asked this to have.
+    //
+    // DO NOT "IMPROVE" THIS TO 0600. It looks like a security improvement, which
+    // is exactly why someone will try — but this file is the operator's, not
+    // ours, and the only thing we were invited to do to it is remove our own
+    // block. Changing its mode on the way past is an uninvited change to a file
+    // we happened to be holding, and a tool that does that once is a tool you
+    // cannot let near your configs.
+    writeText: (path, text) => {
+      const mode = (() => { try { return statSync(path).mode & 0o777; } catch { return 0o644; } })();
+      const temp = `${path}.tmp-${process.pid}`;
+      writeFileSync(temp, text, { encoding: 'utf8', mode });
+      renameSync(temp, path);
+    },
+    username: () => { try { return userInfo().username || 'me'; } catch { return 'me'; } },
+    detectHarnesses: () => [
+      ...DRIVEN_HARNESSES.map((h) => detectDrivenHarness(h, env)),
+      detectHermesHarness(env, home),
+    ],
+    clipboard: (text) => copyToClipboard(text),
     brokerUrl: env.OURS_BROKER_URL ?? 'wss://broker1.ours.network',
     now: () => Date.now(),
     probe: (port) => probePort(port),
@@ -107,10 +252,20 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
       }
       return { ok: true, code: r.status, stdout: r.stdout ?? '' };
     },
+    // The ONE invocation that must keep the user's terminal: `ours-mcp
+    // voice-setup` is an interactive command with its own masked prompts, and
+    // piping its stdio would hang it forever waiting on input nobody can type.
+    // It is otherwise the same contract as `run` — including the environment,
+    // so an interactive command reaches the same daemon a piped one would.
+    runInteractive: async (cmd, args, { env: extraEnv = null } = {}) => {
+      const r = spawnSync(cmd, args, { stdio: 'inherit', env: { ...env, ...(extraEnv ?? {}) } });
+      return { ok: !r.error && r.status === 0, code: r.status ?? -1 };
+    },
     installedVersion: installedVersionOf,
     out: out ?? ((line) => process.stdout.write(`${line}\n`)),
     // Never called when assumeYes: the orchestrator takes the default itself.
     ask: async (prompt, def = false) => (ttyFd == null ? def : askYesNo(write, ttyFd, `  ${prompt}  `, def)),
+    askLine: async (prompt, def = '') => (ttyFd == null ? def : askLineOnTty(write, ttyFd, `  ${prompt}  `, def)),
   };
 }
 
