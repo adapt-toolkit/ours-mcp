@@ -592,7 +592,13 @@ export async function runNightlyInstaller(deps) {
     if (wantFleet) {
       const fleetPkg = await actSpin('installing ours-fleet Nightly…', `npm i -g ${pkgSpec('fleet', 'nightly')}`, () => runAsync(npm, ['i', '-g', pkgSpec('fleet', 'nightly')]));
       if (!fleetPkg.ok) throw new Error('ours-fleet package installation failed');
-      const initialized = await act('ours-fleet init', async () => run('ours-fleet', ['init']));
+      // ours-fleet resolves its daemon from OURS_CONFIG / OURS_PORT / OURS_STATE_DIR,
+      // falling back to ~/.ours and 3050. It has no concept of this registry, so an
+      // init run without the selected profile's environment points every role at the
+      // historical default daemon — which, when the selected profile is not the
+      // default, is a daemon the user may not even have. Hand it the same exact
+      // environment every other selected-profile command here gets.
+      const initialized = await act(`ours-fleet init for profile ${selection.id}`, async () => run('ours-fleet', ['init'], { env: exactEnv(selection.profile) }));
       if (!initialized.ok) throw new Error('ours-fleet init failed');
     }
 

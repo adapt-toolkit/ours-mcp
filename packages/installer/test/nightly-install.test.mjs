@@ -577,3 +577,42 @@ test('topology-first Rooms rerun preserves operator keys and the exact selected 
   await runNightlyInstaller(deps);
   assert.deepEqual(JSON.parse(readFileSync(roomsPath, 'utf8')), initialRooms);
 }));
+
+// ours-fleet resolves its daemon from OURS_CONFIG / OURS_PORT / OURS_STATE_DIR and
+// otherwise falls back to ~/.ours and port 3050; it has no concept of this registry.
+// So `ours-fleet init` run with no environment silently points every role at the
+// historical default daemon — which, for any profile that is not the default, is a
+// different daemon and may be one that does not exist on this machine at all. It has
+// to receive the same exact environment as every other selected-profile command here.
+test('ours-fleet init receives the selected profile environment, not the historical default', async () => withHome(async (home) => {
+  const stateDir = join(home, '.ours-work');
+  const configPath = join(stateDir, 'config.json');
+  writeRegistry(profilesPath(process.env, home), {
+    version: 1,
+    profiles: { work: {
+      label: 'Work daemon', host: '127.0.0.1', port: 3085, configPath, stateDir, serviceName: 'work',
+      ownership: { config: false, service: false, state: false },
+    } },
+    harnessAssociations: {},
+  });
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(configPath, JSON.stringify({ port: 3085, stateDir, serviceName: 'work' }) + '\n');
+  const { deps, calls } = makeDeps({
+    ask: (prompt, def) => prompt.includes('Choose profile') ? '1' : def,
+    yes: (prompt, def) => prompt.includes('ours-fleet') ? true
+      : prompt.includes('Use profile') || prompt.includes('Point Telegram') || prompt.includes('Point Rooms') ? false : def,
+    probe: async (candidate) => ({ ...candidate, reachable: true, compatible: true }),
+    fetch: async (url) => String(url).endsWith('/info')
+      ? Response.json({ name: 'ours', stateDir })
+      : String(url).endsWith('/version')
+        ? Response.json({ version: '0.16.0-nightly' })
+        : Response.json({ identities: [] }),
+  });
+  await runNightlyInstaller(deps);
+  const init = calls.find((call) => call.bin === 'ours-fleet' && call.args[0] === 'init');
+  assert.ok(init, 'ours-fleet init ran');
+  assert.equal(init.options?.env?.OURS_CONFIG, configPath, 'init is given the selected profile config');
+  assert.equal(init.options?.env?.OURS_PORT, '3085', 'init is given the selected profile port');
+  assert.equal(init.options?.env?.OURS_STATE_DIR, stateDir, 'init is given the selected profile state directory');
+  assert.equal(init.options?.env?.OURS_SERVICE_NAME, 'work', 'init is given the selected instance name');
+}));
