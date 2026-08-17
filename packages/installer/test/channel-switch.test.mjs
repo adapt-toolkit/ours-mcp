@@ -35,7 +35,7 @@
 // orchestrate.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -46,7 +46,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const INSTALL_BIN = join(HERE, '..', 'install.mjs');
 const UNINSTALL_BIN = join(HERE, '..', 'uninstall.mjs');
 
-/** A daemon that answers /state-dir, on a port the OS picks. Never 3050. */
+/**
+ * A daemon that answers /state-dir, on a port the OS picks. Never 3050.
+ *
+ * IT MUST REPORT THE TARGET'S OWN STATE DIRECTORY. Anything else is classified
+ * FOREIGN by lib/target.mjs and the run refuses — which is a correct refusal about
+ * a wrong fixture, not the path this proof is meant to walk.
+ */
 async function fakeDaemon(stateDir) {
   const server = createServer((req, res) => {
     if (req.url === '/state-dir') {
@@ -60,6 +66,10 @@ async function fakeDaemon(stateDir) {
   return { port: server.address().port, close: () => new Promise((r) => server.close(r)) };
 }
 
+function reseed(stateDir, port) {
+  writeFileSync(join(stateDir, 'config.json'), `${JSON.stringify({ port, stateDir }, null, 2)}\n`);
+}
+
 function seededHome(port) {
   const home = mkdtempSync(join(tmpdir(), 'ours-switch-'));
   const stateDir = join(home, '.ours');
@@ -69,24 +79,45 @@ function seededHome(port) {
   return { home, stateDir };
 }
 
+/**
+ * ASYNC SPAWN, AND THAT IS LOAD-BEARING RATHER THAN STYLE.
+ *
+ * This was spawnSync, and spawnSync BLOCKS THIS PROCESS'S EVENT LOOP for the whole
+ * life of the child. The fake daemon above lives in this process, so its socket sat
+ * in the listen backlog and was never served: the child's probe timed out, findDaemon
+ * reported ABSENT, and the run took a path this proof was not written for. A fake
+ * that is never reached looks exactly like a fake that answered "absent".
+ *
+ * It went unnoticed locally because the fallback path picks a free port from 3050
+ * upward, and on the developer host 3050 is occupied by a live daemon — so the
+ * search skipped past it, the string "3050" never appeared, and the assertion
+ * passed for the wrong reason. On a clean CI runner 3050 was free and chosen, and
+ * the assertion finally fired. The green run was hiding the defect.
+ */
 function runBin(bin, args, home) {
   const emptyBin = mkdtempSync(join(tmpdir(), 'ours-nopath-'));
-  try {
-    return spawnSync(process.execPath, [bin, ...args], {
-      encoding: 'utf8',
-      timeout: 60_000,
-      env: {
-        HOME: home,
-        PATH: `${emptyBin}:/usr/bin:/bin`,
-        SHELL: '/bin/sh',
-        OURS_CHANNEL: 'nightly',
-        OURS_ASSUME_YES: '1',
-        NODE_OPTIONS: '',
-      },
+  const child = spawn(process.execPath, [bin, ...args], {
+    env: {
+      HOME: home,
+      PATH: `${emptyBin}:/usr/bin:/bin`,
+      SHELL: '/bin/sh',
+      OURS_CHANNEL: 'nightly',
+      OURS_ASSUME_YES: '1',
+      NODE_OPTIONS: '',
+    },
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  const timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
+  return new Promise((resolve) => {
+    child.on('close', (status) => {
+      clearTimeout(timer);
+      rmSync(emptyBin, { recursive: true, force: true });
+      resolve({ status, stdout, stderr });
     });
-  } finally {
-    rmSync(emptyBin, { recursive: true, force: true });
-  }
+  });
 }
 
 // The nightly flow's own screens. Their ABSENCE is the assertion that matters: a
@@ -96,14 +127,25 @@ const NIGHTLY_INSTALL_MARKERS = [/Nightly daemon profiles/, /Review Nightly topo
 const NIGHTLY_UNINSTALL_MARKERS = [/Nightly profile-aware uninstall/, /Nightly uninstall complete/];
 
 test('CHANNEL=nightly runs the V3 installer, and does not run the nightly flow', async () => {
-  const daemon = await fakeDaemon('/does-not-matter');
-  const { home, stateDir } = seededHome(daemon.port);
+  const { home, stateDir } = seededHome(0);
+  const daemon = await fakeDaemon(stateDir);
+  reseed(stateDir, daemon.port);
   try {
-    const r = runBin(INSTALL_BIN, ['--dry-run'], home);
+    // --port is passed for a reason that survives this test being wrong AGAIN: with
+    // an explicit port, resolveTarget REFUSES a port it cannot have rather than
+    // running searchFreePort, which walks upward from 3050. The barrier stops
+    // depending on the probe succeeding — it holds even when the harness is broken.
+    const r = await runBin(INSTALL_BIN, ['--dry-run', '--port', String(daemon.port)], home);
     assert.equal(r.status, 0, `exit 0; stderr was: ${r.stderr}`);
     const out = `${r.stdout}${r.stderr}`;
 
     // v3's own walk, by its phase output rather than by decoration.
+    // THE DIRECT CLAIM, replacing a proxy that passed for the wrong reason. "3050
+    // never appears" is a side effect of taking the update path, not the thing
+    // itself — and on a host where 3050 is busy it is also a side effect of taking
+    // the CREATE path. Assert the thing.
+    assert.match(out, new RegExp(`daemon found on port ${daemon.port}`), 'the run took the UPDATE path against the seeded daemon');
+    assert.doesNotMatch(out, /creating a daemon here/, 'and not the create path');
     assert.match(out, /Checking your machine/, "v3's preflight ran");
     assert.match(out, new RegExp(`target ${stateDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'v3 named the target state directory');
     assert.match(out, /dry-run: nothing will be installed or changed/, "v3's dry-run banner");
@@ -112,9 +154,11 @@ test('CHANNEL=nightly runs the V3 installer, and does not run the nightly flow',
     for (const marker of NIGHTLY_INSTALL_MARKERS) {
       assert.doesNotMatch(out, marker, `the nightly flow must NOT have run: ${marker}`);
     }
-    // And the barrier held: nothing about the default port appears, because it was
-    // never probed.
-    assert.doesNotMatch(out, /3050/, 'the built-in default port was never involved');
+    // Kept as a SECONDARY check now, not the primary one. On its own it passed for
+    // the wrong reason on a host where 3050 is occupied: the create path skipped
+    // past it and the string never appeared. The direct update-path claim above is
+    // what actually proves the barrier held.
+    assert.doesNotMatch(out, /3050/, 'and the built-in default port was never involved');
   } finally {
     await daemon.close();
     rmSync(home, { recursive: true, force: true });
@@ -122,10 +166,11 @@ test('CHANNEL=nightly runs the V3 installer, and does not run the nightly flow',
 });
 
 test('CHANNEL=nightly runs the V3 uninstaller, and does not run the nightly flow', async () => {
-  const daemon = await fakeDaemon('/does-not-matter');
-  const { home, stateDir } = seededHome(daemon.port);
+  const { home, stateDir } = seededHome(0);
+  const daemon = await fakeDaemon(stateDir);
+  reseed(stateDir, daemon.port);
   try {
-    const r = runBin(UNINSTALL_BIN, ['--dry-run', '--state-dir', stateDir], home);
+    const r = await runBin(UNINSTALL_BIN, ['--dry-run', '--state-dir', stateDir], home);
     assert.equal(r.status, 0, `exit 0; stderr was: ${r.stderr}`);
     const out = `${r.stdout}${r.stderr}`;
 
@@ -145,8 +190,9 @@ test('CHANNEL=nightly runs the V3 uninstaller, and does not run the nightly flow
 test('--help, --version and their short forms still work on the nightly channel', async () => {
   // The three flags a user actually types. If any of them errored where it used to
   // work, that would be a bug introduced by the switch rather than a known gap.
-  const daemon = await fakeDaemon('/does-not-matter');
-  const { home } = seededHome(daemon.port);
+  const { home, stateDir } = seededHome(0);
+  const daemon = await fakeDaemon(stateDir);
+  reseed(stateDir, daemon.port);
   try {
     for (const [flag, expected] of [
       ['--help', /ours-install/],
@@ -154,12 +200,12 @@ test('--help, --version and their short forms still work on the nightly channel'
       ['--version', /ours-install v/],
       ['-V', /ours-install v/],
     ]) {
-      const r = runBin(INSTALL_BIN, [flag], home);
+      const r = await runBin(INSTALL_BIN, [flag], home);
       assert.equal(r.status, 0, `${flag} exits 0`);
       assert.match(`${r.stdout}${r.stderr}`, expected, `${flag} printed something useful`);
     }
     for (const flag of ['--help', '--version']) {
-      const r = runBin(UNINSTALL_BIN, [flag], home);
+      const r = await runBin(UNINSTALL_BIN, [flag], home);
       assert.equal(r.status, 0, `uninstall ${flag} exits 0`);
       assert.match(`${r.stdout}${r.stderr}`, /ours-uninstall/, `uninstall ${flag} printed something useful`);
     }
@@ -172,8 +218,9 @@ test('--help, --version and their short forms still work on the nightly channel'
 test('the STABLE channel still runs the v2 body, untouched', async () => {
   // The other half of the switch being safe: nothing a stable user does changes.
   // --help is enough to prove which body answered, and it starts nothing.
-  const daemon = await fakeDaemon('/does-not-matter');
-  const { home } = seededHome(daemon.port);
+  const { home, stateDir } = seededHome(0);
+  const daemon = await fakeDaemon(stateDir);
+  reseed(stateDir, daemon.port);
   try {
     const emptyBin = mkdtempSync(join(tmpdir(), 'ours-nopath-'));
     const r = spawnSync(process.execPath, [INSTALL_BIN, '--help'], {
