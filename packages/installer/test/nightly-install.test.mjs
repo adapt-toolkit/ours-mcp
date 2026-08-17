@@ -650,3 +650,50 @@ test('the default deps refuse a real network request instead of reaching a live 
     'an un-injected fetch fails loudly rather than talking to whatever is on 3050',
   );
 });
+
+// ~/.config/systemd/user is shared with every other product on the machine, and a
+// filename is only a HINT that a unit is ours. Discovery used a looser instance
+// pattern than core's own (core requires the name to END with a letter or digit),
+// so it claimed a unit like `ours-foo_.service`, handed the name to profiles.mjs,
+// and got a ProfileRegistryError back — which surfaced as "Nightly discovery
+// stopped on a collision or unsafe candidate" and aborted the WHOLE install. One
+// stray file was enough, and it did not even have to be ours.
+test('a stray ours-*.service that core would never produce does not abort discovery', async () => withHome(async (home) => {
+  const unitDir = join(home, '.config', 'systemd', 'user');
+  mkdirSync(unitDir, { recursive: true });
+  // Trailing underscore: matched by the old discovery pattern, refused by core's
+  // INSTANCE_RE and therefore by normalizeServiceName.
+  writeFileSync(join(unitDir, 'ours-foo_.service'), '[Service]\nEnvironment=OURS_PORT=3099\n');
+  const stateDir = join(home, '.ours-work');
+  const configPath = join(stateDir, 'config.json');
+  const registryPath = profilesPath(process.env, home);
+  writeRegistry(registryPath, {
+    version: 1,
+    profiles: { work: {
+      label: 'Work daemon', host: '127.0.0.1', port: 3085, configPath, stateDir, serviceName: 'work',
+      ownership: { config: false, service: false, state: false },
+    } },
+    harnessAssociations: {},
+  });
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(configPath, JSON.stringify({ port: 3085, stateDir, serviceName: 'work' }) + '\n');
+  const { deps, calls } = makeDeps({
+    ask: (prompt, def) => prompt.includes('Choose profile') ? '1' : def,
+    yes: (prompt, def) => prompt.includes('Use profile') || prompt.includes('ours-fleet')
+      || prompt.includes('Point Telegram') || prompt.includes('Point Rooms') ? false : def,
+    probe: async (candidate) => ({ ...candidate, reachable: true, compatible: true }),
+    fetch: async (url) => String(url).endsWith('/info')
+      ? Response.json({ name: 'ours', stateDir })
+      : String(url).endsWith('/version')
+        ? Response.json({ version: '0.16.0-nightly' })
+        : Response.json({ identities: [] }),
+  });
+  const said = [];
+  const write = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => { said.push(String(chunk)); return write(chunk, ...rest); };
+  try { await runNightlyInstaller(deps); } finally { process.stdout.write = write; }
+  const out = said.join('');
+  assert.doesNotMatch(out, /Nightly discovery stopped/, 'a foreign or malformed unit never aborts the install');
+  assert.ok(calls.some((call) => call.bin === 'ours-mcp' && call.args[0] === 'create-root'),
+    'the install ran through to its final steps rather than returning early');
+}));
