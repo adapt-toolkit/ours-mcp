@@ -14,7 +14,7 @@
 import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { atomicWriteConfig } from './config.mjs';
 import { askYesNo } from './prompt.mjs';
 
@@ -90,8 +90,17 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       atomicWriteConfig(path, text);
     },
-    run: async (cmd, args) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    // `extraEnv` is the daemon pair (see daemonEnv). It is applied to THIS
+    // invocation only and never to the installer's own process: a state
+    // directory selected by one run must not leak into anything the operator
+    // starts afterwards.
+    run: async (cmd, args, { env: extraEnv = null } = {}) => {
+      // Always built from this layer's OWN env rather than left to spawnSync's
+      // implicit inheritance, so what a child receives is a property of the
+      // effects object a caller constructed and not of whatever ambient shell
+      // the installer happened to start in.
+      const childEnv = { ...env, ...(extraEnv ?? {}) };
+      const r = spawnSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: childEnv });
       if (r.status !== 0) {
         const detail = (r.stderr || r.stdout || '').trim().split('\n').slice(-3).join('; ');
         throw new Error(`${cmd} ${args.join(' ')} exited ${r.status}${detail ? `: ${detail}` : ''}`);
@@ -106,6 +115,53 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
 }
 
 export const __testables = { probePort, portTakenSync, readJsonFile, readTextFile, installedVersionOf };
+
+// -----------------------------------------------------------------------------
+// THE PAIR
+// -----------------------------------------------------------------------------
+
+/**
+ * The environment that names ONE daemon, for a single child invocation.
+ *
+ * Spec §2's rule is that a state directory and an endpoint always travel
+ * together; "endpoint selected, state directory defaulted" must be unreachable.
+ * Every consumer downstream — ours-mcp's proxy, ours-fleet's per-role resolver,
+ * ours-hermes-install — reads these three names and falls back to `~/.ours` for
+ * whichever one is missing. So a HALF pair does not fail: it silently attaches
+ * to the default daemon while the operator was told a different one was chosen.
+ *
+ * That is why this is a function and not three assignments at the call sites.
+ * There is exactly one place a daemon environment can be built, it takes both
+ * halves as arguments, and it refuses rather than emit a partial one.
+ *
+ * The three names, not two, are deliberate: OURS_CONFIG alone would leave the
+ * port to whatever config.json happens to say, which is exactly the stale-file
+ * divergence lib/target.mjs's second lookup exists to survive.
+ */
+export const DAEMON_ENV_KEYS = ['OURS_CONFIG', 'OURS_STATE_DIR', 'OURS_PORT'];
+
+export function daemonEnv(stateDir, port) {
+  const dir = typeof stateDir === 'string' ? stateDir.trim() : '';
+  if (!dir) throw new Error('daemonEnv requires a state directory: refusing to build half of the daemon pair');
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('daemonEnv requires a port between 1 and 65535: refusing to build half of the daemon pair');
+  }
+  const resolved = resolve(dir);
+  return {
+    OURS_CONFIG: join(resolved, 'config.json'),
+    OURS_STATE_DIR: resolved,
+    OURS_PORT: String(port),
+  };
+}
+
+/** Is this environment a whole pair (or nothing at all)? Never one half. */
+export function isWholeDaemonEnv(env) {
+  if (env == null) return true;
+  const present = DAEMON_ENV_KEYS.filter((k) => typeof env[k] === 'string' && env[k] !== '');
+  if (present.length === 0) return true;
+  if (present.length !== DAEMON_ENV_KEYS.length) return false;
+  return env.OURS_CONFIG === join(resolve(env.OURS_STATE_DIR), 'config.json');
+}
 
 /** The state directory a default run targets, for callers that need it early. */
 export const defaultStateDir = (home = homedir()) => join(home, '.ours');
