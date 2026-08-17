@@ -481,3 +481,107 @@ test('the end screen tells a running harness it must restart before any of this 
     'said before the hand-off prompt: it is the only thing here the operator must do himself',
   );
 });
+
+// ------------------------------------------------- the selection screen (C1) --
+
+const SECOND_DIR = join(HOME, '.ours-work');
+
+test('several daemons are SHOWN and the operator picks — never asked to type a path', async () => {
+  const e = fx({
+    known: [OURS, SECOND_DIR],
+    json: {
+      [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS },
+      [join(SECOND_DIR, 'config.json')]: { port: 3060, stateDir: SECOND_DIR },
+    },
+    net: { 3060: { ok: true, stateDir: SECOND_DIR } },
+    lines: ['2'],
+  });
+  await runInstall([], e);
+  const screen = said(e);
+  assert.match(screen, /Which ours daemon is this for\?/);
+  assert.match(screen, /1\) .*\.ours\b/);
+  assert.match(screen, /2\) .*\.ours-work/);
+  assert.match(screen, /3\) create a new one at .*\.ours-2/);
+  assert.match(screen, /using the ours daemon at .*\.ours-work/);
+  assert.ok(
+    e.recorder.askedLines.every((p) => !/state directory|path/i.test(p)),
+    'the prompt asks for a NUMBER; spec §2 forbids asking for a path',
+  );
+});
+
+test('the Telegram connector is never offered as a daemon to install into', async () => {
+  // ~/.ours-telegram matches a ~/.ours* scan and has a config.json. Offering it
+  // would let the operator pick it and have a daemon created inside the
+  // connector's own directory.
+  const TG_DIR = join(HOME, '.ours-telegram');
+  const e = fx({
+    known: [OURS, TG_DIR],
+    json: {
+      [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS },
+      [join(TG_DIR, 'config.json')]: { botToken: 's', daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: OURS },
+    },
+    net: { 3050: { ok: true, stateDir: OURS } },
+  });
+  await runInstall([], e);
+  assert.doesNotMatch(said(e), /Which ours daemon is this for\?/, 'one daemon, so no screen');
+  assert.doesNotMatch(said(e), /\.ours-telegram/);
+  assert.match(said(e), /the only one found/);
+});
+
+test('exactly one daemon: no question, but the run SAYS which one', async () => {
+  const e = fx({
+    known: [OURS],
+    json: { [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS } },
+    net: { 3050: { ok: true, stateDir: OURS } },
+  });
+  await runInstall([], e);
+  assert.deepEqual(e.recorder.askedLines.filter((p) => /Choose/.test(p)), [], 'no choice offered');
+  assert.match(said(e), /using the ours daemon at .*\.ours \(port 3050\) — the only one found/);
+});
+
+test('--state-dir outranks everything detected: no screen at all', async () => {
+  const e = fx({
+    known: [OURS, SECOND_DIR],
+    json: {
+      [join(OURS, 'config.json')]: { port: 3050 },
+      [join(SECOND_DIR, 'config.json')]: { port: 3060 },
+    },
+  });
+  await runInstall(['--state-dir', TG], e);
+  assert.doesNotMatch(said(e), /Which ours daemon is this for\?/);
+  assert.match(said(e), new RegExp(`target ${TG}`));
+});
+
+test('a non-interactive run never sees the screen, whatever is on the machine', async () => {
+  const e = fx({
+    env: { OURS_ASSUME_YES: '1' },
+    known: [OURS, SECOND_DIR],
+    json: { [join(OURS, 'config.json')]: { port: 3050 }, [join(SECOND_DIR, 'config.json')]: { port: 3060 } },
+  });
+  await runInstall([], e);
+  assert.doesNotMatch(said(e), /Which ours daemon is this for\?/);
+  assert.deepEqual(e.recorder.askedLines, [], 'nothing asked at all');
+});
+
+test('an answer that is not on the list REFUSES and changes nothing', async () => {
+  const e = fx({
+    known: [OURS, SECOND_DIR],
+    json: { [join(OURS, 'config.json')]: { port: 3050 }, [join(SECOND_DIR, 'config.json')]: { port: 3060 } },
+    lines: ['/etc/passwd'],
+  });
+  assert.equal(await runInstall([], e), EXIT_REFUSED);
+  assert.deepEqual(e.recorder.ran, [], 'nothing installed');
+  assert.deepEqual(e.recorder.wrote, [], 'nothing written');
+  assert.match(said(e), /not one of the numbers offered/);
+});
+
+test('picking "create a new one" targets the DERIVED directory, not the default', async () => {
+  const e = fx({
+    known: [OURS, SECOND_DIR],
+    json: { [join(OURS, 'config.json')]: { port: 3050 }, [join(SECOND_DIR, 'config.json')]: { port: 3060 } },
+    lines: ['3'],
+  });
+  await runInstall([], e);
+  assert.match(said(e), /creating a new daemon at .*\.ours-2/);
+  assert.ok(e.recorder.wrote.some(([p]) => p === join(HOME, '.ours-2', 'config.json')));
+});

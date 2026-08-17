@@ -73,6 +73,10 @@ export function parseInstallArgs(argv = [], env = {}, { home = homedir() } = {})
   const out = {
     stateDir: null,
     port: null,
+    // `stateDir` is always populated (it defaults to ~/.ours), so "was it given?"
+    // needs its own flag — the selection screen has to tell an explicit target from
+    // a defaulted one, and a defaulted value looks identical to a chosen one.
+    stateDirExplicit: false,
     portExplicit: false,
     dryRun: env.OURS_INSTALL_DRY_RUN === '1',
     assumeYes: env.OURS_ASSUME_YES === '1',
@@ -98,7 +102,7 @@ export function parseInstallArgs(argv = [], env = {}, { home = homedir() } = {})
     seen.add(name);
     const value = equal >= 0 ? raw.slice(equal + 1) : argv[++i];
     if (value === undefined || value === '') throw new InstallUsageError(`${name} requires a value`);
-    if (name === '--state-dir') out.stateDir = resolve(String(value));
+    if (name === '--state-dir') { out.stateDir = resolve(String(value)); out.stateDirExplicit = true; }
     if (name === '--port') {
       if (!/^[0-9]+$/.test(String(value).trim())) throw new InstallUsageError('--port must be an integer');
       const n = Number.parseInt(String(value).trim(), 10);

@@ -34,6 +34,7 @@ import {
 import { planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3, restartHints } from './extras.mjs';
 import { summarizeRun } from './rerun.mjs';
 import { configJournal, reportRollback } from './journal.mjs';
+import { detectDaemons, planDaemonSelection, resolveSelection } from './detect.mjs';
 import { detectPlatform, resolveChannel, validateBroker } from './logic.mjs';
 import { daemonEnv } from './effects.mjs';
 import { USAGE } from './usage.mjs';
@@ -96,6 +97,64 @@ function pairFor(plan, target) {
   return plan && plan.env && Object.keys(plan.env).length > 0
     ? daemonEnv(target.stateDir, target.port)
     : undefined;
+}
+
+/**
+ * Which daemon is this run for? (C1, owner ruling 2026-08-17.)
+ *
+ * Never asks for a PATH — spec §2 stands — but when several daemons are DETECTED
+ * it shows them and lets the operator pick, because choosing from what was found
+ * is not prompting for a state directory.
+ *
+ * Runs BEFORE the daemon phase and only changes `args.stateDir`. Everything
+ * downstream — resolveTarget, the refusals, the journal — is untouched and does
+ * not know a screen happened, which is what keeps the flags path byte-identical.
+ */
+export async function runSelectionPhase(args, effects) {
+  const detected = detectDaemons({
+    candidates: effects.knownStateDirs(),
+    exists: effects.exists,
+    readJson: effects.readJson,
+  });
+  const plan = planDaemonSelection({
+    candidates: detected,
+    stateDirExplicit: args.stateDirExplicit,
+    portExplicit: args.portExplicit,
+    assumeYes: args.assumeYes,
+    home: effects.home,
+  });
+
+  if (plan.action === 'flags' || plan.action === 'create') return { ...plan, detected };
+  if (plan.action === 'use') {
+    // A question with one answer is not a choice, it is a keystroke tax — but the
+    // operator still has to be TOLD which daemon this run is about.
+    effects.out(info(`using the ours daemon at ${plan.stateDir}${plan.only.port ? ` (port ${plan.only.port})` : ''} — the only one found`));
+    args.stateDir = plan.stateDir;
+    return { ...plan, detected };
+  }
+
+  effects.out(heading('Which ours daemon is this for?'));
+  plan.candidates.forEach((candidate, index) => {
+    effects.out(`  ${index + 1}) ${candidate.stateDir}${candidate.port ? `   port ${candidate.port}` : ''}`);
+  });
+  if (plan.createOption.stateDir) {
+    effects.out(`  ${plan.candidates.length + 1}) create a new one at ${plan.createOption.stateDir}`);
+  }
+  const answer = await effects.askLine(`Choose 1-${plan.candidates.length + (plan.createOption.stateDir ? 1 : 0)}: `, '1');
+  const chosen = resolveSelection(answer, plan);
+  if (chosen.action === 'invalid') {
+    // Refused rather than guessed. Interpreting an unrecognised answer as a path
+    // would be the "type a state directory" prompt spec §2 forbids, arriving
+    // through the back door.
+    effects.out(warn(`ours: ${chosen.reason}. Nothing was changed.`));
+    effects.out(info('Re-run and pick one of the numbers, or name a daemon directly with --state-dir.'));
+    return { action: 'refuse', exitCode: EXIT_REFUSED, detected };
+  }
+  args.stateDir = chosen.stateDir;
+  effects.out(ok(chosen.action === 'create'
+    ? `creating a new daemon at ${chosen.stateDir}`
+    : `using the ours daemon at ${chosen.stateDir}`));
+  return { ...chosen, detected };
 }
 
 /**
@@ -881,6 +940,11 @@ export async function runInstall(argv, effects) {
   // machine this cannot run on. v2 exited 0 there and so does this, so a script
   // that wrapped the old installer keeps its meaning.
   if (!runPreflight(effects).ok) return EXIT_OK;
+
+  // Which daemon, before anything is decided about it. Only args.stateDir can
+  // change here; every refusal downstream is unaffected.
+  const selection = await runSelectionPhase(args, effects);
+  if (selection.action === 'refuse') return EXIT_REFUSED;
 
   const daemon = await runDaemonPhase(args, effects);
   if (daemon.refused) return EXIT_REFUSED;
