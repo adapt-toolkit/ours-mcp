@@ -174,6 +174,49 @@ export function planHarnessPlugins({
 }
 
 // -----------------------------------------------------------------------------
+// §5 — what the operator has to do BEFORE any of this works
+// -----------------------------------------------------------------------------
+
+/**
+ * The restart each harness needs before its new plugin is live.
+ *
+ * A CORRECTNESS PROBLEM WEARING A COSMETIC COSTUME. The ours MCP server is spawned
+ * BY the harness, once per session (`ours-mcp proxy` over stdio), so a harness that
+ * was already running when its plugin was installed has no ours tools and will not
+ * get them until it restarts. v3 said nothing at all about this: the screen read
+ * "Everything installed cleanly", the user went back to a running Claude Code,
+ * found no ours tools, and concluded the install had failed. The nightly installer
+ * prints these hints and v3 dropped them.
+ *
+ * Derived from what THIS RUN installed rather than from a registry — v3 already
+ * knows, and its own summary is a better source than a persisted file that can go
+ * stale against reality.
+ *
+ * The connectors are deliberately absent. The installer runs their
+ * `install-service` itself, so their new configuration is already applied; telling
+ * someone to restart something that was just restarted for them is noise, and noise
+ * in this list is what stops the real lines being read.
+ */
+export const HARNESS_RESTART = {
+  'claude-code': 'restart Claude Code',
+  codex: 'start a new Codex session (or `ours-codex`)',
+  hermes: 'run /reload-mcp in Hermes',
+};
+
+export function restartHints(summary = []) {
+  const live = (row) => row && (row.state === 'installed' || row.state === 'current');
+  const hints = [];
+  for (const [name, action] of Object.entries(HARNESS_RESTART)) {
+    const row = summary.find((r) => r.key === name);
+    if (live(row)) hints.push({ key: name, action });
+  }
+  // Nothing to restart if no harness got a plugin this run. The MCP server on its
+  // own changes nothing a running harness can see, so an "install the MCP server
+  // and restart everything" line would be advice with no reason behind it.
+  return hints;
+}
+
+// -----------------------------------------------------------------------------
 // ours-fleet — the one that needs zero code
 // -----------------------------------------------------------------------------
 

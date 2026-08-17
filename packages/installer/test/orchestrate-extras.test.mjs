@@ -1,3 +1,4 @@
+import { restartHints } from '../lib/extras.mjs';
 // ours-install v3 — the four retained extras, as the orchestrator runs them.
 //
 // lib/extras.mjs proves the PLANS are right. This file proves the orchestrator
@@ -391,4 +392,36 @@ test('the extended flow never splits the daemon pair, on any path', async () => 
       }
     }
   }
+});
+
+// ------------------------------------------------------- restart hints (8.2) --
+
+test('a harness that got a plugin is told to restart, because nothing works until it does', () => {
+  // The ours MCP server is spawned BY the harness, once per session. A harness that
+  // was already running when its plugin landed has no ours tools, and v3 said
+  // nothing at all — so a successful install read as a failed one.
+  const hints = restartHints([
+    { key: 'mcp', state: 'installed' },
+    { key: 'claude-code', state: 'installed' },
+    { key: 'hermes', state: 'current' },
+    { key: 'codex', state: 'skipped' },
+  ]);
+  assert.deepEqual(hints.map((h) => h.key), ['claude-code', 'hermes'], 'a skipped harness is not told to restart');
+  assert.match(hints[0].action, /restart Claude Code/);
+  assert.match(hints[1].action, /\/reload-mcp/);
+});
+
+test('no harness plugin this run means no restart advice at all', () => {
+  // The MCP server alone changes nothing a running harness can see, so telling
+  // someone to restart would be advice with no reason behind it.
+  assert.deepEqual(restartHints([{ key: 'mcp', state: 'installed' }, { key: 'fleet', state: 'installed' }]), []);
+  assert.deepEqual(restartHints([]), []);
+});
+
+test('the connectors are deliberately NOT in the restart list', () => {
+  // The installer runs their install-service itself, so their configuration is
+  // already applied. Telling someone to restart what was just restarted for them is
+  // noise, and noise is what stops the real lines being read.
+  const hints = restartHints([{ key: 'tg', state: 'installed' }, { key: 'cowork', state: 'installed' }]);
+  assert.deepEqual(hints, []);
 });

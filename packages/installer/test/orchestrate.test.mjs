@@ -462,3 +462,22 @@ test('the replaced legacy unit is NAMED in the rollback, because it cannot be re
   assert.deepEqual(e.recorder.restored.map(([p]) => p), [join(OURS, 'config.json')],
     'the config still goes back; only the unit does not');
 });
+
+test('the end screen tells a running harness it must restart before any of this works', async () => {
+  // THE REPRODUCTION for the restart hints: v3 printed "Everything installed
+  // cleanly" and nothing else, so a user went back to an already-open Claude Code,
+  // found no ours tools, and read a successful install as a failed one.
+  const e = fx({
+    env: { OURS_ASSUME_YES: '1' },
+    harnesses: [{ name: 'claude-code', status: 'ok', label: 'Claude Code' }],
+  });
+  await runInstall([], e);
+  const screen = said(e);
+  assert.match(screen, /restart Claude Code/);
+  assert.match(screen, /already open has not picked it up yet/);
+  assert.ok(
+    screen.indexOf('restart Claude Code') < screen.indexOf('ONE LAST STEP')
+      || !screen.includes('ONE LAST STEP'),
+    'said before the hand-off prompt: it is the only thing here the operator must do himself',
+  );
+});

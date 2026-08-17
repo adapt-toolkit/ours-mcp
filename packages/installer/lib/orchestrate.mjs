@@ -31,7 +31,7 @@ import {
   planComponentSelection, planMcpAttachment, planTgAttachment, planCoworkAttachment,
   tgConfigPath, coworkConfigPath, summarizeComponentRun, componentSpec,
 } from './components.mjs';
-import { planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3 } from './extras.mjs';
+import { planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3, restartHints } from './extras.mjs';
 import { summarizeRun } from './rerun.mjs';
 import { configJournal, reportRollback } from './journal.mjs';
 import { detectPlatform, resolveChannel, validateBroker } from './logic.mjs';
@@ -772,6 +772,19 @@ export async function endScreen(args, effects, { summary, target, isDefaultState
   effects.out(summary.some((r) => r.state === 'failed')
     ? `  ${c.yellow('Some pieces need a hand — see the notes above; re-run ours-install after fixing.')}`
     : `  ${c.green('Everything installed cleanly. No problems.')}`);
+
+  // Said BEFORE the hand-off prompt, because it is the only thing here the
+  // operator must do himself for any of the rest to work. A harness that was
+  // running when its plugin landed spawns no ours MCP server until it restarts,
+  // and someone who goes back to that harness, finds no ours tools and reads a
+  // successful install as a failed one is the exact outcome this prevents.
+  const restarts = restartHints(summary);
+  if (restarts.length > 0) {
+    effects.out('');
+    effects.out(`  ${c.bold('Before this works:')} your harness spawns the ours MCP server when it starts, so`);
+    effects.out('  a harness that was already open has not picked it up yet.');
+    for (const hint of restarts) effects.out(`  ${c.green('→')} ${hint.action}`);
+  }
 
   const has = (key) => summary.some((r) => r.key === key && (r.state === 'installed' || r.state === 'current'));
   const { text, empty } = buildHandoffPromptV3({
