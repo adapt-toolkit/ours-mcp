@@ -82,7 +82,15 @@ export async function runUninstall(argv, effects) {
 
   // Ask first, mutate second. The question is about resolving the step-1
   // refusal, so it has to come before the plan that would refuse.
-  const probe = planUninstall({ home: effects.home, env: effects.env, endpoint, stateDir: dir, readJson: effects.readJson });
+  // `readText` is passed alongside `readJson` so the planner can tell an ABSENT
+  // component config from a CORRUPT one. Without it, effects.readJson's null
+  // stands for both, and a file that will not parse reads as "no connector points
+  // here" — which removes the daemon out from under a live connector.
+  const probe = planUninstall({ home: effects.home, env: effects.env, endpoint, stateDir: dir, readJson: effects.readJson, readText: effects.readText });
+  if (probe.action === 'refuse' && probe.reason === 'component-config-unreadable') {
+    effects.out(warn(`ours: ${probe.message}`));
+    return EXIT_REFUSED;
+  }
   const pointing = probe.action === 'refuse' ? probe.components : [];
   const confirmedComponents = await confirmComponentRemoval(pointing, { assumeYes: args.assumeYes, effects });
 
@@ -95,6 +103,7 @@ export async function runUninstall(argv, effects) {
     assumeYes: args.assumeYes,
     confirmedComponents,
     readJson: effects.readJson,
+    readText: effects.readText,
     exists: effects.exists,
     cliStartedIt: effects.readJson(join(dir, 'ours-cli-daemon.json')) !== null,
     otherStateDirsWithConfig: effects.knownStateDirs(),

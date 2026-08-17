@@ -226,3 +226,32 @@ test("Claude Code's own removal is always printed, even when nothing else is", a
   assert.match(said(e), /\/plugin uninstall ours/);
   assert.match(said(e), /nothing on disk is ours to remove/);
 });
+
+// ------------------------------------- the component config we cannot read ---
+
+test('a corrupt connector config refuses the run and removes NOTHING', async () => {
+  // The fail-open this closes: readJson turned the parse error into null, the
+  // connector looked absent, and the daemon was removed out from under it.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    text: { [TG_CFG]: '{ "daemonStateDir": "/home/me/.ours"' },
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_REFUSED);
+  assert.deepEqual(e.recorder.ran, [], 'nothing stopped, uninstalled or npm-removed');
+  assert.deepEqual(e.recorder.wrote, [], 'and no config rewritten');
+  assert.deepEqual(e.recorder.wroteText, []);
+  assert.deepEqual(e.recorder.removed, [], 'and nothing deleted');
+  assert.match(said(e), /corrupt or unsafe to inspect/);
+});
+
+test('the corrupt-config refusal is not asked away, and beats even --purge', async () => {
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    text: { [COWORK_CFG]: 'not json' },
+    answers: [true, true, true],
+    typed: OURS,
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS, '--purge'], e), EXIT_REFUSED);
+  assert.deepEqual(e.recorder.removed, [], 'the irreversible step is never reached');
+  assert.deepEqual(e.recorder.asked, [], 'and the operator is not offered a way to consent past it');
+});

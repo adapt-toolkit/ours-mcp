@@ -9,6 +9,7 @@ import {
   planComponentDetach, planDaemonRemoval, planStatePurge, planGlobalPackages,
   planUninstall, NON_INTERACTIVE_ANSWERS, refusalSurvivesAssumeYes,
   stripManagedBlock, planPluginRemoval, YAML_BLOCK,
+  inspectComponentConfig, unreadableComponentConfigs,
 } from '../lib/uninstall.mjs';
 
 const HOME = '/home/me';
@@ -239,4 +240,79 @@ test('the plugin packages follow the SAME rule as the daemon packages, not a sec
 
   const removed = planGlobalPackages({ stateDir: OURS, otherStateDirsWithConfig: [], pluginPackages: ['@ours.network/hermes'] });
   assert.deepEqual(removed.packages, ['@ours.network/cli', '@ours.network/mcp', '@ours.network/hermes']);
+});
+
+// ------------------------------- §8 step 1 — the config we CANNOT read -------
+//
+// THE DEFECT THESE PIN. effects.readJson swallows every failure into `null`, so a
+// corrupt ~/.ours-telegram/config.json read as "no connector points at this
+// daemon": step 1's refusal never fired and the daemon was removed out from under
+// a connector that may still have been using it. The nightly uninstaller refuses
+// here (lib/nightly-uninstall.mjs:22,244) and has a test pinning that it does.
+// Fail closed: "cannot prove it does not point here" is not "does not point here".
+
+test('a corrupt component config REFUSES the uninstall instead of reading as absent', () => {
+  const readText = files({ [TG_CFG]: '{ "daemonStateDir": "/home/me/.ours"' });   // truncated
+  const readJson = files({});                                                     // exactly what readJson does with it
+  const p = planUninstall({ home: HOME, endpoint: 'http://127.0.0.1:3050', stateDir: OURS, readJson, readText });
+  assert.equal(p.action, 'refuse');
+  assert.equal(p.exitCode, 2);
+  assert.equal(p.reason, 'component-config-unreadable');
+  assert.deepEqual(p.removed, []);
+  assert.deepEqual(p.components.map((c) => c.key), ['tg']);
+  assert.match(p.message, /corrupt or unsafe to inspect/);
+  assert.match(p.message, /Nothing was removed/);
+});
+
+test('the unreadable refusal cannot be resolved by confirming the component', () => {
+  // A component that points here can be confirmed for removal in the same run. A
+  // config that will not parse cannot be confirmed away by anyone — nothing about
+  // its contents is known. The operator has to fix or move the file first.
+  const readText = files({ [COWORK_CFG]: 'not json at all' });
+  const p = planUninstall({
+    home: HOME, endpoint: 'http://127.0.0.1:3050', stateDir: OURS,
+    readJson: files({}), readText, confirmedComponents: ['tg', 'cowork'],
+  });
+  assert.equal(p.reason, 'component-config-unreadable');
+  assert.deepEqual(p.components.map((c) => c.key), ['cowork']);
+});
+
+test('a corrupt config refuses even when it plainly names ANOTHER daemon', () => {
+  // Fail closed on the file, not on its contents: we cannot read the contents.
+  const readText = files({ [TG_CFG]: '{"daemonStateDir": "/somewhere/else",' });
+  const p = planUninstall({ home: HOME, endpoint: 'http://127.0.0.1:9999', stateDir: TG, readJson: files({}), readText });
+  assert.equal(p.reason, 'component-config-unreadable');
+});
+
+test('an ABSENT component config is not corrupt, and an unattended run still proceeds', () => {
+  const p = planUninstall({
+    home: HOME, endpoint: 'http://127.0.0.1:3050', stateDir: OURS,
+    readJson: files({}), readText: files({}), assumeYes: true, exists: isStateDir,
+  });
+  assert.equal(p.action, 'uninstall', 'no file is not the same as an unreadable file');
+});
+
+test('inspectComponentConfig tells absent, ok and corrupt apart', () => {
+  const readText = files({
+    [TG_CFG]: '{"daemonUrl": "http://127.0.0.1:3050"}',
+    [COWORK_CFG]: '',
+  });
+  assert.equal(inspectComponentConfig(TG_CFG, { readText }).state, 'ok');
+  assert.equal(inspectComponentConfig(COWORK_CFG, { readText }).state, 'corrupt',
+    'an EMPTY existing file is corrupt, not absent — the nightly reader parses whatever exists');
+  assert.equal(inspectComponentConfig(join(HOME, 'nope.json'), { readText }).state, 'absent');
+  assert.equal(inspectComponentConfig(TG_CFG, {}).state, 'unknown',
+    'with no text reader the answer is unknown, never a silent "fine"');
+});
+
+test('a JSON array or scalar in a component config is corrupt, not a config', () => {
+  const readText = files({ [TG_CFG]: '[1,2,3]', [COWORK_CFG]: '"a string"' });
+  assert.deepEqual(
+    unreadableComponentConfigs({ home: HOME, readText }).map((c) => c.key),
+    ['tg', 'cowork'],
+  );
+});
+
+test('without a text reader the unreadable check reports nothing rather than guessing', () => {
+  assert.deepEqual(unreadableComponentConfigs({ home: HOME }), []);
 });

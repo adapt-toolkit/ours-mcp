@@ -39,6 +39,51 @@ export function looksLikeStateDir(stateDir, exists) {
 }
 
 /**
+ * A component config file, read so that ABSENT and CORRUPT are different answers.
+ *
+ * WHY THIS IS NOT `readJson`. `effects.readJson` swallows every failure into
+ * `null` (lib/effects.mjs), which is the right shape for the installer — an
+ * unreadable daemon config there means "nothing recorded", and the run proceeds
+ * to write one. On the UNINSTALL side that same `null` is a fail-open:
+ * `componentsPointingHere` reads it as "no connector points at this daemon",
+ * step 1's refusal never fires, and the daemon is removed out from under a
+ * connector that may still be using it. The nightly uninstaller refuses here
+ * (`lib/nightly-uninstall.mjs:22,244`) and has a test pinning that it does.
+ *
+ * So this takes `readText` — already on the effects contract — and does the parse
+ * itself, which keeps the whole decision pure and testable:
+ *
+ *   absent  — no file (readText returned null). Nothing to point anywhere.
+ *   ok      — a JSON object.
+ *   corrupt — the file exists and is not a readable JSON object. An EXISTING file
+ *             we cannot parse is the case that must stop the run: we cannot prove
+ *             it does not name this daemon, and "cannot prove" is not "does not".
+ *
+ * An empty existing file is CORRUPT, not absent — same as the nightly reader,
+ * which parses whatever `existsSync` says is there.
+ *
+ * THIS DECIDES NOTHING ABOUT CONTENTS. `componentsPointingHere` still reads its
+ * values through `readJson`, unchanged — deliberately, so this addition cannot
+ * alter which components are found. The only new outcome is `corrupt`, and the
+ * only thing that consumes it is a refusal.
+ */
+export function inspectComponentConfig(path, { readText } = {}) {
+  if (typeof readText !== 'function') return { state: 'unknown', reason: 'no text reader injected' };
+  const text = readText(path);
+  if (text === null || text === undefined) return { state: 'absent' };
+  let parsed;
+  try {
+    parsed = JSON.parse(String(text));
+  } catch (error) {
+    return { state: 'corrupt', reason: error instanceof Error ? error.message : String(error) };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { state: 'corrupt', reason: 'expected a JSON object' };
+  }
+  return { state: 'ok' };
+}
+
+/**
  * §8 step 1 — refuse if a component still points at this daemon.
  *
  * Read the connector's and cowork's config files; if either names this daemon's
@@ -62,6 +107,29 @@ export function componentsPointingHere({ home, env = {}, endpoint, stateDir, rea
     found.push({ key: 'cowork', config: coworkConfigPath(home, env), endpoint: block.endpoint ?? null, stateDir: block.stateDir ?? null });
   }
   return found;
+}
+
+/**
+ * The other half of step 1, and the reason it is a SEPARATE question.
+ *
+ * `componentsPointingHere` answers "does a component point here?". This answers
+ * "is there a component config I cannot read at all?" — and the two must not be
+ * collapsed, because they have opposite resolutions. A component that points here
+ * can be confirmed for removal in the same run; a config that will not parse
+ * cannot be confirmed away by anybody, because nothing about its contents is
+ * known. The operator has to fix or move the file first.
+ *
+ * Returns [] when no reader capable of telling absent from corrupt was injected.
+ * That is not a silent pass: planUninstall reports the limit in the plan itself.
+ */
+export function unreadableComponentConfigs({ home, env = {}, readText }) {
+  if (typeof readText !== 'function') return [];
+  const out = [];
+  for (const [key, path] of [['tg', tgConfigPath(home, env)], ['cowork', coworkConfigPath(home, env)]]) {
+    const read = inspectComponentConfig(path, { readText });
+    if (read.state === 'corrupt') out.push({ key, config: path, reason: read.reason });
+  }
+  return out;
 }
 
 /**
@@ -294,10 +362,28 @@ export function planPluginRemoval({ home, env = {}, exists = () => false, lastDa
  * The whole §8 order, refusing at step 1 rather than starting and stopping
  * half-way.
  */
-export function planUninstall({ home, env = {}, endpoint, stateDir, purge = false, assumeYes = false, confirmedComponents = [], readJson, exists = () => true, cliStartedIt = true, otherStateDirsWithConfig = [], typedConfirmation = null }) {
+export function planUninstall({ home, env = {}, endpoint, stateDir, purge = false, assumeYes = false, confirmedComponents = [], readJson, readText, exists = () => true, cliStartedIt = true, otherStateDirsWithConfig = [], typedConfirmation = null }) {
   const dir = resolve(stateDir);
   const lastDaemon = otherStateDirsWithConfig.map((d) => resolve(d)).filter((d) => d !== dir).length === 0;
   const plugins = planPluginRemoval({ home, env, exists, lastDaemon });
+
+  // BEFORE the pointing question, and not resolvable by confirming anything: a
+  // component config that will not parse cannot be proven not to name this
+  // daemon. Fail closed, name the file, remove nothing. This mirrors the nightly
+  // uninstaller's refusal (lib/nightly-uninstall.mjs:244) rather than inventing a
+  // second wording for the same event.
+  const unreadable = unreadableComponentConfigs({ home, env, readText });
+  if (unreadable.length > 0) {
+    return {
+      action: 'refuse',
+      exitCode: 2,
+      reason: 'component-config-unreadable',
+      components: unreadable,
+      removed: [],
+      message: `${unreadable.map((c) => `${c.config} is corrupt or unsafe to inspect${c.reason ? `: ${c.reason}` : ''}`).join('; ')}. Refusing to uninstall: a component config that cannot be read cannot be shown not to point at this daemon. Repair or move it, then re-run. Nothing was removed.`,
+    };
+  }
+
   const pointing = componentsPointingHere({ home, env, endpoint, stateDir: dir, readJson });
   const unconfirmed = pointing.filter((p) => !confirmedComponents.includes(p.key));
   if (unconfirmed.length > 0) {
