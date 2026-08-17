@@ -22,7 +22,7 @@ const nothingTaken = () => false;
 
 // ---------------------------------------------------------------- arguments --
 
-test('parseInstallArgs: defaults are ~/.ours and no explicit port', () => {
+test('parseInstallArgs: defaults are ~/.ours and no explicit port', async () => {
   const a = parseInstallArgs([], {}, { home: HOME });
   assert.equal(a.stateDir, OURS);
   assert.equal(a.port, null);
@@ -31,7 +31,7 @@ test('parseInstallArgs: defaults are ~/.ours and no explicit port', () => {
   assert.equal(a.assumeYes, false);
 });
 
-test('parseInstallArgs: --state-dir and --port are resolved and echoed back', () => {
+test('parseInstallArgs: --state-dir and --port are resolved and echoed back', async () => {
   // Note: the SHELL expands ~, not Node — a literal "~/x" would resolve against
   // the cwd, so the installer never sees one in practice and does not special-case it.
   const a = parseInstallArgs(['--state-dir', `${HOME}/x/../.ours-tg`, '--port', '3051'], {}, { home: HOME });
@@ -43,13 +43,13 @@ test('parseInstallArgs: --state-dir and --port are resolved and echoed back', ()
   assert.equal(b.port, 3060);
 });
 
-test('parseInstallArgs: env carries dry-run and assume-yes; --dry-run also sets it', () => {
+test('parseInstallArgs: env carries dry-run and assume-yes; --dry-run also sets it', async () => {
   assert.equal(parseInstallArgs([], { OURS_INSTALL_DRY_RUN: '1' }, { home: HOME }).dryRun, true);
   assert.equal(parseInstallArgs([], { OURS_ASSUME_YES: '1' }, { home: HOME }).assumeYes, true);
   assert.equal(parseInstallArgs(['--dry-run'], {}, { home: HOME }).dryRun, true);
 });
 
-test('parseInstallArgs: bad input is refused, never guessed', () => {
+test('parseInstallArgs: bad input is refused, never guessed', async () => {
   const bad = [
     [['--nope'], /unknown option: --nope/],
     [['--state-dir'], /--state-dir requires a value/],
@@ -70,27 +70,27 @@ test('parseInstallArgs: bad input is refused, never guessed', () => {
   }
 });
 
-test('parseInstallArgs: -h and -V alias --help and --version', () => {
+test('parseInstallArgs: -h and -V alias --help and --version', async () => {
   assert.equal(parseInstallArgs(['-h'], {}, { home: HOME }).help, true);
   assert.equal(parseInstallArgs(['-V'], {}, { home: HOME }).version, true);
 });
 
 // ------------------------------------------------------------------- lookup --
 
-test('samePath compares lexically, after normalisation', () => {
+test('samePath compares lexically, after normalisation', async () => {
   assert.ok(samePath('/a/b', '/a/./c/../b'));
   assert.ok(!samePath('/a/b', '/a/c'));
   assert.ok(!samePath('/a/b', ''));
 });
 
-test('candidatePort: the directory\'s own record, else the default', () => {
+test('candidatePort: the directory\'s own record, else the default', async () => {
   assert.equal(candidatePort({ port: 3060 }), 3060);
   assert.equal(candidatePort({}), INSTALL_DEFAULT_PORT);
   assert.equal(candidatePort(null), INSTALL_DEFAULT_PORT);
   assert.equal(candidatePort({ port: 'nope' }), INSTALL_DEFAULT_PORT, 'a junk value is not a record');
 });
 
-test('classifyProbe: present / foreign / absent', () => {
+test('classifyProbe: present / foreign / absent', async () => {
   assert.equal(classifyProbe({ ok: true, stateDir: OURS }, OURS).kind, 'present');
   assert.equal(classifyProbe({ ok: true, stateDir: `${HOME}/./.ours` }, OURS).kind, 'present', 'compared after normalisation');
   assert.equal(classifyProbe({ ok: true, stateDir: TG }, OURS).kind, 'foreign');
@@ -98,8 +98,8 @@ test('classifyProbe: present / foreign / absent', () => {
   assert.equal(classifyProbe({ ok: false, reason: 'refused' }, OURS).kind, 'absent');
 });
 
-test('findDaemon: the recorded port is probed first', () => {
-  const found = findDaemon({
+test('findDaemon: the recorded port is probed first', async () => {
+  const found = await findDaemon({
     stateDir: OURS,
     readJson: files({ [join(OURS, DAEMON_CONFIG)]: { port: 3060 } }),
     probe: net({ 3060: { ok: true, stateDir: OURS } }),
@@ -109,11 +109,11 @@ test('findDaemon: the recorded port is probed first', () => {
   assert.equal(found.via, 'config');
 });
 
-test('findDaemon: a hand-started daemon with NO recorded port is still found via ours-cli-daemon.json', () => {
+test('findDaemon: a hand-started daemon with NO recorded port is still found via ours-cli-daemon.json', async () => {
   // The corruption case this guard exists for: config.json records nothing, the
   // probe of 3050 misses, and without the PID record the caller would create a
   // SECOND daemon on the SAME state directory.
-  const found = findDaemon({
+  const found = await findDaemon({
     stateDir: OURS,
     readJson: files({ [join(OURS, CLI_PID_RECORD)]: { port: 3060, stateDir: OURS } }),
     probe: net({ 3060: { ok: true, stateDir: OURS } }),
@@ -123,8 +123,8 @@ test('findDaemon: a hand-started daemon with NO recorded port is still found via
   assert.equal(found.via, 'pid-record');
 });
 
-test('findDaemon: a PID record whose port does not answer is stale, not present', () => {
-  const found = findDaemon({
+test('findDaemon: a PID record whose port does not answer is stale, not present', async () => {
+  const found = await findDaemon({
     stateDir: OURS,
     readJson: files({ [join(OURS, CLI_PID_RECORD)]: { port: 3060 } }),
     probe: net({}),
@@ -133,8 +133,8 @@ test('findDaemon: a PID record whose port does not answer is stale, not present'
   assert.equal(found.stalePidRecord, 3060, 'the caller can say WHY it is creating a daemon');
 });
 
-test('findDaemon: a foreign daemon on the PID record port does not block the run', () => {
-  const found = findDaemon({
+test('findDaemon: a foreign daemon on the PID record port does not block the run', async () => {
+  const found = await findDaemon({
     stateDir: OURS,
     readJson: files({ [join(OURS, CLI_PID_RECORD)]: { port: 3060 } }),
     probe: net({ 3060: { ok: true, stateDir: TG } }),
@@ -148,8 +148,8 @@ const target = (over = {}) => resolveTarget({
   stateDir: OURS, probe: net({}), readJson: files({}), isTaken: nothingTaken, ...over,
 });
 
-test('present + no --port: the daemon\'s own port is used, silently', () => {
-  const r = target({
+test('present + no --port: the daemon\'s own port is used, silently', async () => {
+  const r = await target({
     readJson: files({ [join(OURS, DAEMON_CONFIG)]: { port: 3060 } }),
     probe: net({ 3060: { ok: true, stateDir: OURS } }),
   });
@@ -157,8 +157,8 @@ test('present + no --port: the daemon\'s own port is used, silently', () => {
   assert.equal(r.port, 3060);
 });
 
-test('present + agreeing --port: proceeds', () => {
-  const r = target({
+test('present + agreeing --port: proceeds', async () => {
+  const r = await target({
     port: 3060, portExplicit: true,
     readJson: files({ [join(OURS, DAEMON_CONFIG)]: { port: 3060 } }),
     probe: net({ 3060: { ok: true, stateDir: OURS } }),
@@ -167,8 +167,8 @@ test('present + agreeing --port: proceeds', () => {
   assert.equal(r.port, 3060);
 });
 
-test('present + disagreeing --port: REFUSED, exit 2, nothing written', () => {
-  const r = target({
+test('present + disagreeing --port: REFUSED, exit 2, nothing written', async () => {
+  const r = await target({
     port: 3999, portExplicit: true,
     readJson: files({ [join(OURS, DAEMON_CONFIG)]: { port: 3060 } }),
     probe: net({ 3060: { ok: true, stateDir: OURS } }),
@@ -180,8 +180,13 @@ test('present + disagreeing --port: REFUSED, exit 2, nothing written', () => {
   assert.match(r.message, new RegExp(OURS.replace(/[.]/g, '\\.')), 'the message names the real daemon');
 });
 
-test('a foreign daemon on the candidate port: REFUSED, exit 2, and it names the other directory', () => {
-  const r = target({ probe: net({ [INSTALL_DEFAULT_PORT]: { ok: true, stateDir: TG } }) });
+test('a foreign daemon on the RECORDED port: REFUSED, exit 2, and it names the other directory', async () => {
+  // The directory's own config said the daemon was on 3060 and something else
+  // is there. That is an incoherent selection and it is refused, unchanged.
+  const r = await target({
+    readJson: files({ [join(OURS, DAEMON_CONFIG)]: { port: 3060 } }),
+    probe: net({ 3060: { ok: true, stateDir: TG } }),
+  });
   assert.equal(r.action, 'refuse');
   assert.equal(r.exitCode, 2);
   assert.equal(r.reason, 'foreign-daemon');
@@ -189,56 +194,88 @@ test('a foreign daemon on the candidate port: REFUSED, exit 2, and it names the 
   assert.match(r.message, /owns state directory .*\.ours-tg, not .*\.ours/);
 });
 
-test('something that is not an ours daemon on the candidate port: also REFUSED', () => {
-  const r = target({ probe: net({ [INSTALL_DEFAULT_PORT]: { ok: true } }) });
+test('something that is not an ours daemon on the RECORDED port: also REFUSED', async () => {
+  const r = await target({
+    readJson: files({ [join(OURS, DAEMON_CONFIG)]: { port: 3060 } }),
+    probe: net({ 3060: { ok: true } }),
+  });
   assert.equal(r.action, 'refuse');
   assert.equal(r.reason, 'foreign-daemon');
   assert.match(r.message, /not an ours daemon/);
 });
 
-test('absent + no --port: a free port is searched from 3050, skipping reserved defaults', () => {
-  const r = target({ isTaken: (p) => p === 3050 });
+test('a foreign daemon on the GUESSED default port means ABSENT, so a second daemon can be created', async () => {
+  // AMENDS #56, and this is the case that made spec §7 unreachable. A fresh
+  // second state directory records no port, so the candidate is the built-in
+  // default — which is exactly where the FIRST daemon answers. Refusing there
+  // meant no second daemon could ever be created while the first was up, and
+  // the refusal's own advice ("re-run with --port") could not help, because an
+  // explicit --port deliberately does not change where we look.
+  const probe = net({ [INSTALL_DEFAULT_PORT]: { ok: true, stateDir: OURS } });
+  const isTaken = (p) => p === INSTALL_DEFAULT_PORT;
+
+  const derived = await resolveTarget({ stateDir: TG, probe, readJson: files({}), isTaken });
+  assert.equal(derived.action, 'create', 'the first daemon holding the default port is not our business');
+  assert.notEqual(derived.port, INSTALL_DEFAULT_PORT, 'and the occupied port is never reused');
+
+  const explicit = await resolveTarget({ stateDir: TG, port: 3999, portExplicit: true, probe, readJson: files({}), isTaken });
+  assert.equal(explicit.action, 'create', 'and --port now does what the refusal used to advise');
+  assert.equal(explicit.port, 3999);
+});
+
+test('the daemon holding the default port is REPORTED, not silently stepped around', async () => {
+  const found = await findDaemon({
+    stateDir: TG,
+    probe: net({ [INSTALL_DEFAULT_PORT]: { ok: true, stateDir: OURS } }),
+    readJson: files({}),
+  });
+  assert.equal(found.kind, 'absent');
+  assert.deepEqual(found.defaultPortHeldBy, { port: INSTALL_DEFAULT_PORT, stateDir: OURS });
+});
+
+test('absent + no --port: a free port is searched from 3050, skipping reserved defaults', async () => {
+  const r = await target({ isTaken: (p) => p === 3050 });
   assert.equal(r.action, 'create');
   assert.equal(r.port, 3053, 'skips 3051 (tg) and 3052 (cowork)');
   assert.deepEqual(INSTALL_RESERVED_PORTS, [3051, 3052]);
 });
 
-test('absent + explicit --port: used exactly as typed and NEVER moved', () => {
-  const r = target({ port: 3051, portExplicit: true });
+test('absent + explicit --port: used exactly as typed and NEVER moved', async () => {
+  const r = await target({ port: 3051, portExplicit: true });
   assert.equal(r.action, 'create');
   assert.equal(r.port, 3051, "the owner's `--port 3051` must keep working");
   assert.equal(r.reservedNotice, 3051, 'but the operator is told it is the connector default');
 });
 
-test('absent + explicit --port that is occupied: REFUSED rather than shifted', () => {
-  const r = target({ port: 3060, portExplicit: true, isTaken: (p) => p === 3060 });
+test('absent + explicit --port that is occupied: REFUSED rather than shifted', async () => {
+  const r = await target({ port: 3060, portExplicit: true, isTaken: (p) => p === 3060 });
   assert.equal(r.action, 'refuse');
   assert.equal(r.exitCode, 2);
   assert.equal(r.reason, 'port-occupied');
 });
 
-test('creating after a stale PID record reports why', () => {
-  const r = target({ readJson: files({ [join(OURS, CLI_PID_RECORD)]: { port: 3060 } }) });
+test('creating after a stale PID record reports why', async () => {
+  const r = await target({ readJson: files({ [join(OURS, CLI_PID_RECORD)]: { port: 3060 } }) });
   assert.equal(r.action, 'create');
   assert.equal(r.stalePidRecord, 3060);
 });
 
-test('a re-run with the same state dir can never reach the foreign-daemon refusal', () => {
+test('a re-run with the same state dir can never reach the foreign-daemon refusal', async () => {
   // The owner's correction: the directory is looked up first and its own daemon
   // is found on its own port, so an auto-picked port is never in play on a re-run.
   const readJson = files({ [join(OURS, DAEMON_CONFIG)]: { port: 3060 } });
   const probe = net({ 3060: { ok: true, stateDir: OURS }, [INSTALL_DEFAULT_PORT]: { ok: true, stateDir: TG } });
-  const r = resolveTarget({ stateDir: OURS, probe, readJson, isTaken: nothingTaken });
+  const r = await resolveTarget({ stateDir: OURS, probe, readJson, isTaken: nothingTaken });
   assert.equal(r.action, 'update');
   assert.equal(r.port, 3060, 'the stranger on 3050 is never consulted');
 });
 
-test('searchFreePort: returns null instead of looping or reusing a bound port', () => {
+test('searchFreePort: returns null instead of looping or reusing a bound port', async () => {
   assert.equal(searchFreePort(() => true, { span: 5 }), null);
 });
 
-test('an exhausted free-port band REFUSES rather than widening or reusing', () => {
-  const r = target({ isTaken: () => true });
+test('an exhausted free-port band REFUSES rather than widening or reusing', async () => {
+  const r = await target({ isTaken: () => true });
   assert.equal(r.action, 'refuse');
   assert.equal(r.exitCode, 2);
   assert.equal(r.reason, 'no-free-port');

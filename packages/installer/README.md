@@ -38,51 +38,77 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
 ## The flow (what the user sees)
 
 1. **Pre-flight** — a short checklist, not a wall of logs: platform (Linux / macOS / WSL; native
-   Windows prints a WSL pointer and exits), Node.js, and **harness detection with alias-safety**.
-   Before ever calling `claude` / `codex`, it confirms each resolves to a **real executable** that
-   answers `--version` promptly. A shell alias / hanging wrapper is **never called** (that would
-   hang the run) — it's reported plainly with a fix, and a manual-install path is always offered.
-   If neither harness exists it says so and exits.
-2. **Config-first** (first install only) — the daemon's two base settings, up front:
-   the **broker** (end-to-end encrypted; the broker never sees message content — almost everyone
-   just presses Enter) and the **port** (probes `3050`; only asks if it's busy; never hands out
-   `3051`, reserved for the Telegram connector). Applied once, then the stack is built with it.
-3. **Four consent gates**, each paced with a clean `✓ … No problems.` line + an explicit
-   **Continue?** — never a start-twice-then-ask, never a silent failure:
-   - **1/4 ours core (the daemon)** — write config → optional voice setup → install/start ONCE
-     → boot service. On a re-run it reuses the running config (no re-ask) and only updates when
-     you say yes. Complete voice setup is kept without prompting. Missing/incomplete setup is
-     offered before the first start or pending update restart, then delegated to the canonical
-     `ours-mcp voice-setup` provider selector and hidden API-key prompt. Accepted setup owns the
-     one restart/readiness transaction; declining or already-ready setup preserves the normal
-     core lifecycle. The secret is written atomically to mode-`0600` config; a failed daemon
-     reload rolls back.
-   - **2/4 harness plugins** — the installer **drives the plugin CLIs itself**
-     (`claude plugin marketplace add …` + `claude plugin install ours@ours.network`;
-     `codex plugin marketplace add …` + `codex plugin add ours@ours-codex-marketplace`). Choosing
-     Codex also installs the `ours-codex` live launcher in the same step. Any failure / alias
-     prints the exact manual commands and continues — it **never dead-ends**.
-   - **3/4 ours-fleet** — makes your harnesses persistent, always-online agent teams that survive
-     a reboot; runs `ours-fleet init`. Default **Yes**.
-   - **4/4 Telegram connector** — install-only (no bot tokens here), then optionally as a
-     boot service.
-4. **Summary + hand-off** — a recap (skipped/failed rows call out the fix), then a **literal
-   copy-paste prompt** (root identity + fleet + Telegram) with the steps for any skipped/failed
-   component dropped out. Copied to the clipboard where supported.
+   Windows prints a WSL pointer and stops), and Node.js (v20+). No harness is required: the
+   daemon is the product, and a machine with no Claude Code / Codex / Hermes still gets one.
+2. **The daemon (§§2-4)** — a daemon is identified by its **state directory**, not by its port.
+   `--state-dir` is the key (default `~/.ours`); a second state directory is a second daemon.
+   The port is taken from whatever daemon already owns that directory, and is only searched —
+   from 3050 upward, skipping other components' defaults — when this run CREATES one. A `--port`
+   that disagrees with the port an existing daemon is really on is **refused** (exit 2, nothing
+   written) rather than quietly corrected. Then: install `@ours.network/cli`, merge the config
+   (never rewrite it), start the daemon, and install its **per-instance** boot service via
+   `ours daemon install-service`, which owns the marker check — the installer never touches a
+   unit file or `systemctl` itself.
+   On a first install the **broker** question is asked once (end-to-end encrypted; the broker
+   never sees message content — almost everyone just presses Enter).
+3. **Components (§5)** — the MCP server (default yes), the Telegram connector and cowork
+   (default no). None of them IS the daemon; all three attach to one. `ours-mcp` runs per
+   session as a stdio proxy and gets **no unit**. A component that fails is reported with its
+   retry command and the run continues.
+4. **Your human identity** — `ours-mcp create-root`, run against THIS daemon. Already-exists is
+   a friendly keep; an unreachable daemon gets the exact retry command.
+5. **Harness plugins** — the installer **drives the plugin CLIs itself**
+   (`claude plugin marketplace add …` + `claude plugin install ours@ours.network`;
+   `codex plugin marketplace add …` + `codex plugin add ours@ours-codex-marketplace`; Hermes via
+   `npm` + `ours-hermes-install --skip-daemon`). Choosing Codex also installs the `ours-codex`
+   live launcher in the same step. An alias, a wrapper that will not answer `--version`, or any
+   failure prints the exact manual commands and continues — it **never dead-ends**.
+   For a **non-default state directory**: Hermes' config block carries `OURS_CONFIG`, so its pair
+   is real. Claude Code's and Codex's registrations cannot carry a value at all, so the installer
+   prints the exact `export OURS_CONFIG=…` line and claims nothing.
+6. **ours-fleet** — makes your harnesses persistent, always-online agent teams that survive a
+   reboot; runs `ours-fleet init`. Default **Yes**. The installer configures nothing inside
+   fleet — fleet already resolves a daemon per role — but for a non-default state directory it
+   tells you the one `env: { OURS_CONFIG: … }` line your `fleet.yaml` roles need.
+7. **Voice messages** — offered after the components, because it is an `ours-mcp` subcommand and
+   `ours-mcp` is a component. Credentials are delegated entirely to the canonical
+   `ours-mcp voice-setup` (provider selector, hidden API key, atomic mode-`0600` write); the
+   installer keeps no second implementation. Under v3 that command classifies every daemon as
+   `external` and writes config only, so **the installer performs the restart and the readiness
+   check** — `ours daemon restart --config <state-dir>/config.json`. Declining is clean and is
+   offered again on the next run.
+8. **Summary + hand-off** — a recap (skipped/failed rows call out the fix), then a **literal
+   copy-paste prompt** with the steps for any skipped/failed piece dropped out. For a non-default
+   state directory the prompt opens by telling your agent which `OURS_CONFIG` to use. Copied to
+   the clipboard where supported.
 
-The human identity is created idempotently after the daemon becomes reachable. Because
-`curl … | bash` gives the script its input over the pipe, every prompt is read from the
+Because `curl … | bash` gives the script its input over the pipe, every prompt is read from the
 controlling terminal (`/dev/tty`), so the flow still works piped.
+
+## Removing a daemon
+
+```sh
+ours-uninstall [--state-dir PATH] [--purge] [--dry-run]
+```
+
+Symmetric with the installer and keyed the same way. It refuses **before removing anything** if a
+component still points at that daemon, removes the unit through `ours daemon uninstall-service`
+(which refuses a unit it did not mark), and removes the global packages **only** when no other
+state directory on the machine still has a daemon config. `--purge` deletes the state directory
+itself: never a default, never non-interactive, refused for a directory with no ours state
+markers at all, and it asks you to **type the full path** — those identity keys exist nowhere
+else and no peer can give them back.
 
 ## Non-interactive / CI / safe dry-run
 
 ```sh
-OURS_ASSUME_YES=1 bash install.sh          # accept every default, no prompts
-OURS_INSTALL_DRY_RUN=1 bash install.sh     # walk the WHOLE flow, install/change NOTHING
+OURS_ASSUME_YES=1 ours-install              # accept every default, no prompts
+ours-install --dry-run                      # walk the WHOLE flow, install/change NOTHING
+ours-install --state-dir ~/.ours-tg         # a SECOND daemon, alongside the first
 ```
 
 `OURS_INSTALL_DRY_RUN=1` routes every side-effecting action through a print-only seam — it shows
-exactly the commands it *would* run (npm installs, `ours-mcp start`, plugin adds, `ours-fleet
+exactly the commands it *would* run (npm installs, `ours daemon start`, plugin adds, `ours-fleet
 init`, service installs) without executing them. That is the safe way to preview the flow on a
 machine you don't want to touch, and how the integration tests drive it.
 

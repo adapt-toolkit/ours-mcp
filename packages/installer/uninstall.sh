@@ -53,7 +53,12 @@ if [ -z "$MJS" ]; then
   TMP="$(mktemp -d)"; CLEANUP="$TMP"
   mkdir -p "$TMP/lib"
   say "fetching the ours uninstaller…"
-  for f in uninstall.mjs lib/ui.mjs lib/logic.mjs lib/prompt.mjs; do
+  # The v3 uninstaller delegates its decisions to lib/, so the piped path has to
+  # fetch that lib too — a missing module here is an uninstaller that cannot even
+  # start, which is the worst moment to discover a short file list.
+  for f in uninstall.mjs lib/ui.mjs lib/logic.mjs lib/prompt.mjs lib/config.mjs \
+           lib/effects.mjs lib/target.mjs lib/plan.mjs lib/components.mjs \
+           lib/uninstall.mjs lib/orchestrate-uninstall.mjs lib/usage.mjs; do
     if ! fetch "$BASE/$f" > "$TMP/$f" 2>/dev/null; then
       say "could not download the uninstaller ($BASE/$f). Check your connection and retry."
       rm -rf "${TMP:?}"; exit 1
@@ -64,7 +69,7 @@ fi
 
 # --- 3) run the Node uninstaller ---------------------------------------------------------------
 set +e
-node "$MJS"
+node "$MJS" "$@"
 rc=$?
 set -e
 [ -n "$CLEANUP" ] && rm -rf "${CLEANUP:?}"

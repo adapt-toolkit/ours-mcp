@@ -175,21 +175,65 @@ export function classifyProbe(probe, targetStateDir) {
  *
  * Injected IO: `probe(port)`, `readJson(path)`.
  */
-export function findDaemon({ stateDir, probe, readJson }) {
+/*
+ * ASYNC, AND THAT IS AMENDING #56 TOO. The injected `probe` reaches a socket:
+ * lib/effects.mjs implements it with fetch, so it returns a PROMISE. Called
+ * synchronously, classifyProbe saw a Promise, found no `.ok` on it, and read
+ * every daemon in the world as absent — so the real installer never detected an
+ * existing daemon at all and took the create path every single time. The pure
+ * tests could not see it, because a fake probe returns a plain object and a
+ * plain object is exactly what synchronous code needs.
+ *
+ * Awaiting an injected function costs the purity of this module nothing: there
+ * is still no I/O here, and `await` on a non-promise is the same value back, so
+ * every existing fake keeps working unchanged.
+ */
+export async function findDaemon({ stateDir, probe, readJson }) {
   const target = resolve(stateDir);
   const config = readJson(join(target, DAEMON_CONFIG));
-  const first = candidatePort(config);
-  const byConfig = classifyProbe(probe(first), target);
-  if (byConfig.kind !== 'absent') return { ...byConfig, port: first, via: 'config', config };
+  const recordedPort = config && typeof config.port === 'number' && Number.isFinite(config.port) ? config.port : null;
+  const first = recordedPort ?? INSTALL_DEFAULT_PORT;
+  // Did this directory TELL us that port, or did we guess it? The whole
+  // treatment of a foreign answer turns on the difference.
+  const guessed = recordedPort === null;
+  const byConfig = classifyProbe(await probe(first), target);
+  if (byConfig.kind === 'present') return { ...byConfig, port: first, via: 'config', config };
+  if (byConfig.kind === 'foreign' && !guessed) return { ...byConfig, port: first, via: 'config', config };
 
   const record = readJson(join(target, CLI_PID_RECORD));
   const recorded = record && typeof record.port === 'number' && Number.isFinite(record.port) ? record.port : null;
   if (recorded !== null && recorded !== first) {
-    const byRecord = classifyProbe(probe(recorded), target);
+    const byRecord = classifyProbe(await probe(recorded), target);
     if (byRecord.kind === 'present') return { ...byRecord, port: recorded, via: 'pid-record', config };
     // A foreign daemon on the PID record's port says nothing about OUR daemon —
     // the record is simply stale. Do not refuse the run over it.
     return { kind: 'absent', reason: 'stale PID record', stalePidRecord: recorded, port: first, via: 'config', config };
+  }
+  // A FOREIGN DAEMON ON A PORT WE GUESSED IS NOT A REASON TO REFUSE.
+  //
+  // AMENDS #56. As first written, any foreign answer on the candidate port
+  // refused the run. But a state directory with no recorded port has told us
+  // nothing, so the candidate is the built-in default — which, on any machine
+  // that already runs a daemon, is where the FIRST daemon answers. The result
+  // was that a second daemon could never be created while the first was up:
+  // §7 coexistence was unreachable, and the refusal's own advice ("re-run with
+  // --port for a free port") could not work either, because an explicit --port
+  // deliberately does not change where we look.
+  //
+  // This is the same argument the stale-PID-record branch above already makes,
+  // one layer over: an answer on a port we guessed says nothing about whether a
+  // daemon owns THIS directory. A foreign answer on a port the directory
+  // actually RECORDED still refuses, because there the operator's own file said
+  // the daemon was there and something else is.
+  if (byConfig.kind === 'foreign') {
+    return {
+      kind: 'absent',
+      reason: 'another daemon holds the default port',
+      port: first,
+      via: 'config',
+      config,
+      defaultPortHeldBy: { port: first, stateDir: byConfig.stateDir ?? null },
+    };
   }
   return { kind: 'absent', reason: byConfig.reason, port: first, via: 'config', config };
 }
@@ -217,9 +261,9 @@ export function findDaemon({ stateDir, probe, readJson }) {
  * if it is occupied that is a refusal, not a reason to shift. Only a derived port
  * is searched, from 3050 upward, skipping the reserved defaults.
  */
-export function resolveTarget({ stateDir, port = null, portExplicit = false, probe, readJson, isTaken }) {
+export async function resolveTarget({ stateDir, port = null, portExplicit = false, probe, readJson, isTaken }) {
   const target = resolve(stateDir);
-  const found = findDaemon({ stateDir: target, probe, readJson });
+  const found = await findDaemon({ stateDir: target, probe, readJson });
 
   if (found.kind === 'foreign') {
     return {
@@ -266,6 +310,7 @@ export function resolveTarget({ stateDir, port = null, portExplicit = false, pro
       port,
       stateDir: target,
       stalePidRecord: found.stalePidRecord ?? null,
+      defaultPortHeldBy: found.defaultPortHeldBy ?? null,
       // Purely informational: honoured as typed, but the operator should see it.
       reservedNotice: INSTALL_RESERVED_PORTS.includes(port) ? port : null,
     };
@@ -289,6 +334,7 @@ export function resolveTarget({ stateDir, port = null, portExplicit = false, pro
     port: free,
     stateDir: target,
     stalePidRecord: found.stalePidRecord ?? null,
+    defaultPortHeldBy: found.defaultPortHeldBy ?? null,
     reservedNotice: null,
   };
 }

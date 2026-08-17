@@ -18,7 +18,7 @@ const SRV_TG = '/srv/ours-tg';
 
 // ------------------------------------------------------- §7 — two daemons ----
 
-test('two daemons share NO per-daemon artefact', () => {
+test('two daemons share NO per-daemon artefact', async () => {
   const a = perDaemonArtefacts(OURS, 3050);
   const b = perDaemonArtefacts(TG, 3051);
   assert.deepEqual(daemonCollisions(a, b), [], 'everything is derived from the state directory');
@@ -28,7 +28,7 @@ test('two daemons share NO per-daemon artefact', () => {
   assert.notEqual(a.pidRecord, b.pidRecord);
 });
 
-test('the ONE field that can collide is the unit name, and it is closed one layer down', () => {
+test('the ONE field that can collide is the unit name, and it is closed one layer down', async () => {
   // ~/.ours-tg and /srv/ours-tg both derive ours-tg.service. Not a bug in the
   // derivation — the price of a readable unit name — and the CLI refuses to
   // overwrite a CLI-managed unit whose baked OURS_STATE_DIR is another daemon's.
@@ -39,7 +39,7 @@ test('the ONE field that can collide is the unit name, and it is closed one laye
   assert.notEqual(a.token, b.token);
 });
 
-test('componentCoexistence never lets a screen imply two connectors', () => {
+test('componentCoexistence never lets a screen imply two connectors', async () => {
   assert.equal(componentCoexistence('mcp').coexists, true);
   for (const key of ['tg', 'cowork']) {
     const c = componentCoexistence(key);
@@ -51,7 +51,7 @@ test('componentCoexistence never lets a screen imply two connectors', () => {
 
 // --------------------------------------------- §6 — a repeat run is a no-op --
 
-test('IDEMPOTENCE: feeding a run\'s own output back in changes nothing', () => {
+test('IDEMPOTENCE: feeding a run\'s own output back in changes nothing', async () => {
   const first = planDaemonConfig({ apiVisibility: 'shared' }, { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' });
   assert.equal(first.changed, true);
   const second = planDaemonConfig(first.config, { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' });
@@ -60,7 +60,7 @@ test('IDEMPOTENCE: feeding a run\'s own output back in changes nothing', () => {
   assert.equal(second.config.apiVisibility, 'shared', 'and still preserves what it never owned');
 });
 
-test('IDEMPOTENCE: the connector config is written once and then left alone', () => {
+test('IDEMPOTENCE: the connector config is written once and then left alone', async () => {
   const args = { endpoint: 'http://127.0.0.1:3050', stateDir: OURS, brokerUrl: 'wss://b' };
   const first = planTgAttachment({ existing: { botToken: 'secret' }, ...args });
   assert.equal(first.action, 'attach');
@@ -70,7 +70,7 @@ test('IDEMPOTENCE: the connector config is written once and then left alone', ()
   assert.equal(second.config.botToken, 'secret');
 });
 
-test('IDEMPOTENCE: the cowork block is written once and then left alone', () => {
+test('IDEMPOTENCE: the cowork block is written once and then left alone', async () => {
   const args = { endpoint: 'http://127.0.0.1:3050', stateDir: OURS, installedVersion: '0.5.0' };
   const first = planCoworkAttachment({ existing: { theme: 'dark' }, ...args });
   assert.equal(first.action, 'attach');
@@ -78,19 +78,19 @@ test('IDEMPOTENCE: the cowork block is written once and then left alone', () => 
   assert.equal(second.action, 'unchanged');
 });
 
-test('IDEMPOTENCE: a re-run finds its own daemon on its own port and updates', () => {
+test('IDEMPOTENCE: a re-run finds its own daemon on its own port and updates', async () => {
   // The owner's correction: a re-run with the same state dir can never reach the
   // foreign-daemon refusal, because the directory is looked up first.
   const readJson = (p) => (p === join(OURS, DAEMON_CONFIG) ? { port: 3050, stateDir: OURS } : null);
   const probe = (port) => (port === 3050 ? { ok: true, stateDir: OURS } : { ok: false });
   for (let run = 0; run < 3; run += 1) {
-    const r = resolveTarget({ stateDir: OURS, probe, readJson, isTaken: () => false });
+    const r = await resolveTarget({ stateDir: OURS, probe, readJson, isTaken: () => false });
     assert.equal(r.action, 'update', `run ${run + 1} must not create a second daemon`);
     assert.equal(r.port, 3050, 'and must never move the port');
   }
 });
 
-test('IDEMPOTENCE: an unchanged CLI-managed unit is still just an install plan', () => {
+test('IDEMPOTENCE: an unchanged CLI-managed unit is still just an install plan', async () => {
   // The CLI itself owns the byte-comparison no-op; the installer must not
   // second-guess it or skip calling it.
   const unit = `${CLI_UNIT_MARKER}\n[Unit]\nDescription=ours shared daemon\n`;
@@ -98,7 +98,7 @@ test('IDEMPOTENCE: an unchanged CLI-managed unit is still just an install plan',
   assert.equal(p.action, 'install');
 });
 
-test('a repeat run reports nothing changed, and every no-op says why', () => {
+test('a repeat run reports nothing changed, and every no-op says why', async () => {
   const summary = summarizeRun([
     { id: 'cli', changed: true, packageRefresh: true },
     { id: 'config', changed: false, reason: 'already correct' },
@@ -110,27 +110,27 @@ test('a repeat run reports nothing changed, and every no-op says why', () => {
   assert.equal(summary.allNoopsExplained, true, 'a silent "nothing happened" is indistinguishable from an accidental skip');
 });
 
-test('a run that did something reports it', () => {
+test('a run that did something reports it', async () => {
   const summary = summarizeRun([{ id: 'config', changed: true }, { id: 'service', changed: false, reason: 'unit unchanged' }]);
   assert.equal(summary.changedAnything, true);
   assert.deepEqual(summary.changed, ['config']);
 });
 
-test('an unexplained no-op is caught', () => {
+test('an unexplained no-op is caught', async () => {
   const summary = summarizeRun([{ id: 'service', changed: false, reason: '' }]);
   assert.equal(summary.allNoopsExplained, false);
 });
 
 // ------------------------------------------- §6 — adding a component later ---
 
-test('a later run can ADD a component without disturbing the installed ones', () => {
+test('a later run can ADD a component without disturbing the installed ones', async () => {
   const chosen = planComponentSelection({ answers: { tg: true }, installed: { mcp: true } });
   assert.equal(chosen.find((c) => c.key === 'mcp').action, 'keep');
   assert.equal(chosen.find((c) => c.key === 'tg').action, 'install');
   assert.equal(chosen.find((c) => c.key === 'cowork').action, 'skip');
 });
 
-test('update never deletes state, moves a port, or creates a second daemon', () => {
+test('update never deletes state, moves a port, or creates a second daemon', async () => {
   const before = { stateDir: OURS, port: 3050 };
   assert.deepEqual(assertUpdateLeftDaemonAlone({ before, after: { ...before, created: false } }), { ok: true, problems: [] });
   assert.deepEqual(
@@ -143,12 +143,12 @@ test('update never deletes state, moves a port, or creates a second daemon', () 
   );
 });
 
-test('a second daemon is found by its PID record on a re-run even with no recorded port', () => {
+test('a second daemon is found by its PID record on a re-run even with no recorded port', async () => {
   // Belt and braces on the corruption case: a second daemon created by hand must
   // still be seen as present on every subsequent run.
   const readJson = (p) => (p === join(TG, CLI_PID_RECORD) ? { port: 3060 } : null);
   const probe = (port) => (port === 3060 ? { ok: true, stateDir: TG } : { ok: false });
-  const r = resolveTarget({ stateDir: TG, probe, readJson, isTaken: () => false });
+  const r = await resolveTarget({ stateDir: TG, probe, readJson, isTaken: () => false });
   assert.equal(r.action, 'update');
   assert.equal(r.port, 3060);
 });

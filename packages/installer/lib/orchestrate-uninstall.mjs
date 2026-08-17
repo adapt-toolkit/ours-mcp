@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import { parseInstallArgs, InstallUsageError } from './target.mjs';
 import { planUninstall, planComponentDetach, planStatePurge } from './uninstall.mjs';
 import { tgConfigPath, coworkConfigPath } from './components.mjs';
+import { UNINSTALL_USAGE } from './usage.mjs';
 import { ok, info, warn, heading } from './ui.mjs';
 
 export const EXIT_OK = 0;
@@ -69,6 +70,8 @@ export async function runUninstall(argv, effects) {
     }
     throw error;
   }
+  if (args.help) { effects.out(UNINSTALL_USAGE); return EXIT_OK; }
+  if (args.version) { effects.out(`ours-uninstall v${effects.version ?? '?'}`); return EXIT_OK; }
   const purge = argv.includes('--purge');
   const dir = args.stateDir;
   const config = effects.readJson(join(dir, 'config.json'));

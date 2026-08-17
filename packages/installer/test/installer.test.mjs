@@ -1,11 +1,29 @@
-// Integration tests for the unified `ours-install` (v2 flow). No network: fake `npm`, `ours-mcp`,
-// `claude`, `codex`, `ours-fleet`, and `ours-tg-connector` are put on PATH; each logs its argv to
-// $CALLLOG. We then assert the installer drives them in the right order with the right args,
-// non-interactively (OURS_ASSUME_YES=1). HOME is redirected to a temp dir so config writes and the
-// interactive-shell `type` probe never touch the real user environment.
+// Integration tests for `ours-install` v3 — the REAL bin, end to end.
+//
+// The orchestrator tests drive lib/ with a fake effects object. This file drives
+// `node install.mjs` as a user would, with fake `npm`, `ours`, `ours-mcp`,
+// `claude`, `codex`, `ours-fleet`, `ours-tg-connector` and `ours-hermes-install`
+// on PATH, each logging its argv (and the daemon environment it received) to
+// $CALLLOG. HOME is a temp directory, so config writes and the interactive-shell
+// `type` probe never touch the real user environment.
+//
+// TWO HOST RULES, because this suite runs on a machine hosting a live fleet:
+//
+//   NO SERVICE IS EVER INSTALLED, ENABLED OR STARTED, and `systemctl` is never
+//   reached — asserted below over the whole call log, not assumed. `ours` is a
+//   shell script that logs and exits 0.
+//
+//   NO REAL DAEMON IS CONTACTED. Every run names its own state directory AND its
+//   own port, and that port is one this process just proved free — so the
+//   installer's identity probe talks to nothing, or to a stub HTTP server this
+//   file started on an ephemeral port and closes again. Port 3050 (and the
+//   reserved 3051/3052) are never probed, because a run that fell back to the
+//   default port would be probing whatever the host is really running.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import { createServer as createSocketServer } from 'node:net';
 import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync, mkdirSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -16,92 +34,134 @@ const PKG = dirname(HERE);
 const INSTALL_MJS = join(PKG, 'install.mjs');
 const INSTALL_SH = join(PKG, 'install.sh');
 
-// Build a temp bin dir of fakes that append "<name> <args>" to $CALLLOG and behave per opts.
-//   opts.daemon      : 'installed' (default) | 'absent'
-//   opts.daemonState : 'managed' (default) | 'stopped' | 'external'
-//   opts.daemonPort  : port to advertise in `ours-mcp status` (default 3050)
-//   opts.codex       : 'ok' (default) | 'unsafe' (its --version returns junk, non-zero)
-//   opts.noHarness   : omit claude+codex bins entirely (nothing detected)
-//   opts.rootExists  : name → `ours-mcp create-root` reports it already exists (quiet no-op)
-//   opts.updateVersion : report v9.9.8 until npm updates core, then v9.9.9
-//   opts.voiceRestartTrace : model the canonical voice command's one restart in the call log
-//   opts.voiceRecoveryFailure : canonical setup exits 2 after its traced restart/rollback attempt
-//   opts.hermesPresent : create <HOME>/.hermes so Hermes is detected (config-dir based, handled in runInstall)
-function fakeBins(dir, opts = {}) {
-  const daemonInstalled = opts.daemon !== 'absent';
-  const daemonState = opts.daemonState || 'managed';
-  const port = opts.daemonPort || 3050;
-  const write = (n, body) => { const p = join(dir, n); writeFileSync(p, `#!/bin/bash\nprintf '%s %s\\n' "${n}" "$*" >> "$CALLLOG"\n${body}`); chmodSync(p, 0o755); };
+/** A port the OS just handed out and nothing is listening on. Never 3050-3052. */
+function freePort() {
+  return new Promise((resolve) => {
+    const s = createSocketServer();
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address();
+      assert.ok(port > 3052, 'the OS handed out an ephemeral port, never a reserved one');
+      s.close(() => resolve(port));
+    });
+  });
+}
 
-  // ours-mcp: --version answers when "installed"; status reports running + a url line for the port;
-  // create-root is a quiet no-op that echoes the existing name when opts.rootExists is set.
-  const installedVersion = opts.updateVersion
-    ? `[ -f "$CALLLOG.mcpupdated" ] && echo "ours-mcp v9.9.9" || echo "ours-mcp v9.9.8"`
-    : 'echo "ours-mcp v9.9.9"';
-  const mcpVersion = daemonInstalled
-    ? `[ "$1" = "--version" ] && { ${installedVersion}; exit 0; }\n`
-    : `[ "$1" = "--version" ] && { [ -f "$CALLLOG.mcpinstalled" ] && { echo "ours-mcp v9.9.9"; exit 0; } || exit 1; }\n`;
+/**
+ * The smallest thing that looks like an ours daemon to the installer: one
+ * unauthenticated GET /state-dir. This is what makes the UPDATE path testable
+ * without starting anything that could outlive the test.
+ */
+function stubDaemon(stateDir) {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ stateDir }));
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      resolve({
+        port,
+        // closeAllConnections FIRST: the installer probes with fetch, which
+        // keeps its socket alive, and a bare close() would then wait for a
+        // connection nobody is going to end — a hung test suite, not a failing
+        // one, which is the harder kind to diagnose.
+        close: () => new Promise((done) => { server.closeAllConnections?.(); server.close(done); }),
+      });
+    });
+  });
+}
+
+/**
+ * Run the bin WITHOUT blocking this process's event loop.
+ *
+ * execFileSync would be shorter and wrong: the stub daemon below lives in THIS
+ * process, so a synchronous child means the stub can never accept the
+ * installer's probe, every update-path run silently takes the create path, and
+ * the suite tests a flow that no user will ever hit.
+ */
+function runBin(args, env) {
+  return new Promise((resolve) => {
+    const child = spawn('node', [INSTALL_MJS, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    child.on('close', (code) => resolve({ out, code: code ?? 1 }));
+  });
+}
+
+// Fakes that append "<name> <args>" to $CALLLOG — plus, for the commands that
+// must receive the daemon pair, the OURS_CONFIG they actually got.
+//   opts.codex         : 'ok' (default) | 'unsafe' (--version returns junk, non-zero)
+//   opts.noHarness     : omit claude+codex entirely
+//   opts.rootExists    : name → `ours-mcp create-root` reports it already exists
+//   opts.hermesPresent : create <HOME>/.hermes so Hermes is detected
+//   opts.voiceReady    : `ours-mcp voice-status --json` reports a configured provider
+function fakeBins(dir, opts = {}) {
+  const write = (n, body) => {
+    const p = join(dir, n);
+    writeFileSync(p, `#!/bin/bash\nprintf '%s %s\\n' "${n}" "$*" >> "$CALLLOG"\n${body}`);
+    chmodSync(p, 0o755);
+  };
+  const logEnv = (n) => `printf '%s env OURS_CONFIG=%s\\n' "${n}" "$OURS_CONFIG" >> "$CALLLOG"\n`;
+
+  // The v3 daemon: the ours-sdk CLI. install-service answers with its --json
+  // plan, exactly as the real one does, and NEVER touches systemd here.
+  write('ours',
+    `[ "$1" = "daemon" ] && [ "$2" = "install-service" ] && { echo '{"changed":true,"unitName":"ours.service"}'; exit 0; }\n`
+    + 'exit 0\n');
+
   const createRoot = opts.rootExists
     ? `[ "$1" = "create-root" ] && { echo 'create-root: a root identity already exists ("${opts.rootExists}") — nothing to do.'; exit 0; }\n`
     : `[ "$1" = "create-root" ] && { echo "created root identity"; exit 0; }\n`;
   write('ours-mcp',
-    mcpVersion +
-    `[ "$1" = "status" ] && { ${
-      daemonState === 'stopped'
-        ? 'echo "ours-mcp: stopped"; exit 1;'
-        : daemonState === 'external'
-          ? `echo "ours-mcp: running (no pidfile — external launcher)"; echo "  url:    http://localhost:${port}/mcp (reachable)"; exit 0;`
-          : `echo "ours-mcp: running"; echo "  pid:    4242"; echo "  url:    http://localhost:${port}/mcp (reachable)"; exit 0;`
-    } }\n` +
-    `[ "$1" = "voice-status" ] && { if [ -f "$CALLLOG.voice-ready" ]; then echo '{"ready":true,"provider":"deepgram","apiKey":"configured","keySource":"config"}'; exit 0; else exit 1; fi; }\n` +
-    `[ "$1" = "voice-setup" ] && { ${opts.voiceRestartTrace
-      ? `echo "voice-provider-selected" >> "$CALLLOG"; echo "voice-config-written" >> "$CALLLOG"; echo "ours-mcp restart (voice-setup)" >> "$CALLLOG";`
-      : ''} ${opts.voiceRecoveryFailure
-      ? 'echo "canonical voice setup recovered by rollback"; exit 2;'
-      : 'touch "$CALLLOG.voice-ready"; echo "canonical ours-mcp voice-setup completed"; exit 0;'} }\n` +
-    createRoot +
-    `exit 0\n`);
+    logEnv('ours-mcp')
+    + '[ "$1" = "--version" ] && { echo "ours-mcp v9.9.9"; exit 0; }\n'
+    + `[ "$1" = "voice-status" ] && { ${opts.voiceReady
+      ? `echo '{"ready":true,"provider":"deepgram"}'; exit 0;`
+      : `echo '{"ready":false}'; exit 0;`} }\n`
+    + '[ "$1" = "voice-setup" ] && { echo "canonical ours-mcp voice-setup"; exit 0; }\n'
+    + createRoot
+    + 'exit 0\n');
 
-  write('npm',
-    `case "$*" in *"@ours.network/mcp"*) touch "$CALLLOG.mcpinstalled" "$CALLLOG.mcpupdated";; esac\n` +
-    `case "$1" in ls) echo "@ours.network/fleet@0.7.0"; echo "@ours.network/tg-connector@0.1.7";; esac\n` +
-    `exit 0\n`);
-
+  write('npm', 'case "$1" in ls) echo \'{"dependencies":{}}\';; esac\nexit 0\n');
   if (!opts.noHarness) {
-    write('claude', `[ "$1" = "--version" ] && { echo "2.1.181 (Claude Code)"; exit 0; }\nexit 0\n`);
-    if (opts.codex === 'unsafe') {
-      write('codex', `[ "$1" = "--version" ] && { echo "not-a-version-string"; exit 1; }\nexit 0\n`);
-    } else {
-      write('codex', `[ "$1" = "--version" ] && { echo "codex-cli 0.144.4"; exit 0; }\nexit 0\n`);
-    }
+    write('claude', '[ "$1" = "--version" ] && { echo "2.1.181 (Claude Code)"; exit 0; }\nexit 0\n');
+    write('codex', opts.codex === 'unsafe'
+      ? '[ "$1" = "--version" ] && { echo "not-a-version-string"; exit 1; }\nexit 0\n'
+      : '[ "$1" = "--version" ] && { echo "codex-cli 0.144.4"; exit 0; }\nexit 0\n');
   }
-  write('ours-fleet', `[ "$1" = "--version" ] && { echo "0.7.0"; exit 0; }\nexit 0\n`);
-  write('ours-tg-connector', `exit 0\n`);
-  // Hermes plugin front-door: logs its argv (so we can assert --skip-daemon) and succeeds.
-  write('ours-hermes-install', `exit 0\n`);
+  write('ours-fleet', '[ "$1" = "--version" ] && { echo "0.7.0"; exit 0; }\nexit 0\n');
+  write('ours-tg-connector', 'exit 0\n');
+  write('ours-hermes-install', logEnv('ours-hermes-install') + 'exit 0\n');
 }
 
-// Run install.mjs non-interactively with fakes on PATH. Returns { out, calls, tmp }.
-function runInstall(opts = {}, extraEnv = {}) {
-  const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
+/**
+ * Run the real bin. Every run names BOTH its state directory and its port, and
+ * seeds that port into the config so the installer's first probe goes to a port
+ * this test owns rather than to the host's default one.
+ */
+async function runInstall(opts = {}, extraEnv = {}, argv = null) {
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-v3-'));
   const bin = join(tmp, 'bin');
   mkdirSync(bin, { recursive: true });
   const log = join(tmp, 'calls.log');
   writeFileSync(log, '');
   fakeBins(bin, opts);
-  // Hermes is detected by its config dir (HOME/.hermes, since HOME=tmp) existing — create it on demand.
   if (opts.hermesPresent) mkdirSync(join(tmp, '.hermes'), { recursive: true });
-  if (opts.config) {
-    mkdirSync(join(tmp, '.ours'), { recursive: true });
-    writeFileSync(join(tmp, '.ours', 'config.json'), JSON.stringify(opts.config, null, 2) + '\n', { mode: 0o600 });
+
+  const stateDir = opts.stateDir ? join(tmp, opts.stateDir) : join(tmp, '.ours');
+  const port = opts.port ?? await freePort();
+  if (opts.seedConfig !== false) {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'config.json'), `${JSON.stringify({ port, ...(opts.config ?? {}) }, null, 2)}\n`, { mode: 0o600 });
   }
-  // For the "no harness" case we must guarantee the host's real claude/codex can't leak in via the
-  // inherited PATH — so use a restricted PATH (fake bin + coreutils) with node/bash symlinked in.
+
   let path = `${bin}:${process.env.PATH}`;
   if (opts.noHarness) {
+    // A restricted PATH so the host's real claude/codex cannot leak in.
     try { symlinkSync(process.execPath, join(bin, 'node')); } catch { /* already there */ }
     for (const b of ['bash', 'env', 'cat', 'printf']) {
-      const p = ['/bin/' + b, '/usr/bin/' + b].find((x) => existsSync(x));
+      const p = [`/bin/${b}`, `/usr/bin/${b}`].find((x) => existsSync(x));
       if (p) { try { symlinkSync(p, join(bin, b)); } catch { /* ignore */ } }
     }
     path = `${bin}:/usr/bin:/bin`;
@@ -109,539 +169,375 @@ function runInstall(opts = {}, extraEnv = {}) {
   const env = {
     PATH: path,
     CALLLOG: log,
-    HOME: tmp,               // isolate config writes + the `type` shell probe
+    HOME: tmp,
     SHELL: '/bin/bash',
     OURS_ASSUME_YES: '1',
     NO_COLOR: '1',
-    OURS_CONFIG: join(tmp, '.ours', 'config.json'),
     ...extraEnv,
   };
-  let out = '';
-  try { out = execFileSync('node', [INSTALL_MJS], { env, encoding: 'utf8', stdio: 'pipe' }); }
-  catch (e) { out = (e.stdout || '') + (e.stderr || ''); throw Object.assign(e, { out, calls: readFileSync(log, 'utf8'), tmp }); }
-  return { out, calls: readFileSync(log, 'utf8'), tmp };
+  const args = argv ?? ['--state-dir', stateDir, '--port', String(port)];
+  const { out, code } = await runBin(args, env);
+  return { out, code, calls: readFileSync(log, 'utf8'), tmp, stateDir, port };
 }
 
-test('update path: daemon present → drives plugin CLIs, creates human identity in-install, fleet, no config re-ask', () => {
-  const { out, calls, tmp } = runInstall({ daemon: 'installed' });
-  // Config-first questions are SKIPPED when a daemon already exists.
-  assert.doesNotMatch(out, /A couple of quick settings/, 'no Step 0 on an already-configured daemon');
-  // Daemon reused, not reinstalled/restarted (update is opt-in and default is No under assume-yes).
-  assert.doesNotMatch(calls, /npm i -g @ours\.network\/mcp/, 'daemon not reinstalled without an explicit update yes');
-  assert.doesNotMatch(calls, /ours-mcp (start|restart)/, 'running daemon not restarted');
-  // Human identity is created DURING install now (via the create-root seam), after the daemon is up.
-  assert.match(calls, /ours-mcp create-root /, 'human identity created in-install');
-  assert.match(out, /Your human identity/, 'user-facing wording is "human identity"');
-  // Claude plugin driven headlessly.
-  assert.match(calls, /claude plugin marketplace add adapt-toolkit\/ours-claude-marketplace/, 'claude marketplace add');
-  assert.match(calls, /claude plugin install ours@ours\.network/, 'claude plugin install (plugin@marketplace)');
-  // Codex plugin + ours-codex launcher in the same step, plus the plain explanation.
-  assert.match(calls, /codex plugin marketplace add adapt-toolkit\/ours-codex-marketplace/, 'codex marketplace add');
-  assert.match(calls, /codex plugin add ours@ours-codex-marketplace/, 'codex plugin add');
-  assert.match(calls, /npm i -g @ours\.network\/codex@latest/, 'ours-codex launcher installed with the codex plugin');
-  assert.match(out, /AUTO wake-up/, 'explains what ours-codex is (background wake vs blocking)');
-  // ours-fleet: CLI + host setup. The already-installed core ours plugin points
-  // agents at `ours-fleet docs`; no second fleet-specific plugin is needed.
-  assert.match(calls, /npm i -g @ours\.network\/fleet@latest/, 'fleet package installed');
-  assert.match(calls, /ours-fleet init/, 'fleet host setup run');
-  assert.doesNotMatch(calls, /claude plugin install fleet@ours\.network/,
-    'does not install the retired Claude fleet plugin');
-  assert.doesNotMatch(calls, /codex plugin add ours-fleet@ours-codex-marketplace/,
-    'does not install the retired Codex fleet plugin');
-  assert.match(out, /ours-fleet docs/,
-    'reports the authoritative discovery command provided by the core skill');
-  // Telegram default No → skipped, and its hand-off step drops out.
-  assert.doesNotMatch(calls, /ours-tg-connector/, 'telegram skipped by default');
-  assert.match(out, /Telegram connector.*skipped/, 'summary shows telegram skipped');
-  // Hand-off: identity already created in-install → its step drops; fleet kept; telegram dropped.
-  assert.match(out, /paste this into your agent/, 'final copy-paste hand-off present');
-  assert.doesNotMatch(out, /Create my Ours human identity/, 'identity created in-install drops from the hand-off');
-  assert.doesNotMatch(out, /Set up my Telegram bot/, 'hand-off drops the skipped telegram step');
-  assert.match(out, /Set up my ours-fleet/, 'hand-off keeps the (permanent-team) fleet step');
-  assert.match(out, /PERMANENT use/, 'fleet hand-off asks for a permanent team, not a temp-agent demo');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('first install: config-first Step 0, daemon installed once with config + service, human identity created', () => {
-  const { out, calls, tmp } = runInstall({ daemon: 'absent' });
-  assert.match(out, /A couple of quick settings/, 'Step 0 config questions run on a first install');
-  assert.match(out, /1\/4 — ours core/, 'daemon is step 1');
-  assert.match(calls, /npm i -g @ours\.network\/mcp@latest/, 'daemon installed on consent');
-  assert.match(calls, /ours-mcp start/, 'daemon started once');
-  assert.match(calls, /ours-mcp install-service/, 'installed as a boot service');
-  assert.match(calls, /ours-mcp create-root /, 'human identity created in-install after the daemon is up');
-  // Config written with a real numeric port that is never the reserved 3051.
-  const cfg = join(tmp, '.ours', 'config.json');
-  assert.ok(existsSync(cfg), 'config.json written');
-  const parsed = JSON.parse(readFileSync(cfg, 'utf8'));
-  assert.ok(Number.isInteger(parsed.port), 'a numeric port persisted');
-  assert.notEqual(parsed.port, 3051, 'never the reserved Telegram port');
-  assert.equal(parsed.stt, undefined, 'non-interactive fresh install never invents voice provider credentials');
-  assert.match(out, /Non-interactive mode leaves it unchanged/, 'headless voice setup is explicit and never blocks');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('update/rerun with complete voice setup detects capability and preserves the secret', () => {
-  const secret = 'placeholder-provider-key-123';
-  const config = { port: 3050, stt: { provider: 'deepgram', apiKey: secret, model: 'nova-test' } };
-  const { out, tmp } = runInstall({ daemon: 'installed', config });
-  assert.match(out, /Voice transcription is configured \(deepgram\)/);
-  assert.doesNotMatch(out, new RegExp(secret), 'secret never appears in installer output');
-  const after = JSON.parse(readFileSync(join(tmp, '.ours', 'config.json'), 'utf8'));
-  assert.equal(after.stt.apiKey, secret, 'idempotent rerun keeps the configured key');
-  assert.equal(statSync(join(tmp, '.ours', 'config.json')).mode & 0o777, 0o600);
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('update with missing voice setup in non-interactive mode declines safely and offers rerun', () => {
-  const { out, tmp } = runInstall({ daemon: 'installed', config: { port: 3050 } });
-  assert.match(out, /Voice transcription is not configured/);
-  assert.match(out, /Run `ours-mcp voice-setup` in a terminal/);
-  const after = JSON.parse(readFileSync(join(tmp, '.ours', 'config.json'), 'utf8'));
-  assert.equal(after.stt, undefined);
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('environment-only complete voice setup is recognized without persisting the key', () => {
-  const secret = 'environment-placeholder-key-123';
-  const { out, tmp } = runInstall(
-    { daemon: 'installed', config: { port: 3050 } },
-    { OURS_STT_PROVIDER: 'deepgram', OURS_STT_API_KEY: secret },
-  );
-  assert.match(out, /Voice transcription is configured \(deepgram\)/);
-  assert.doesNotMatch(out, new RegExp(secret));
-  const after = JSON.parse(readFileSync(join(tmp, '.ours', 'config.json'), 'utf8'));
-  assert.equal(after.stt, undefined, 'environment key is not copied into config');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('human identity already exists → friendly "keeping it" with the name, not an error', () => {
-  const { out, calls, tmp } = runInstall({ daemon: 'installed', rootExists: 'Vitalii' });
-  assert.match(calls, /ours-mcp create-root /, 'create-root attempted');
-  assert.match(out, /already have a human identity \("Vitalii"\)/, 'reports the existing name');
-  assert.match(out, /keeping it/, 'a keep, not an error');
-  assert.doesNotMatch(out, /needs attention.*[Hh]uman identity/, 'existing identity is not flagged as a failure');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('hermes present (~/.hermes) → offered and installed via npm + ours-hermes-install --skip-daemon, no regression', () => {
-  const { out, calls, tmp } = runInstall({ daemon: 'installed', hermesPresent: true });
-  // Detected as a harness alongside Claude Code + Codex (config-dir based, not a driven CLI).
-  assert.match(out, /'hermes'/, 'hermes reported in the machine check');
-  // Its plugin is the npm package + the front-door, run with --skip-daemon because the unified
-  // installer already owns the daemon (Step 1) — ours-hermes-install must not re-ensure/restart it.
-  assert.match(calls, /npm i -g @ours\.network\/hermes@latest/, 'hermes plugin package installed');
-  assert.match(calls, /ours-hermes-install --skip-daemon/, 'ran the front-door with --skip-daemon');
-  assert.match(out, /Hermes plugin installed/, 'reports the Hermes plugin installed');
-  assert.match(out, /reload-mcp/, 'points the user at /reload-mcp to load the ours tools');
-  // No regression: Claude + Codex still install in the same run.
-  assert.match(calls, /claude plugin install ours@ours\.network/, 'claude still installs');
-  assert.match(calls, /codex plugin add ours@ours-codex-marketplace/, 'codex still installs');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('never dead-end: an undrivable codex prints a manual path and the flow continues', () => {
-  const { out, calls, tmp } = runInstall({ daemon: 'installed', codex: 'unsafe' });
-  // We must NOT try to drive an unsafe codex…
-  assert.doesNotMatch(calls, /codex plugin/, 'unsafe codex is never driven');
-  // …but we ALSO never dead-end: a manual install path is always printed.
-  assert.match(out, /codex plugin marketplace add adapt-toolkit\/ours-codex-marketplace/, 'manual codex install path shown');
-  assert.match(out, /npm i -g @ours\.network\/codex/, 'manual ours-codex launcher path shown');
-  // Claude still installs and the rest of the flow runs.
-  assert.match(calls, /claude plugin install ours@ours\.network/, 'the good harness still installs');
-  assert.match(calls, /ours-fleet init/, 'the flow continues to later steps');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('no harness at all: explains + exits cleanly, installs nothing', () => {
-  const { out, calls, tmp } = runInstall({ daemon: 'installed', noHarness: true });
-  assert.match(out, /No Claude Code, Codex, or Hermes found/, 'says no harness is present');
-  assert.match(out, /Install one of them first/, 'tells the user what to do');
-  assert.doesNotMatch(calls, /plugin/, 'no plugin work without a harness');
-  assert.doesNotMatch(calls, /ours-fleet init/, 'bails before the later steps');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-// --- Ctrl+C at a prompt must abort cleanly (exit 130 + message), never hang -------------------
-// Needs a real pty (a prompt only blocks with a controlling terminal); skipped without python3.
-function hasPython3() {
-  try { execFileSync('python3', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; }
+// The rule that outranks every feature in this package.
+function assertNeverTouchedSystemd(calls) {
+  assert.doesNotMatch(calls, /systemctl/, 'systemctl is never run');
+  assert.doesNotMatch(calls, /loginctl/, 'loginctl is never run');
 }
-const PTY_SIGINT = `
-import os, pty, sys, time, select
-env=dict(os.environ); env["OURS_INSTALL_DRY_RUN"]="1"; env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
-pid,fd=pty.fork()
-if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
-buf=b""
-def drain(t=0.8):
-    global buf; end=time.time()+t
-    while time.time()<end:
-        r,_,_=select.select([fd],[],[],0.1)
-        if r:
-            try:d=os.read(fd,4096)
-            except OSError:break
-            if not d:break
-            buf+=d
-        elif buf and buf.rstrip().endswith(b"[Enter]"):break
-# wait for the first prompt, then send Ctrl+C
-for _ in range(40):
-    drain(0.3)
-    if b"Continue?" in buf: break
-os.write(fd,b"\\x03"); time.sleep(0.3); drain(1.5)
-st=None
-for _ in range(40):
-    try: w,s=os.waitpid(pid,os.WNOHANG)
-    except ChildProcessError: st="reaped";break
-    if w: st=s;break
-    drain(0.15); time.sleep(0.1)
-tail=buf.decode(errors="replace")
-if "cancelled" in tail.lower(): print("MSG_OK")
-if st is None: print("HUNG")
-elif st=="reaped": print("EXIT_UNKNOWN")
-elif os.WIFEXITED(st): print("EXIT", os.WEXITSTATUS(st))
-elif os.WIFSIGNALED(st): print("SIGNAL", os.WTERMSIG(st))
-`;
-// A hermetic env for the pty tests: fake bins on PATH so the flow REACHES prompts on any machine
-// (a clean CI runner has no claude/codex/ours-mcp, so without this the installer would take the
-// "no harness" early-exit and never prompt). Returns { env, tmp }.
-function ptyBins(opts = {}) {
-  const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
+
+// ------------------------------------------------------------ first install --
+
+test('first install: CLI, config, daemon start, boot service — in that order', async () => {
+  const { out, calls, code, tmp, stateDir, port } = await runInstall({ seedConfig: false });
+  assert.equal(code, 0);
+  assertNeverTouchedSystemd(calls);
+  assert.match(calls, /npm i -g @ours\.network\/cli/, 'the v3 daemon is the ours-sdk CLI, not ours-mcp');
+  assert.match(calls, /ours daemon start --config /, 'the daemon is started by the CLI');
+  assert.match(calls, /ours daemon install-service .*--state-dir /, 'the unit is keyed to the STATE DIRECTORY');
+  assert.ok(calls.indexOf('ours daemon start') < calls.indexOf('install-service'),
+    'started before its boot service is installed');
+  // The config the run wrote, with the port it was given and nothing invented.
+  const parsed = JSON.parse(readFileSync(join(stateDir, 'config.json'), 'utf8'));
+  assert.equal(parsed.port, port);
+  assert.equal(parsed.stateDir, stateDir);
+  assert.equal(statSync(join(stateDir, 'config.json')).mode & 0o777, 0o600);
+  assert.match(out, /install complete/);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('the MCP server is a component, and it is what the later phases invoke', async () => {
+  const { out, calls, tmp, stateDir } = await runInstall({ seedConfig: false });
+  assert.match(calls, /npm i -g @ours\.network\/mcp/, 'the MCP server is installed as a component');
+  assert.doesNotMatch(calls, /ours-mcp install-service/, 'and gets NO unit: it is a per-session stdio proxy');
+  assert.match(calls, /ours-mcp create-root /, 'the human identity is created in-install');
+  assert.ok(calls.indexOf('@ours.network/mcp') < calls.indexOf('create-root'),
+    'installed before anything shells out to it');
+  // The pair travelled: create-root reached THIS daemon, not the default one.
+  assert.match(calls, new RegExp(`ours-mcp env OURS_CONFIG=${join(stateDir, 'config.json')}`));
+  assert.match(out, /Your human identity/, 'user-facing copy says "human identity"');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('an identity that already exists is kept, with its name, and is never a failure', async () => {
+  const { out, calls, tmp } = await runInstall({ seedConfig: false, rootExists: 'Vitalii' });
+  assert.match(calls, /ours-mcp create-root /);
+  assert.match(out, /already have a human identity \("Vitalii"\)/);
+  assert.match(out, /keeping it/);
+  assert.doesNotMatch(out, /needs attention.*[Hh]uman identity/);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+// ------------------------------------------------------------------ update --
+
+/** A temp home with fakes on PATH, ready for a run against a stub daemon. */
+function stubHost() {
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-v3-'));
   const bin = join(tmp, 'bin');
   mkdirSync(bin, { recursive: true });
   const log = join(tmp, 'calls.log');
   writeFileSync(log, '');
-  fakeBins(bin, { daemon: 'installed', ...opts });
-  const inherited = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !key.startsWith('OURS_')),
-  );
+  fakeBins(bin, {});
+  const stateDir = join(tmp, '.ours');
+  mkdirSync(stateDir, { recursive: true });
   return {
     tmp,
+    log,
+    stateDir,
+    calls: () => readFileSync(log, 'utf8'),
     env: {
-      ...inherited,
       PATH: `${bin}:${process.env.PATH}`,
       CALLLOG: log,
       HOME: tmp,
       SHELL: '/bin/bash',
-      OURS_CONFIG: join(tmp, '.ours', 'config.json'),
-      OURS_STATE_DIR: join(tmp, '.ours'),
+      OURS_ASSUME_YES: '1',
+      NO_COLOR: '1',
     },
   };
 }
 
-test('Ctrl+C at a prompt aborts cleanly (exit 130 + message), never hangs',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const { env, tmp } = ptyBins();
-  const out = execFileSync('python3', ['-c', PTY_SIGINT, INSTALL_MJS], { encoding: 'utf8', timeout: 60_000, env });
-  assert.match(out, /MSG_OK/, 'prints a friendly cancellation message');
-  assert.match(out, /EXIT 130/, 'exits with code 130, not a hang or a bare signal kill');
-  assert.doesNotMatch(out, /HUNG/, 'must never hang after Ctrl+C');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-// A full interactive happy-path run must TERMINATE on its own after the summary (the owner hit a
-// hang at the end). Drive Enter through every prompt in a pty and assert a clean exit 0.
-const PTY_HAPPY = `
-import os, pty, sys, time, select
-env=dict(os.environ); env["OURS_INSTALL_DRY_RUN"]="1"; env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
-pid,fd=pty.fork()
-if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
-buf=b""; last=time.time()
-def pump():
-    global buf,last
-    r,_,_=select.select([fd],[],[],0.4)
-    if r:
-        try:d=os.read(fd,4096)
-        except OSError:return False
-        if not d:return False
-        buf+=d; last=time.time()
-        # every prompt ends with a bracket/colon then a space; answer with Enter and reset
-        if buf.endswith((b"] ", b": ")):
-            os.write(fd,b"\\n"); time.sleep(0.05); buf=b""
-    return True
-st=None
-for _ in range(600):
-    try: w,s=os.waitpid(pid,os.WNOHANG)
-    except ChildProcessError: st="reaped";break
-    if w: st=s;break
-    if not pump():
-        if time.time()-last>4: break
-print("EXIT", os.WEXITSTATUS(st)) if isinstance(st,int) and os.WIFEXITED(st) else print("NOEXIT", st)
-`;
-test('a full happy-path run terminates on its own after the summary (no end-hang)',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const { env, tmp } = ptyBins();
-  const out = execFileSync('python3', ['-c', PTY_HAPPY, INSTALL_MJS], { encoding: 'utf8', timeout: 90_000, env });
-  assert.match(out, /EXIT 0/, 'the installer exits cleanly on its own after the final summary');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-const PTY_VOICE_DECLINE = `
-import os, pty, sys, time, select
-env=dict(os.environ); env["OURS_INSTALL_DRY_RUN"]="1"; env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
-pid,fd=pty.fork()
-if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
-buf=b""; pending=b""; last=time.time(); st=None
-for _ in range(900):
-    try:w,s=os.waitpid(pid,os.WNOHANG)
-    except ChildProcessError:st="reaped";break
-    if w:st=s;break
-    r,_,_=select.select([fd],[],[],0.25)
-    if r:
-        try:d=os.read(fd,4096)
-        except OSError:break
-        if not d:break
-        buf+=d; pending+=d; last=time.time()
-        if pending.endswith((b"] ", b": ")):
-            reply=b"n\\n" if b"Set up voice transcription now?" in pending[-500:] else b"\\n"
-            os.write(fd,reply); pending=b""
-    elif time.time()-last>8:break
-if st is None:
-    for _ in range(40):
-        try:w,s=os.waitpid(pid,os.WNOHANG)
-        except ChildProcessError:st="reaped";break
-        if w:st=s;break
-        time.sleep(0.05)
-text=buf.decode(errors="replace")
-print("EXIT",os.WEXITSTATUS(st)) if isinstance(st,int) and os.WIFEXITED(st) else print("NOEXIT",st)
-print("DECLINE_OK" if "declined; offered again on re-run" in text else "DECLINE_MISSING")
-`;
-test('interactive voice setup can be declined without changing config and is offered on rerun',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const { tmp, env } = ptyBins();
-  const out = execFileSync('python3', ['-c', PTY_VOICE_DECLINE, INSTALL_MJS], {
-    encoding: 'utf8', timeout: 120_000, env,
-  });
-  assert.match(out, /EXIT 0/);
-  assert.match(out, /DECLINE_OK/);
-  assert.equal(existsSync(join(tmp, '.ours', 'config.json')), false, 'decline does not create a voice config');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-// Drive a FIRST install through the voice offer and prove the installer delegates to the canonical
-// ours-mcp command instead of maintaining a second provider/token implementation.
-const PTY_VOICE_DELEGATED = `
-import os, pty, sys, time, select
-env=dict(os.environ); env.pop("OURS_INSTALL_DRY_RUN",None); env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
-pid,fd=pty.fork()
-if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
-buf=b""; pending=b""; last=time.time(); st=None
-def answer():
-    global pending
-    if not pending.endswith((b"] ", b": ")): return
-    os.write(fd,b"\\n"); pending=b""
-for _ in range(900):
-    try: w,s=os.waitpid(pid,os.WNOHANG)
-    except ChildProcessError: st="reaped";break
-    if w: st=s;break
-    r,_,_=select.select([fd],[],[],0.25)
-    if r:
-        try:d=os.read(fd,4096)
-        except OSError:break
-        if not d:break
-        buf+=d; pending+=d; last=time.time(); answer()
-    elif time.time()-last>8: break
-if st is None:
-    for _ in range(40):
-        try:w,s=os.waitpid(pid,os.WNOHANG)
-        except ChildProcessError:st="reaped";break
-        if w:st=s;break
-        time.sleep(0.05)
-text=buf.decode(errors="replace")
-print("EXIT", os.WEXITSTATUS(st)) if isinstance(st,int) and os.WIFEXITED(st) else print("NOEXIT",st)
-print("DELEGATED" if "canonical ours-mcp voice-setup completed" in text else "DELEGATION_MISSING")
-`;
-test('fresh interactive install delegates voice credentials to the canonical ours-mcp command',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const { tmp, env } = ptyBins();
-  // Make the fake daemon initially absent so this is the fresh-install path.
-  fakeBins(join(tmp, 'bin'), { daemon: 'absent' });
-  const out = execFileSync('python3', ['-c', PTY_VOICE_DELEGATED, INSTALL_MJS], {
-    encoding: 'utf8', timeout: 120_000, env,
-  });
-  assert.match(out, /EXIT 0/);
-  assert.match(out, /DELEGATED/);
-  const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
-  const voiceAt = calls.indexOf('ours-mcp voice-setup');
-  const startAt = calls.indexOf('ours-mcp start');
-  assert.ok(voiceAt >= 0, 'canonical voice setup ran');
-  assert.ok(startAt > voiceAt, 'fresh install configures voice before the daemon first starts');
-  assert.equal(calls.match(/^ours-mcp start$/gm)?.length, 1, 'fresh install starts the daemon exactly once');
-  assert.doesNotMatch(calls, /^ours-mcp restart$/m, 'fresh install never restarts before or after first start');
-  assert.doesNotMatch(readFileSync(INSTALL_MJS, 'utf8'), /askSecret|Provider \(openai-compatible/,
-    'installer contains no duplicate credential prompt implementation');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-const PTY_UPDATE_WITH_VOICE = `
-import os, pty, sys, time, select
-mode=sys.argv[2]
-env=dict(os.environ); env.pop("OURS_INSTALL_DRY_RUN",None); env["NO_COLOR"]="1"; env.pop("OURS_ASSUME_YES",None)
-pid,fd=pty.fork()
-if pid==0: os.execvpe("node",["node",sys.argv[1]],env); os._exit(127)
-buf=b""; pending=b""; last=time.time(); st=None
-for _ in range(900):
-    try:w,s=os.waitpid(pid,os.WNOHANG)
-    except ChildProcessError:st="reaped";break
-    if w:st=s;break
-    r,_,_=select.select([fd],[],[],0.25)
-    if r:
-        try:d=os.read(fd,4096)
-        except OSError:break
-        if not d:break
-        buf+=d; pending+=d; last=time.time()
-        if pending.endswith((b"] ", b": ")):
-            tail=pending[-700:]
-            if b"check for an update now?" in tail: reply=b"y\\n"
-            elif mode=="decline" and b"Set up voice transcription now?" in tail: reply=b"n\\n"
-            else: reply=b"\\n"
-            os.write(fd,reply); pending=b""
-    elif time.time()-last>8:break
-if st is None:
-    for _ in range(40):
-        try:w,s=os.waitpid(pid,os.WNOHANG)
-        except ChildProcessError:st="reaped";break
-        if w:st=s;break
-        time.sleep(0.05)
-text=buf.decode(errors="replace")
-print("EXIT",os.WEXITSTATUS(st)) if isinstance(st,int) and os.WIFEXITED(st) else print("NOEXIT",st)
-print("EXTERNAL_HANDOFF" if "restart its external launcher to load the update" in text else "NO_EXTERNAL_HANDOFF")
-`;
-test('update asks/configures voice before one restart and suppresses the normal update restart',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const { tmp, env } = ptyBins({ updateVersion: true, voiceRestartTrace: true });
-  const out = execFileSync('python3', ['-c', PTY_UPDATE_WITH_VOICE, INSTALL_MJS, 'accept'], {
-    encoding: 'utf8', timeout: 120_000, env,
-  });
-  assert.match(out, /EXIT 0/);
-  const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
-  const selectedAt = calls.indexOf('voice-provider-selected');
-  const configuredAt = calls.indexOf('voice-config-written');
-  const restartAt = calls.indexOf('ours-mcp restart (voice-setup)');
-  assert.ok(selectedAt >= 0 && configuredAt > selectedAt, 'provider selection precedes config write');
-  assert.ok(restartAt > configuredAt, 'provider prompt/config precede the canonical restart');
-  assert.equal(calls.match(/^ours-mcp restart \(voice-setup\)$/gm)?.length, 1,
-    'accepted voice setup owns exactly one restart');
-  assert.doesNotMatch(calls, /^ours-mcp restart$/m,
-    'installer does not add a redundant update restart after canonical voice setup');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('stopped-daemon update configures voice then preserves one normal update restart',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const { tmp, env } = ptyBins({ updateVersion: true, daemonState: 'stopped' });
-  const out = execFileSync('python3', ['-c', PTY_UPDATE_WITH_VOICE, INSTALL_MJS, 'accept'], {
-    encoding: 'utf8', timeout: 120_000, env,
-  });
-  assert.match(out, /EXIT 0/);
-  assert.match(out, /NO_EXTERNAL_HANDOFF/, 'stopped daemon remains installer-managed');
-  const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
-  const configuredAt = calls.indexOf('ours-mcp voice-setup');
-  const restartAt = calls.indexOf('ours-mcp restart');
-  assert.ok(configuredAt >= 0, 'canonical voice setup ran while the daemon was stopped');
-  assert.ok(restartAt > configuredAt, 'the normal update restart follows config-only voice setup');
-  assert.equal(calls.match(/^ours-mcp restart$/gm)?.length, 1,
-    'stopped update keeps exactly one normal update restart');
-  assert.doesNotMatch(calls, /^ours-mcp restart \(voice-setup\)$/m,
-    'stopped canonical setup does not claim a managed restart');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('external-daemon update leaves restart ownership with the external launcher',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const { tmp, env } = ptyBins({ updateVersion: true, daemonState: 'external' });
-  const out = execFileSync('python3', ['-c', PTY_UPDATE_WITH_VOICE, INSTALL_MJS, 'accept'], {
-    encoding: 'utf8', timeout: 120_000, env,
-  });
-  assert.match(out, /EXIT 0/);
-  assert.match(out, /EXTERNAL_HANDOFF/, 'operator receives the external-launcher restart handoff');
-  const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
-  assert.match(calls, /^ours-mcp voice-setup$/m, 'canonical config-only voice setup ran');
-  assert.doesNotMatch(calls, /^ours-mcp restart(?: \(voice-setup\))?$/m,
-    'installer does not seize restart ownership from an external launcher');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('voice restart/readiness rollback signal suppresses a redundant installer restart loop',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  const { tmp, env } = ptyBins({
-    updateVersion: true,
-    voiceRestartTrace: true,
-    voiceRecoveryFailure: true,
-  });
-  const out = execFileSync('python3', ['-c', PTY_UPDATE_WITH_VOICE, INSTALL_MJS, 'accept'], {
-    encoding: 'utf8', timeout: 120_000, env,
-  });
-  assert.match(out, /EXIT 0/);
-  const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
-  assert.equal(calls.match(/^ours-mcp restart \(voice-setup\)$/gm)?.length, 1,
-    'canonical recovery transaction is the only restart owner');
-  assert.doesNotMatch(calls, /^ours-mcp restart$/m,
-    'installer does not create a restart/rollback/restart loop after exit 2');
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test('declined or already-ready voice preserves one normal update restart',
-  { skip: hasPython3() ? false : 'python3 not available for pty' }, () => {
-  for (const mode of ['decline', 'ready']) {
-    const { tmp, env } = ptyBins({ updateVersion: true, voiceRestartTrace: true });
-    if (mode === 'ready') {
-      mkdirSync(join(tmp, '.ours'), { recursive: true });
-      writeFileSync(join(tmp, '.ours', 'config.json'), JSON.stringify({
-        port: 3050,
-        stt: { provider: 'deepgram', apiKey: 'ordering-placeholder-secret' },
-      }, null, 2) + '\n', { mode: 0o600 });
-      env.OURS_CONFIG = join(tmp, '.ours', 'config.json');
-    }
-    const out = execFileSync('python3', ['-c', PTY_UPDATE_WITH_VOICE, INSTALL_MJS, mode], {
-      encoding: 'utf8', timeout: 120_000, env,
-    });
-    assert.match(out, /EXIT 0/, `${mode} flow exits`);
-    const calls = readFileSync(join(tmp, 'calls.log'), 'utf8');
-    assert.equal(calls.match(/^ours-mcp restart$/gm)?.length, 1,
-      `${mode} flow keeps exactly one normal update restart`);
-    assert.doesNotMatch(calls, /^ours-mcp restart \(voice-setup\)$/m,
-      `${mode} flow does not invoke the voice transaction restart`);
-    rmSync(tmp, { recursive: true, force: true });
+test('update: a daemon that owns THIS state directory is adopted, never recreated', async () => {
+  const host = stubHost();
+  const daemon = await stubDaemon(host.stateDir);
+  try {
+    const config = join(host.stateDir, 'config.json');
+    writeFileSync(config, `${JSON.stringify({ port: daemon.port, stateDir: host.stateDir, brokerUrl: 'wss://broker1.ours.network' }, null, 2)}\n`, { mode: 0o600 });
+    const before = readFileSync(config, 'utf8');
+    const { out, code } = await runBin(['--state-dir', host.stateDir], host.env);
+    assert.equal(code, 0);
+    assert.match(out, new RegExp(`daemon found on port ${daemon.port}`), 'found by the directory\'s own record');
+    assert.doesNotMatch(host.calls(), /ours daemon start/, 'a running daemon is never started again');
+    assert.equal(readFileSync(config, 'utf8'), before, 'a config that already matches is not rewritten');
+    assert.match(out, /already correct — not touched/);
+    assertNeverTouchedSystemd(host.calls());
+  } finally {
+    await daemon.close();
+    rmSync(host.tmp, { recursive: true, force: true });
   }
 });
 
-// --- packaging: publishable standalone @ours.network/install (bin ships + zero external deps) ---
-test('package is a publishable standalone: name @ours.network/install, bin + files, no runtime deps', () => {
+test('a daemon owning ANOTHER state directory is refused, and nothing is installed', async () => {
+  const host = stubHost();
+  const elsewhere = mkdtempSync(join(tmpdir(), 'installer-other-'));
+  const daemon = await stubDaemon(elsewhere);
+  try {
+    writeFileSync(join(host.stateDir, 'config.json'), `${JSON.stringify({ port: daemon.port }, null, 2)}\n`, { mode: 0o600 });
+    const { out, code } = await runBin(['--state-dir', host.stateDir], host.env);
+    assert.equal(code, 2, 'a daemon owning another state directory is a refusal, not an adoption');
+    assert.match(out, /owns state directory/);
+    assert.equal(host.calls(), '', 'not one command ran');
+    assertNeverTouchedSystemd(host.calls());
+  } finally {
+    await daemon.close();
+    rmSync(host.tmp, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test('a --port that disagrees with the running daemon exits 2 and writes nothing', async () => {
+  const host = stubHost();
+  const daemon = await stubDaemon(host.stateDir);
+  try {
+    writeFileSync(join(host.stateDir, 'config.json'), `${JSON.stringify({ port: daemon.port }, null, 2)}\n`, { mode: 0o600 });
+    const { out, code } = await runBin(['--state-dir', host.stateDir, '--port', String(daemon.port + 1)], host.env);
+    assert.equal(code, 2);
+    assert.match(out, /disagrees with port/);
+    assert.match(out, /Nothing was written/);
+    assert.equal(host.calls(), '', 'not one command ran');
+  } finally {
+    await daemon.close();
+    rmSync(host.tmp, { recursive: true, force: true });
+  }
+});
+
+test('a daemon found ONLY by its PID record is still an update, not a second daemon', async () => {
+  // The corruption guard, end to end and through the real bin: a daemon started
+  // by hand records nothing in config.json, and creating a second writer on one
+  // state_data.bin is the failure this lookup exists to prevent.
+  const host = stubHost();
+  const daemon = await stubDaemon(host.stateDir);
+  try {
+    writeFileSync(join(host.stateDir, 'ours-cli-daemon.json'), `${JSON.stringify({ port: daemon.port })}\n`, { mode: 0o600 });
+    const { out, code } = await runBin(['--state-dir', host.stateDir], host.env);
+    assert.equal(code, 0);
+    assert.match(out, new RegExp(`daemon found on port ${daemon.port}`));
+    assert.doesNotMatch(host.calls(), /ours daemon start/, 'a second daemon must not be created here');
+  } finally {
+    await daemon.close();
+    rmSync(host.tmp, { recursive: true, force: true });
+  }
+});
+
+// -------------------------------------------------------- the four extras ---
+
+test('harness plugins: Claude and Codex are driven, and the flow continues past a failure', async () => {
+  const { out, calls, tmp } = await runInstall({ seedConfig: false });
+  assert.match(calls, /claude plugin marketplace add adapt-toolkit\/ours-claude-marketplace/);
+  assert.match(calls, /claude plugin install ours@ours\.network/);
+  assert.match(calls, /codex plugin marketplace add adapt-toolkit\/ours-codex-marketplace/);
+  assert.match(calls, /codex plugin add ours@ours-codex-marketplace/);
+  assert.match(calls, /npm i -g @ours\.network\/codex@latest/, 'the ours-codex launcher rides along, as the owner mandated');
+  assert.match(out, /install complete/);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('never dead-end: an undrivable codex is not called, and its manual path is printed', async () => {
+  const { out, calls, tmp } = await runInstall({ seedConfig: false, codex: 'unsafe' });
+  assert.doesNotMatch(calls, /codex plugin/, 'an unsafe codex is never driven');
+  assert.match(out, /codex plugin marketplace add adapt-toolkit\/ours-codex-marketplace/, 'manual path shown');
+  assert.match(out, /npm i -g @ours\.network\/codex/);
+  assert.match(calls, /claude plugin install ours@ours\.network/, 'the good harness still installs');
+  assert.match(calls, /ours-fleet init/, 'and the run reaches the later phases');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('Hermes: npm + ours-hermes-install --skip-daemon, and the pair reaches the writer', async () => {
+  const { out, calls, tmp, stateDir } = await runInstall({ seedConfig: false, stateDir: '.ours-tg', hermesPresent: true });
+  assert.match(calls, /npm i -g @ours\.network\/hermes@latest/);
+  assert.match(calls, /ours-hermes-install --skip-daemon/, 'the installer already owns the daemon');
+  // The one harness whose registration CAN carry the pair, so it does.
+  assert.match(calls, new RegExp(`ours-hermes-install env OURS_CONFIG=${join(stateDir, 'config.json')}`));
+  assert.doesNotMatch(out, /Hermes.*cannot carry a value/);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('a non-default state directory tells the truth about Claude and Codex', async () => {
+  const { out, calls, tmp, stateDir } = await runInstall({ seedConfig: false, stateDir: '.ours-tg' });
+  // Their registrations cannot carry a value, so the run says so and gives the
+  // exact line instead of claiming spec §5's guarantee.
+  assert.match(out, /cannot carry a value/);
+  assert.match(out, new RegExp(`export OURS_CONFIG=${join(stateDir, 'config.json')}`));
+  assert.doesNotMatch(calls, new RegExp(`claude env OURS_CONFIG=${join(stateDir, 'config.json')}`));
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('ours-fleet is installed and initialised, and the installer configures nothing in it', async () => {
+  const { out, calls, tmp, stateDir } = await runInstall({ seedConfig: false, stateDir: '.ours-tg' });
+  assert.match(calls, /npm i -g @ours\.network\/fleet@latest/, 'fleet is pinned to @latest: it has no nightly tag');
+  assert.match(calls, /ours-fleet init/);
+  assert.ok(!existsSync(join(tmp, '.ours-fleet', 'fleet.yaml')), 'the installer writes no fleet config');
+  assert.match(out, new RegExp(`env: \\{ OURS_CONFIG: ${join(stateDir, 'config.json')} \\}`),
+    'it SAYS the one fleet.yaml line, which is the whole feature');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('voice: a non-interactive run leaves it alone and says how to configure it', async () => {
+  const { out, calls, tmp } = await runInstall({ seedConfig: false });
+  assert.match(out, /voice setup is interactive and this run is not/);
+  assert.doesNotMatch(calls, /ours-mcp voice-setup/, 'the interactive command is never launched headlessly');
+  assert.doesNotMatch(calls, /ours daemon restart/, 'and no daemon is bounced for a config nobody wrote');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('voice: an already-configured daemon is reported and left entirely alone', async () => {
+  const { out, calls, tmp } = await runInstall({ seedConfig: false, voiceReady: true });
+  assert.match(out, /voice transcription is already configured/);
+  assert.doesNotMatch(calls, /ours-mcp voice-setup/);
+  assert.doesNotMatch(calls, /ours daemon restart/);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('the hand-off is the last thing the run produces, and it drops what it already did', async () => {
+  const { out, tmp } = await runInstall({ seedConfig: false });
+  assert.match(out, /paste this into your agent/);
+  assert.doesNotMatch(out, /Create my Ours human identity/, 'created in-install, so its step drops');
+  assert.match(out, /Set up my ours-fleet/);
+  assert.match(out, /PERMANENT use/);
+  assert.doesNotMatch(out, /Set up my Telegram bot/, 'the connector is not installed by default');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('a non-default state directory tells the agent which daemon to configure', async () => {
+  const { out, tmp, stateDir } = await runInstall({ seedConfig: false, stateDir: '.ours-tg' });
+  assert.match(out, /set OURS_CONFIG to that path/);
+  assert.match(out, new RegExp(join(stateDir, 'config.json')));
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- the bin ---
+
+test('--help and --version are answered by the bin and change nothing', async () => {
+  for (const flag of ['--help', '-h']) {
+    const { out, code, calls, tmp } = await runInstall({ seedConfig: false }, {}, [flag]);
+    assert.equal(code, 0, flag);
+    assert.match(out, /--state-dir/, 'the help names the flag that identifies a daemon');
+    assert.match(out, /--dry-run/);
+    assert.equal(calls, '', `${flag} runs nothing`);
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  const { out, code, calls, tmp } = await runInstall({ seedConfig: false }, {}, ['--version']);
+  assert.equal(code, 0);
+  assert.match(out, /^ours-install v\d+\.\d+\.\d+/m);
+  assert.equal(calls, '');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('an unknown flag exits 2 without running a single command', async () => {
+  const { out, code, calls, tmp } = await runInstall({ seedConfig: false }, {}, ['--nope']);
+  assert.equal(code, 2);
+  assert.match(out, /unknown option: --nope/);
+  assert.equal(calls, '');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('--dry-run walks the WHOLE flow and mutates nothing', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-v3-'));
+  const bin = join(tmp, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const log = join(tmp, 'calls.log');
+  writeFileSync(log, '');
+  fakeBins(bin, { hermesPresent: true });
+  mkdirSync(join(tmp, '.hermes'), { recursive: true });
+  const stateDir = join(tmp, '.ours-dry');
+  const port = await freePort();
+  const out = execFileSync('node', [INSTALL_MJS, '--dry-run', '--state-dir', stateDir, '--port', String(port)], {
+    env: { PATH: `${bin}:${process.env.PATH}`, CALLLOG: log, HOME: tmp, SHELL: '/bin/bash', OURS_ASSUME_YES: '1', NO_COLOR: '1' },
+    encoding: 'utf8',
+    stdio: 'pipe',
+  });
+  // A dry run is the same walk with every mutation replaced by a printed line —
+  // which is exactly why it can be trusted on a machine you must not disturb.
+  // Harness DETECTION still runs — a dry run has to know what it would install
+  // — but every call in the log must be a read-only probe and nothing else.
+  for (const call of readFileSync(log, 'utf8').split('\n').filter(Boolean)) {
+    assert.match(call, /--version$/, `a dry run runs only read-only probes, got: ${call}`);
+  }
+  assert.equal(existsSync(stateDir), false, 'not one directory, let alone a config file');
+  assert.match(out, /\[dry-run\] would: ours CLI installed/);
+  assert.match(out, /\[dry-run\] would: start the daemon on port/);
+  assert.match(out, /\[dry-run\] would: boot service .* installed and enabled/);
+  assert.match(out, /\[dry-run\] would: install @ours\.network\/mcp/);
+  assert.match(out, /\[dry-run\] would: ours-mcp create-root/);
+  assert.match(out, /\[dry-run\] would: npm i -g @ours\.network\/fleet/);
+  assert.match(out, /install complete/, 'and it still reaches the summary');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('no harness at all: the daemon is still installed, and the run says what is missing', async () => {
+  const { out, calls, tmp } = await runInstall({ seedConfig: false, noHarness: true });
+  // A deliberate divergence from v2, which exited before installing anything.
+  // Under v3 the daemon is the product; a harness plugin is one extra of several.
+  assert.match(out, /No Claude Code, Codex or Hermes found/);
+  assert.match(calls, /npm i -g @ours\.network\/cli/, 'the daemon is installed anyway');
+  assert.doesNotMatch(calls, /plugin/, 'but no plugin work happens');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('install.mjs is a BIN and nothing else: no decisions, no side effects of its own', async () => {
+  const src = readFileSync(INSTALL_MJS, 'utf8');
+  assert.ok(src.split('\n').length < 120, 'a bin that grows a body is how two flows end up in one file');
+  assert.match(src, /runInstall/, 'it delegates the walk');
+  assert.match(src, /realEffects/, 'and the side effects');
+  // The v2 body is gone, not commented out or conditionally skipped.
+  for (const ghost of ['offerVoiceSetup', 'installClaude', 'installCodex', 'endScreen(', 'buildHandoffPrompt(', 'spawnSync']) {
+    assert.ok(!src.includes(ghost), `the v2 body must be gone, found: ${ghost}`);
+  }
+  assert.doesNotMatch(src, /askSecret|Provider \(openai-compatible/,
+    'no duplicate credential prompt implementation');
+});
+
+// --- packaging: publishable standalone @ours.network/install ------------------------------------
+test('package is a publishable standalone: name @ours.network/install, bin + files, no runtime deps', async () => {
   const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'));
-  assert.equal(pkg.name, '@ours.network/install', 'renamed to the publishable command package');
+  assert.equal(pkg.name, '@ours.network/install');
   assert.notEqual(pkg.private, true, 'must be publishable (private:false)');
   assert.equal(pkg.bin['ours-install'], 'install.mjs', 'ships the ours-install bin');
   for (const f of ['install.mjs', 'install.sh', 'lib', 'uninstall.mjs', 'uninstall.sh', 'README.md', 'LICENSE']) {
     assert.ok(pkg.files.includes(f), `files whitelist ships ${f}`);
   }
-  // License: FSL, same identifier as the sibling @ours.network/* packages, with the LICENSE shipped.
-  assert.equal(pkg.license, 'FSL-1.1-Apache-2.0', 'license matches the sibling packages');
-  assert.ok(existsSync(join(PKG, 'LICENSE')), 'a LICENSE file is present to ship');
-  // Self-contained: the installer + its lib import ONLY node built-ins (no @ours.network/* etc.).
+  assert.equal(pkg.license, 'FSL-1.1-Apache-2.0');
+  assert.ok(existsSync(join(PKG, 'LICENSE')));
   assert.ok(!pkg.dependencies || Object.keys(pkg.dependencies).length === 0, 'no runtime dependencies');
-  for (const f of ['install.mjs', 'lib/ui.mjs', 'lib/logic.mjs', 'lib/prompt.mjs', 'lib/config.mjs']) {
+  for (const f of ['install.mjs', 'lib/ui.mjs', 'lib/logic.mjs', 'lib/prompt.mjs', 'lib/config.mjs',
+    'lib/effects.mjs', 'lib/orchestrate.mjs', 'lib/extras.mjs', 'lib/usage.mjs']) {
     const src = readFileSync(join(PKG, f), 'utf8');
-    const imports = [...src.matchAll(/^import[^']*'([^']+)'/gm)].map((m) => m[1]);
-    for (const spec of imports) {
-      const builtin = spec.startsWith('node:') || spec.startsWith('./') || spec.startsWith('../');
-      assert.ok(builtin, `${f} imports only built-ins / local — got "${spec}"`);
+    for (const [, spec] of src.matchAll(/^import[^']*'([^']+)'/gm)) {
+      assert.ok(spec.startsWith('node:') || spec.startsWith('./') || spec.startsWith('../'),
+        `${f} imports only built-ins / local — got "${spec}"`);
     }
   }
 });
 
 // --- install.sh bootstrap: Node.js check (unchanged contract) ----------------------------------
-test('install.sh with no Node.js prints friendly per-OS guidance and exits 0', () => {
-  const tmp = mkdtempSync(join(tmpdir(), 'installer-'));
+test('install.sh with no Node.js prints friendly per-OS guidance and exits 0', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'installer-v3-'));
   const bin = join(tmp, 'bin');
   mkdirSync(bin, { recursive: true });
-  const out = execFileSync('bash', [INSTALL_SH], {
-    env: { PATH: '/usr/bin:/bin' + `:${bin}`, HOME: tmp },
-    stdio: 'pipe', encoding: 'utf8',
-  }).toString();
   let hasNode = true;
   try { execFileSync('bash', ['-c', 'command -v node'], { env: { PATH: '/usr/bin:/bin' }, stdio: 'ignore' }); }
   catch { hasNode = false; }
-  if (hasNode) { rmSync(tmp, { recursive: true, force: true }); return; } // system node leaks in; skip
+  if (hasNode) {
+    // A system node leaks into the restricted PATH, so install.sh would hand off
+    // to the real installer rather than print the guidance this test is about.
+    // Asserting on that hand-off would be asserting on the host, not the script.
+    rmSync(tmp, { recursive: true, force: true });
+    return;
+  }
+  const out = execFileSync('bash', [INSTALL_SH], {
+    env: { PATH: `/usr/bin:/bin:${bin}`, HOME: tmp },
+    stdio: 'pipe',
+    encoding: 'utf8',
+  }).toString();
   assert.match(out, /Node\.js/, 'explains Node.js is needed');
   assert.match(out, /nodejs\.org/, 'links nodejs.org');
   assert.doesNotMatch(out, /install\.mjs/, 'must not try to run the Node installer without node');
