@@ -19,7 +19,7 @@
 
 import { join } from 'node:path';
 import { parseInstallArgs, InstallUsageError } from './target.mjs';
-import { planUninstall, planComponentDetach, planStatePurge, stripManagedBlock, planHarnessSelection, selectHarnesses, planGlobalPackages } from './uninstall.mjs';
+import { planUninstall, planComponentDetach, planStatePurge, stripManagedBlock, planHarnessSelection, selectHarnesses, planGlobalPackages, planPluginRemoval, parseUninstallEnv } from './uninstall.mjs';
 import { tgConfigPath, coworkConfigPath } from './components.mjs';
 import { configJournal, reportRollback } from './journal.mjs';
 import { UNINSTALL_USAGE } from './usage.mjs';
@@ -81,6 +81,33 @@ export async function runUninstall(argv, effects) {
   effects.out(heading(`ours-uninstall --state-dir ${dir}`));
   if (args.dryRun) effects.out(info('dry-run: nothing will be removed or stopped'));
 
+  // §9 — the documented OURS_UNINSTALL_* contract (item 10.9), read BEFORE any
+  // file is opened. A variable this uninstaller cannot deliver stops the run
+  // here, naming itself and naming the replacement, rather than being silently
+  // ignored while the operator's script reports success.
+  const contract = parseUninstallEnv(effects.env);
+  if (contract.action === 'refuse') {
+    effects.out(warn(`ours: ${contract.message}`));
+    return EXIT_REFUSED;
+  }
+
+  // OURS_UNINSTALL_DAEMON decides whether this is an uninstall of the daemon at
+  // all. Before this gate, OURS_UNINSTALL="hermes" — a script asking for one
+  // harness plugin — tore down the daemon, its service and the global packages,
+  // because none of the seven variables was read. A request to detach a plugin
+  // stays a request to detach a plugin.
+  if (!contract.daemon) {
+    effects.out(info(`the daemon at ${dir} is KEPT — OURS_UNINSTALL is set and OURS_UNINSTALL_DAEMON is not "yes"`));
+    const plugins = planPluginRemoval({ home: effects.home, env: effects.env, exists: effects.exists, lastDaemon: false, explicitSelection: true });
+    const outcome = await runPluginPhase(plugins, { args, effects, selection: contract.harnesses });
+    // Only the launchers of the harnesses that actually went. @ours.network/cli
+    // and /mcp belong to the daemon, and the daemon is staying.
+    for (const pkg of outcome.packages) {
+      await perform(effects, args.dryRun, `npm rm -g ${pkg}`, () => effects.run('npm', ['rm', '-g', pkg]));
+    }
+    return EXIT_OK;
+  }
+
   // Ask first, mutate second. The question is about resolving the step-1
   // refusal, so it has to come before the plan that would refuse.
   // `readText` is passed alongside `readJson` so the planner can tell an ABSENT
@@ -93,7 +120,13 @@ export async function runUninstall(argv, effects) {
     return EXIT_REFUSED;
   }
   const pointing = probe.action === 'refuse' ? probe.components : [];
-  const confirmedComponents = await confirmComponentRemoval(pointing, { assumeYes: args.assumeYes, effects });
+  // With the contract engaged there is nobody to ask, and OURS_UNINSTALL_TELEGRAM
+  // / _ROOMS at `detach` is exactly the answer the question wants. Without it, an
+  // unattended run against a daemon a connector points at refuses — which is the
+  // right outcome, and the reason honouring `detach` is worth doing.
+  const confirmedComponents = contract.engaged
+    ? contract.confirmedComponents
+    : await confirmComponentRemoval(pointing, { assumeYes: args.assumeYes, effects });
 
   const plan = planUninstall({
     home: effects.home,
@@ -109,6 +142,7 @@ export async function runUninstall(argv, effects) {
     cliStartedIt: effects.readJson(join(dir, 'ours-cli-daemon.json')) !== null,
     otherStateDirsWithConfig: effects.knownStateDirs(),
     typedConfirmation: null,
+    explicitHarnessSelection: contract.engaged,
   });
 
   if (plan.action === 'refuse') {
@@ -156,7 +190,7 @@ export async function runUninstall(argv, effects) {
   }
 
   // 5. The harness plugins the installer wrote.
-  const pluginOutcome = await runPluginPhase(plan.plugins, { args, effects });
+  const pluginOutcome = await runPluginPhase(plan.plugins, { args, effects, selection: contract.harnesses });
 
   // 6. State. Last, because it is the only irreversible thing here.
   await runPurgePhase({ dir, purge, args, effects });

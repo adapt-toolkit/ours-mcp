@@ -396,3 +396,99 @@ test('pressing Enter through the questions removes what v3 removes today', async
   assert.ok(e.recorder.removed.includes(HERMES_SKILL));
   assert.ok(e.recorder.ran.some((c) => c.join(' ') === 'npm rm -g @ours.network/hermes'));
 });
+
+// ------- item 10.9 — the documented OURS_UNINSTALL_* contract, end to end ----
+
+test('OURS_UNINSTALL="hermes" removes the hermes plugin and NOT the daemon', async () => {
+  // The live escalation this closes. Before the OURS_UNINSTALL_DAEMON gate this
+  // exact environment reached v3, which read none of it, and removed the daemon:
+  // its boot service, its process, and @ours.network/cli + /mcp.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG, [join(OURS, 'ours-cli-daemon.json')]: { pid: 1 } },
+    text: { [HERMES_CFG]: `theirs\n${BLOCK.join('\n')}\n` },
+    present: () => true,
+    env: { OURS_UNINSTALL: 'hermes' },
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
+
+  const ran = e.recorder.ran.map((c) => c.join(' '));
+  assert.ok(!ran.some((c) => c.includes('daemon uninstall-service')), 'the boot service stays');
+  assert.ok(!ran.some((c) => c.includes('daemon stop')), 'the daemon is not stopped');
+  assert.ok(!ran.some((c) => c.includes('@ours.network/cli') || c.includes('@ours.network/mcp')),
+    'and the daemon packages are not removed');
+  assert.deepEqual(e.recorder.removed, [
+    join(HOME, '.hermes', 'skills', 'communication', 'ours'),
+    join(HOME, '.hermes', 'skills', 'communication', 'writing-agent-bios'),
+    join(HOME, '.hermes', 'ours-connector.env'),
+    join(HOME, '.hermes', 'ours-connector.log'),
+  ], 'exactly the hermes plugin, nothing else');
+  assert.ok(ran.includes('npm rm -g @ours.network/hermes'));
+  assert.deepEqual(e.recorder.asked, [], 'the contract is non-interactive, as it was in v2');
+});
+
+test('OURS_UNINSTALL_DAEMON=yes removes the daemon and, unset, no harness plugin', async () => {
+  // v2 parity: OURS_UNINSTALL_DAEMON=yes on its own removed the daemon and left
+  // every harness plugin alone, because OURS_UNINSTALL named none.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    text: { [HERMES_CFG]: `theirs\n${BLOCK.join('\n')}\n` },
+    present: () => true,
+    env: { OURS_UNINSTALL_DAEMON: 'yes' },
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
+  const ran = e.recorder.ran.map((c) => c.join(' '));
+  assert.ok(ran.some((c) => c.includes('daemon uninstall-service')));
+  assert.deepEqual(e.recorder.wroteText, [], 'no plugin config touched');
+  assert.deepEqual(e.recorder.removed, [], 'no plugin directory deleted');
+  assert.ok(!ran.includes('npm rm -g @ours.network/hermes'));
+});
+
+test('OURS_UNINSTALL_DATA=yes refuses the whole run and removes NOTHING', async () => {
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    env: { OURS_UNINSTALL: 'all', OURS_UNINSTALL_DAEMON: 'yes', OURS_UNINSTALL_DATA: 'yes' },
+    present: () => true,
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_REFUSED);
+  assert.deepEqual(e.recorder.ran, [], 'nothing stopped, uninstalled or npm-removed');
+  assert.deepEqual(e.recorder.removed, [], 'and above all, no state directory deleted');
+  assert.deepEqual(e.recorder.wroteText, []);
+  assert.match(said(e), /OURS_UNINSTALL_DATA/, 'the refusal names the variable');
+  assert.match(said(e), /--purge/, 'and names what to do instead');
+});
+
+test('OURS_UNINSTALL_TELEGRAM=detach gives the answer an unattended run cannot be asked for', async () => {
+  // Without it this run refuses at §8 step 1: tg points here and nobody can
+  // confirm its removal. The documented value IS that confirmation.
+  const attached = { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: OURS, botToken: 'secret' };
+  const refused = fx({
+    json: { [join(OURS, 'config.json')]: CFG, [TG_CFG]: attached },
+    env: { OURS_UNINSTALL_DAEMON: 'yes' },
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], refused), EXIT_REFUSED);
+
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG, [TG_CFG]: attached },
+    env: { OURS_UNINSTALL_DAEMON: 'yes', OURS_UNINSTALL_TELEGRAM: 'detach' },
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
+  const [, body] = e.recorder.wrote.find(([p]) => p === TG_CFG);
+  assert.equal(JSON.parse(body).botToken, 'secret', 'detach keeps the file and the token');
+  assert.ok(!('daemonUrl' in JSON.parse(body)));
+  assert.deepEqual(e.recorder.asked, []);
+});
+
+test('OURS_UNINSTALL_TELEGRAM=reassign refuses on its OWN account, not step 1’s', async () => {
+  // Deliberately with NO connector pointing here, so the §8 step-1 refusal cannot
+  // be what is happening: an unsupported value stops the run by itself. With a
+  // connector attached both refusals coincide, and a test written that way would
+  // pass against code that never read the variable at all.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: CFG },
+    env: { OURS_UNINSTALL_DAEMON: 'yes', OURS_UNINSTALL_TELEGRAM: 'reassign:default' },
+  });
+  assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_REFUSED);
+  assert.deepEqual(e.recorder.ran, [], 'the daemon it would otherwise have removed is untouched');
+  assert.deepEqual(e.recorder.wrote, [], 'and the connector is not detached as a consolation prize');
+  assert.match(said(e), /OURS_UNINSTALL_TELEGRAM/);
+});

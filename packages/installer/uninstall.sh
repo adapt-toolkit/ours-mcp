@@ -10,10 +10,19 @@
 # explanation of what will be removed. It removes ONLY what the ours installers created; the two
 # destructive items (data dir, daemon) require an explicit typed 'yes'.
 #
-# Non-interactive env overrides (all optional) — consumed by the Node uninstaller:
-#   OURS_UNINSTALL="hermes codex"   which harness plugins to remove (space/comma; names or "all")
-#   OURS_UNINSTALL_DATA=yes         also remove the ours data dir (~/.ours) [destructive]
-#   OURS_UNINSTALL_DAEMON=yes       also stop + remove the ours-mcp daemon + its service
+# Non-interactive env overrides (all optional) — consumed by the Node uninstaller. Setting ANY of
+# the OURS_UNINSTALL* variables makes the run non-interactive; setting none leaves it unchanged.
+# Four documented variables describe things this uninstaller cannot do, and it REFUSES (exit 2,
+# nothing removed) rather than ignoring them — see the table in README.md. Full list there.
+#   OURS_UNINSTALL="hermes codex"   which harness plugins to remove (space/comma; names, "all", "none")
+#   OURS_UNINSTALL_DAEMON=yes       also stop + remove the daemon + its service + the global packages.
+#                                   Unset (or any other value) removes ONLY the plugins named above
+#                                   and leaves the daemon running.
+#   OURS_UNINSTALL_TELEGRAM=detach  detach the Telegram connector from this daemon (same for
+#   OURS_UNINSTALL_ROOMS=detach     Rooms). Without it, a run a connector still points at refuses.
+#   OURS_UNINSTALL_DATA=yes         REFUSED. State is never deleted unattended — it holds identity
+#                                   private keys. Use 'ours-uninstall --state-dir <dir> --purge'
+#                                   from a terminal and type the full path.
 #   OURS_ASSUME_YES=1               accept defaults; skip the typed confirmations (implies no tty)
 #   OURS_NPM="npm"                  npm binary to use
 #   OURS_UNINSTALLER_MJS / OURS_INSTALLER_BASE   run/fetch overrides (dev/testing)

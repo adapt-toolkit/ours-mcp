@@ -17,6 +17,7 @@
 import { join, resolve } from 'node:path';
 import { unitNameForStateDir } from './plan.mjs';
 import { tgConfigPath, coworkConfigPath } from './components.mjs';
+import { canonHarnesses } from './logic.mjs';
 
 /**
  * Does this directory even look like an ours state directory?
@@ -560,4 +561,175 @@ export const NON_INTERACTIVE_ANSWERS = {
  */
 export function refusalSurvivesAssumeYes(refusal) {
   return refusal && refusal.action === 'refuse' ? { ...refusal, exitCode: 2 } : refusal;
+}
+
+// -----------------------------------------------------------------------------
+// §9 — the OURS_UNINSTALL_* contract (inventory item 10.9)
+// -----------------------------------------------------------------------------
+
+/**
+ * The seven variables. THIS IS A DOCUMENTED PUBLIC INTERFACE, not an internal
+ * detail: all seven are in packages/installer/README.md, two of them are in
+ * uninstall.sh's header as well, and somebody's unattended uninstall script is
+ * written against them. v3 honoured none of them and said nothing, which is the
+ * worst of the three available behaviours — a documented variable that quietly
+ * does nothing is worse than one that errors, because the operator believes it
+ * worked.
+ *
+ * Each is in exactly one of two categories, and which one is not a matter of
+ * taste. A variable is HONOURED when v3 can deliver what it documents. A
+ * variable is REFUSED — exit 2, nothing removed, naming the variable and naming
+ * the replacement — when what it documents depends on something v3 does not
+ * have. Nothing is silently ignored and nothing is silently obeyed.
+ *
+ * HONOURED
+ *   OURS_UNINSTALL          which harness plugins to remove. Parsed by the same
+ *                           canonHarnesses the nightly picker used, so names,
+ *                           numbers, "all" and "none" all still mean what they
+ *                           meant. Feeds item 9.5's selection.
+ *   OURS_UNINSTALL_DAEMON   whether the daemon goes. See below — this is the one
+ *                           that matters most.
+ *   OURS_UNINSTALL_TELEGRAM
+ *   OURS_UNINSTALL_ROOMS    at the value `detach`, which is exactly the
+ *                           confirmation §8 step 1 asks a human for and which an
+ *                           unattended run otherwise cannot give, so today the
+ *                           run refuses instead of detaching.
+ *
+ * REFUSED
+ *   OURS_UNINSTALL_DATA=yes         v3 never deletes state without a human
+ *                                   present (§9), and that rule protects private
+ *                                   keys that exist nowhere else.
+ *   OURS_UNINSTALL_PROFILE          names an entry in the daemon registry. v3
+ *                                   has no registry; the selector is --state-dir.
+ *   OURS_UNINSTALL_FORGET_PROFILE   asks to forget a daemon as metadata while it
+ *                                   keeps running. v3 has no metadata to forget.
+ *   OURS_UNINSTALL_TELEGRAM/_ROOMS  at `uninstall` (v3 detaches, it does not
+ *                                   remove connector packages) or
+ *                                   `reassign:<profile-id>` (again the registry).
+ *
+ * WHY THE WHOLE CONTRACT ENGAGES OR NONE OF IT DOES. v2 gated on
+ * `OURS_UNINSTALL != null || OURS_UNINSTALL_DATA || OURS_UNINSTALL_DAEMON` and
+ * then asked nothing at all. That gate is kept exactly: with none of the seven
+ * set, `ours-uninstall` behaves precisely as it does today, so the blast radius
+ * of this whole change is "an operator who set one of the documented variables".
+ *
+ * AND THE ESCALATION THIS CLOSES. Before this, `OURS_UNINSTALL="hermes"` — a
+ * script that asked for ONE HARNESS PLUGIN to be removed — reached v3, which
+ * read none of it, and removed THE DAEMON: its service, its process, and the
+ * global packages. Honouring OURS_UNINSTALL_DAEMON is what makes a request to
+ * detach a plugin stay a request to detach a plugin.
+ */
+export const UNINSTALL_ENV_VARS = [
+  'OURS_UNINSTALL',
+  'OURS_UNINSTALL_PROFILE',
+  'OURS_UNINSTALL_FORGET_PROFILE',
+  'OURS_UNINSTALL_DAEMON',
+  'OURS_UNINSTALL_DATA',
+  'OURS_UNINSTALL_TELEGRAM',
+  'OURS_UNINSTALL_ROOMS',
+];
+
+/**
+ * Is the contract engaged at all? PRESENCE, not truth — `OURS_UNINSTALL=""` is a
+ * deliberate "no harnesses", exactly as v2's `!= null` read it, and is not the
+ * same as never having set it.
+ */
+export function uninstallEnvEngaged(env = {}) {
+  return UNINSTALL_ENV_VARS.some((name) => env[name] !== undefined && env[name] !== null);
+}
+
+const CONNECTOR_VARS = [
+  { name: 'OURS_UNINSTALL_TELEGRAM', key: 'tg', pkg: '@ours.network/tg-connector' },
+  { name: 'OURS_UNINSTALL_ROOMS', key: 'cowork', pkg: '@ours.network/cowork' },
+];
+
+function connectorRefusal(name, value, pkg) {
+  if (value === 'uninstall') {
+    return `${name}=uninstall asks for the connector's global package to be removed as well; this uninstaller detaches a connector, it does not uninstall one. Use ${name}=detach, then 'npm rm -g ${pkg}' yourself.`;
+  }
+  if (value.startsWith('reassign:')) {
+    return `${name}=${value} asks for the connector to be pointed at another daemon by profile id. This uninstaller has no profile registry, so there is no id it could resolve. Point the connector at the daemon you want first — 'ours-install --state-dir <path>' — and then re-run this uninstall.`;
+  }
+  return `${name}=${value} is not a value this uninstaller understands. The only supported value is 'detach'.`;
+}
+
+/**
+ * Read the contract, or refuse it. Pure: the caller passes the environment in.
+ *
+ * A refusal is returned rather than thrown, in the same shape planUninstall uses
+ * for its own refusals, so the orchestrator has one thing to print and one exit
+ * code to return — and so a test can assert the whole set of refusals at once
+ * instead of catching them one at a time.
+ */
+export function parseUninstallEnv(env = {}) {
+  const engaged = uninstallEnvEngaged(env);
+  const value = (name) => (typeof env[name] === 'string' ? env[name].trim() : '');
+  const refusals = [];
+
+  if (value('OURS_UNINSTALL_DATA') === 'yes') {
+    refusals.push({
+      variable: 'OURS_UNINSTALL_DATA',
+      value: 'yes',
+      message: "OURS_UNINSTALL_DATA=yes asks this uninstaller to delete a state directory with nobody present. It will not: that directory holds identity private keys that exist nowhere else and that no peer can give back, and state is never deleted in an unattended run. To delete it, run 'ours-uninstall --state-dir <dir> --purge' from a terminal and type the full path when it asks.",
+    });
+  }
+  const profile = value('OURS_UNINSTALL_PROFILE');
+  if (profile) {
+    refusals.push({
+      variable: 'OURS_UNINSTALL_PROFILE',
+      value: profile,
+      message: `OURS_UNINSTALL_PROFILE=${profile} names an entry in the daemon profile registry, which this uninstaller does not have — there is no profile to select. Choose the daemon by its state directory instead: 'ours-uninstall --state-dir <path>'.`,
+    });
+  }
+  if (value('OURS_UNINSTALL_FORGET_PROFILE') === 'yes') {
+    refusals.push({
+      variable: 'OURS_UNINSTALL_FORGET_PROFILE',
+      value: 'yes',
+      message: 'OURS_UNINSTALL_FORGET_PROFILE=yes asks for a daemon to be forgotten as metadata while it keeps running. This uninstaller keeps no registry of daemons, so there is nothing to forget and nothing it could do that would match that request — a daemon it is not pointed at is already left entirely alone.',
+    });
+  }
+
+  const components = {};
+  for (const connector of CONNECTOR_VARS) {
+    const raw = value(connector.name);
+    if (!raw) continue;
+    if (raw === 'detach') { components[connector.key] = 'detach'; continue; }
+    refusals.push({
+      variable: connector.name,
+      value: raw,
+      message: connectorRefusal(connector.name, raw, connector.pkg),
+    });
+  }
+
+  const canon = engaged ? canonHarnesses(env.OURS_UNINSTALL ?? '') : null;
+  // A token we cannot map is a request we cannot deliver. The nightly picker
+  // reported these and carried on, which under an unattended run means
+  // OURS_UNINSTALL="hermez" removes nothing and says so into a log nobody reads.
+  // Same rule as the rest of this contract: name it, refuse, remove nothing.
+  for (const token of canon?.unknown ?? []) {
+    refusals.push({
+      variable: 'OURS_UNINSTALL',
+      value: token,
+      message: `OURS_UNINSTALL names "${token}", which is not a harness this uninstaller knows. Use ${HARNESS_ORDER.join(', ')}, or "all", or "none".`,
+    });
+  }
+
+  const contract = {
+    engaged,
+    // Not engaged means "decide this the way you always did": null selection, and
+    // the daemon removal that IS this command.
+    harnesses: canon ? canon.names : null,
+    unknownHarnessTokens: canon ? canon.unknown : [],
+    daemon: engaged ? value('OURS_UNINSTALL_DAEMON') === 'yes' : true,
+    confirmedComponents: Object.keys(components),
+  };
+  if (refusals.length === 0) return contract;
+  return {
+    ...contract,
+    action: 'refuse',
+    exitCode: 2,
+    reason: 'uninstall-env-unsupported',
+    refusals,
+    message: `${refusals.map((r) => r.message).join('\n')}\nNothing was removed.`,
+  };
 }
