@@ -935,10 +935,18 @@ async function watchIdentityViaApi(name: string): Promise<void> {
   };
 
   // Prime at the current tip — emit nothing for the existing backlog.
-  let cursor = (await fetchSince('tip')).cursor ?? 0;
+  //
+  // PRIMING IS INSIDE THE LOOP, and that is the whole point. It used to run once
+  // above it, where nothing caught it: fetchSince throws on any non-OK, non-401
+  // response and on any network error, so a daemon that was merely restarting when
+  // the watch started killed the watch outright — the exact transient case the
+  // retry below exists to survive. `cursor === null` is the "not primed yet" state,
+  // so a hiccup during priming is retried on the same backoff as any other.
+  let cursor: number | null = null;
   let backoff = 0;
   for (;;) {
     try {
+      if (cursor === null) cursor = (await fetchSince('tip')).cursor ?? 0;
       const body = await fetchSince(String(cursor));
       backoff = 0;
       if (Array.isArray(body.events)) for (const ev of body.events) emitNotify(name, ev);
@@ -974,7 +982,18 @@ async function watchViaApi(which?: string): Promise<void> {
           const name = typeof ent?.name === 'string' ? ent.name : undefined;
           if (name && !watching.has(name)) {
             watching.add(name);
-            void watchIdentityViaApi(name); // runs until a 401 (exits) or forever
+            // Detached ON PURPOSE — each identity streams concurrently — which means
+            // this promise has no awaiting caller and main()'s .catch cannot see it.
+            // An unhandled rejection here TERMINATES the whole process on Node >=15,
+            // so one identity's failure would silently take down the streams for
+            // every other identity being watched. Nothing should reject now that
+            // priming retries in-loop, and a 401 exits the process deliberately; if
+            // one ever does, report it and forget the name so the next enumeration
+            // tick re-arms it rather than leaving it permanently unwatched.
+            void watchIdentityViaApi(name).catch((e) => {
+              watching.delete(name);
+              err(`ours-mcp watch: stream for "${name}" ended (${String((e as Error)?.message ?? e)}); will re-arm`);
+            });
           }
         }
       }
