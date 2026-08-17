@@ -396,6 +396,11 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
     stateDir: dir,
     installedVersion: effects.installedVersion(component.pkg),
     channel: args.channel,
+    // The broker is a value the INSTALLER knows and cowork cannot guess — the one
+    // the operator chose in this run. `home` is for cowork's OWN state directory,
+    // never the daemon's.
+    brokerUrl: args.brokerUrl,
+    home: effects.home,
   });
   if (plan.action === 'refuse' || plan.action === 'leave-embedded') {
     effects.out(warn(`cowork: ${plan.message}`));

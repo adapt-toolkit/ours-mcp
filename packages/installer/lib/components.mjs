@@ -248,7 +248,48 @@ export function atLeastVersion(actual, floor) {
  * alone; only `daemon.stateDir` is the ours daemon's. Confusing the two fails
  * closed at boot, which is why they are never touched in the same write.
  */
-export function planCoworkAttachment({ existing, endpoint, stateDir, installedVersion, channel = 'latest' }) {
+/**
+ * cowork's own defaults, seeded ONLY into a config that does not have them.
+ *
+ * WHY THIS IS NOT "CONFIGURING SOMEBODY ELSE'S TOOL". On a first install cowork's
+ * config file does not exist, so v3 wrote it with a `daemon` block and nothing
+ * else — no version, no broker, no REST port. The nightly installer seeds all
+ * three (`planCoworkConfig`, lib/logic.mjs), and the broker in particular is a
+ * value the INSTALLER knows and cowork cannot guess: it is the one the operator
+ * chose in this run, and a cowork pointed at a different broker cannot reach the
+ * agents it was installed to talk to.
+ *
+ * SEEDED ONLY INTO A FILE THAT DOES NOT EXIST YET. An existing cowork config is
+ * copied through untouched — every key, including ones we would have defaulted.
+ * That line is deliberate and narrower than "write any key that is absent": a
+ * config the operator already has is theirs, and adding keys to it on a re-run
+ * would rewrite a file for no reason the operator asked for. A file this run is
+ * CREATING is a different thing, and it is the only case seeded here.
+ *
+ * NOT VERIFIED, and stated rather than assumed: whether cowork boots happily on a
+ * daemon block alone. Its own defaults may well cover all three. Seeding what the
+ * installer already knows is the safe direction either way, and it is what the
+ * flow being replaced does.
+ */
+export const COWORK_DEFAULT_REST_PORT = 3052;
+
+export function seedCoworkDefaults(base, { brokerUrl, home }) {
+  const seeded = { ...base };
+  const added = [];
+  if (seeded.version === undefined) { seeded.version = 1; added.push('version'); }
+  if (typeof seeded.brokerUrl !== 'string' && brokerUrl) { seeded.brokerUrl = brokerUrl; added.push('brokerUrl'); }
+  // cowork's OWN state directory, never the daemon's. Confusing the two fails
+  // closed at boot, which is why they are never written in the same expression.
+  if (typeof seeded.stateDir !== 'string' && home) { seeded.stateDir = join(home, '.ours-cowork'); added.push('stateDir'); }
+  const rest = seeded.rest && typeof seeded.rest === 'object' && !Array.isArray(seeded.rest) ? seeded.rest : null;
+  if (!rest || !Number.isInteger(rest.port)) {
+    seeded.rest = { enabled: rest?.enabled ?? true, ...(rest ?? {}), port: rest?.port ?? COWORK_DEFAULT_REST_PORT };
+    added.push('rest.port');
+  }
+  return { config: seeded, added };
+}
+
+export function planCoworkAttachment({ existing, endpoint, stateDir, installedVersion, channel = 'latest', brokerUrl, home }) {
   const dir = resolve(stateDir);
   if (!endpoint || !stateDir) {
     return { key: 'cowork', action: 'refuse', reason: 'half-formed-block', message: 'a cowork daemon block needs both an endpoint and a state directory; refusing to write half of one' };
@@ -264,18 +305,28 @@ export function planCoworkAttachment({ existing, endpoint, stateDir, installedVe
   }
   const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
   const daemon = { mode: 'external', endpoint, stateDir: dir };
-  const unchanged = base.daemon
+  const daemonUnchanged = base.daemon
     && base.daemon.mode === 'external'
     && base.daemon.endpoint === endpoint
     && typeof base.daemon.stateDir === 'string'
     && resolve(base.daemon.stateDir) === dir;
+  // Seeded only where the key is ABSENT, so an existing config is still copied
+  // through untouched — which was already the right behaviour and is not changed.
+  const creating = existing === null || existing === undefined;
+  const { config: seeded, added } = creating
+    ? seedCoworkDefaults(base, { brokerUrl, home })
+    : { config: base, added: [] };
+  const unchanged = daemonUnchanged && added.length === 0;
   return {
     key: 'cowork',
     action: unchanged ? 'unchanged' : 'attach',
     install: ['npm', 'i', '-g', componentSpec(componentByKey('cowork'), channel)],
     changed: !unchanged,
-    // The top-level stateDir is cowork's own; it is copied through untouched.
-    config: { ...base, daemon },
+    seeded: added,
+    // The top-level stateDir is cowork's own; an existing one is copied through
+    // untouched and only an ABSENT one is seeded. Confusing it with the daemon's
+    // fails closed at boot, which is why they are never written together.
+    config: { ...seeded, daemon },
     service: ['ours-cowork', 'install-service'],
   };
 }
