@@ -144,6 +144,16 @@ function parseServiceFile(path, id, home) {
   };
 }
 
+// The instance-name rule, byte-for-byte core's INSTANCE_RE (packages/core/src/
+// service-instance.ts): 1–32 characters, starting AND ENDING with a letter or
+// digit. Discovery used a looser pattern that also accepted a trailing hyphen or
+// underscore, which meant it recognised unit filenames core itself refuses to
+// produce and profiles.mjs then refuses to normalize — see the guard below.
+const SERVICE_INSTANCE_FILE = {
+  systemd: /^ours-([A-Za-z0-9](?:[A-Za-z0-9_-]{0,30}[A-Za-z0-9])?)\.service$/,
+  launchd: /^solutions\.adaptframework\.ours\.([A-Za-z0-9](?:[A-Za-z0-9_-]{0,30}[A-Za-z0-9])?)\.plist$/,
+};
+
 function knownServiceCandidates(home) {
   const candidates = [];
   const dirs = [
@@ -156,9 +166,15 @@ function knownServiceCandidates(home) {
     for (const file of files) {
       let id = null;
       if (file === 'ours.service' || file === 'solutions.adaptframework.ours.plist') id = 'default';
-      else if (/^ours-[A-Za-z0-9][A-Za-z0-9_-]{0,31}\.service$/.test(file)) id = file.slice(5, -8);
-      else if (/^solutions\.adaptframework\.ours\.[A-Za-z0-9][A-Za-z0-9_-]{0,31}\.plist$/.test(file)) id = file.slice('solutions.adaptframework.ours.'.length, -6);
+      else id = SERVICE_INSTANCE_FILE.systemd.exec(file)?.[1] ?? SERVICE_INSTANCE_FILE.launchd.exec(file)?.[1] ?? null;
       if (!id) continue;
+      // A file whose name matches is CLAIMED, and any fault reading its contents
+      // stays FATAL on purpose. That is not the same question as the one above:
+      // once a definition is ours, a malformed entity or corrupt config could
+      // otherwise be treated as literal path bytes and point discovery at the
+      // wrong state directory, so it must fail closed before anything is probed
+      // or mutated (see the launchd malformed-entity test). What the pattern
+      // above fixes is the file that was never ours to claim.
       const candidate = parseServiceFile(join(dir, file), id, home);
       if (candidate) candidates.push(candidate);
     }
