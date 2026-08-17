@@ -1,3 +1,4 @@
+import { restartHints } from '../lib/extras.mjs';
 // ours-install v3 — the four retained extras, as the orchestrator runs them.
 //
 // lib/extras.mjs proves the PLANS are right. This file proves the orchestrator
@@ -138,7 +139,17 @@ test('ours-fleet is installed and initialised, and the installer configures noth
   const row = await runFleetPhase(ARGS, e, { target: AT_DEFAULT, isDefaultStateDir: true });
   assert.deepEqual(ranAsText(e), ['npm i -g @ours.network/fleet@latest', 'ours-fleet init']);
   assert.deepEqual(e.recorder.wrote, [], 'ours-fleet needs zero configuration from this installer');
-  assert.deepEqual(e.recorder.ranEnv, [null, null], 'and no daemon environment: fleet resolves a daemon PER ROLE');
+  // CHANGED BY THE COORDINATOR'S RULING (2026-08-17), and worth saying why: this
+  // used to assert [null, null] — no daemon environment on either call — which
+  // pinned extras.mjs:180's analysis ("init reads no daemon config; fleet resolves
+  // per role") as though it were a verified fact. It is not: nightly-install.mjs:611
+  // states the opposite, neither was checked against ours-fleet, and ours-fleet is
+  // not in this repo. The INSTALL step still carries nothing, because a package
+  // install needs no daemon; `init` now carries the whole pair as insurance.
+  assert.equal(e.recorder.ranEnv[0], null, 'the package install needs no daemon');
+  assert.deepEqual(e.recorder.ranEnv[1], {
+    OURS_CONFIG: join(OURS, 'config.json'), OURS_STATE_DIR: OURS, OURS_PORT: '3050',
+  }, 'init carries the whole pair, never half of one');
   assert.equal(row.state, 'installed');
 });
 
@@ -391,4 +402,71 @@ test('the extended flow never splits the daemon pair, on any path', async () => 
       }
     }
   }
+});
+
+// ------------------------------------------------------- restart hints (8.2) --
+
+test('a harness that got a plugin is told to restart, because nothing works until it does', () => {
+  // The ours MCP server is spawned BY the harness, once per session. A harness that
+  // was already running when its plugin landed has no ours tools, and v3 said
+  // nothing at all — so a successful install read as a failed one.
+  const hints = restartHints([
+    { key: 'mcp', state: 'installed' },
+    { key: 'claude-code', state: 'installed' },
+    { key: 'hermes', state: 'current' },
+    { key: 'codex', state: 'skipped' },
+  ]);
+  assert.deepEqual(hints.map((h) => h.key), ['claude-code', 'hermes'], 'a skipped harness is not told to restart');
+  assert.match(hints[0].action, /restart Claude Code/);
+  assert.match(hints[1].action, /\/reload-mcp/);
+});
+
+test('no harness plugin this run means no restart advice at all', () => {
+  // The MCP server alone changes nothing a running harness can see, so telling
+  // someone to restart would be advice with no reason behind it.
+  assert.deepEqual(restartHints([{ key: 'mcp', state: 'installed' }, { key: 'fleet', state: 'installed' }]), []);
+  assert.deepEqual(restartHints([]), []);
+});
+
+test('the connectors are deliberately NOT in the restart list', () => {
+  // The installer runs their install-service itself, so their configuration is
+  // already applied. Telling someone to restart what was just restarted for them is
+  // noise, and noise is what stops the real lines being read.
+  const hints = restartHints([{ key: 'tg', state: 'installed' }, { key: 'cowork', state: 'installed' }]);
+  assert.deepEqual(hints, []);
+});
+
+test('`ours-fleet init` is handed the daemon pair, as insurance against an unresolved contradiction', async () => {
+  // nightly-install.mjs:611 says init without the pair points every role at the
+  // historical default daemon; extras.mjs:180 says init reads no daemon config at
+  // all and resolves per role. Neither is verified — ours-fleet is not in this
+  // repo — and passing the pair is harmless if the second is right and
+  // load-bearing if the first is.
+  const e = fx({ env: { OURS_ASSUME_YES: '1' } });
+  await (await import('../lib/orchestrate.mjs')).runFleetPhase(
+    { assumeYes: true, dryRun: false, channel: 'latest' },
+    e,
+    { target: { stateDir: OURS, port: 3050 }, isDefaultStateDir: true },
+  );
+  const i = e.recorder.ran.findIndex((cmd) => cmd.join(' ') === 'ours-fleet init');
+  assert.ok(i >= 0, 'init ran');
+  assert.deepEqual(e.recorder.ranEnv[i], {
+    OURS_CONFIG: join(OURS, 'config.json'),
+    OURS_STATE_DIR: OURS,
+    OURS_PORT: '3050',
+  }, 'the WHOLE pair, never half of one');
+});
+
+test('the pair reaches init for the DEFAULT state directory too, as nightly does', async () => {
+  // The install step is a package and needs no daemon; only init is a host setup
+  // that happens beside a specific daemon.
+  const e = fx({ env: { OURS_ASSUME_YES: '1' } });
+  await (await import('../lib/orchestrate.mjs')).runFleetPhase(
+    { assumeYes: true, dryRun: false, channel: 'latest' },
+    e,
+    { target: { stateDir: TG, port: 3060 }, isDefaultStateDir: false },
+  );
+  const i = e.recorder.ran.findIndex((cmd) => cmd.join(' ') === 'ours-fleet init');
+  assert.equal(e.recorder.ranEnv[i].OURS_PORT, '3060');
+  assert.equal(e.recorder.ranEnv[i].OURS_STATE_DIR, TG);
 });

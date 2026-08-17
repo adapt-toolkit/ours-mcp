@@ -31,9 +31,10 @@ import {
   planComponentSelection, planMcpAttachment, planTgAttachment, planCoworkAttachment,
   tgConfigPath, coworkConfigPath, summarizeComponentRun, componentSpec,
 } from './components.mjs';
-import { planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3 } from './extras.mjs';
+import { planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3, restartHints } from './extras.mjs';
 import { summarizeRun } from './rerun.mjs';
 import { configJournal, reportRollback } from './journal.mjs';
+import { detectDaemons, planDaemonSelection, resolveSelection, legacyRegistryPath } from './detect.mjs';
 import { detectPlatform, resolveChannel, validateBroker } from './logic.mjs';
 import { daemonEnv } from './effects.mjs';
 import { USAGE } from './usage.mjs';
@@ -96,6 +97,72 @@ function pairFor(plan, target) {
   return plan && plan.env && Object.keys(plan.env).length > 0
     ? daemonEnv(target.stateDir, target.port)
     : undefined;
+}
+
+/**
+ * Which daemon is this run for? (C1, owner ruling 2026-08-17.)
+ *
+ * Never asks for a PATH — spec §2 stands — but when several daemons are DETECTED
+ * it shows them and lets the operator pick, because choosing from what was found
+ * is not prompting for a state directory.
+ *
+ * Runs BEFORE the daemon phase and only changes `args.stateDir`. Everything
+ * downstream — resolveTarget, the refusals, the journal — is untouched and does
+ * not know a screen happened, which is what keeps the flags path byte-identical.
+ */
+export async function runSelectionPhase(args, effects) {
+  // Said once, and only when the file is actually there: a file that looks live is
+  // worse than a file that says it is not. Never deleted — quietly removing
+  // something that describes an operator's daemons is not this installer's
+  // business.
+  const legacy = legacyRegistryPath(effects.home);
+  if (effects.exists(legacy)) {
+    effects.out(info(`${legacy} is left over from the older nightly installer and is no longer read — this run detects daemons directly. It is left alone; you can delete it.`));
+  }
+  const detected = detectDaemons({
+    candidates: effects.knownStateDirs(),
+    exists: effects.exists,
+    readJson: effects.readJson,
+  });
+  const plan = planDaemonSelection({
+    candidates: detected,
+    stateDirExplicit: args.stateDirExplicit,
+    portExplicit: args.portExplicit,
+    assumeYes: args.assumeYes,
+    home: effects.home,
+  });
+
+  if (plan.action === 'flags' || plan.action === 'create') return { ...plan, detected };
+  if (plan.action === 'use') {
+    // A question with one answer is not a choice, it is a keystroke tax — but the
+    // operator still has to be TOLD which daemon this run is about.
+    effects.out(info(`using the ours daemon at ${plan.stateDir}${plan.only.port ? ` (port ${plan.only.port})` : ''} — the only one found`));
+    args.stateDir = plan.stateDir;
+    return { ...plan, detected };
+  }
+
+  effects.out(heading('Which ours daemon is this for?'));
+  plan.candidates.forEach((candidate, index) => {
+    effects.out(`  ${index + 1}) ${candidate.stateDir}${candidate.port ? `   port ${candidate.port}` : ''}`);
+  });
+  if (plan.createOption.stateDir) {
+    effects.out(`  ${plan.candidates.length + 1}) create a new one at ${plan.createOption.stateDir}`);
+  }
+  const answer = await effects.askLine(`Choose 1-${plan.candidates.length + (plan.createOption.stateDir ? 1 : 0)}: `, '1');
+  const chosen = resolveSelection(answer, plan);
+  if (chosen.action === 'invalid') {
+    // Refused rather than guessed. Interpreting an unrecognised answer as a path
+    // would be the "type a state directory" prompt spec §2 forbids, arriving
+    // through the back door.
+    effects.out(warn(`ours: ${chosen.reason}. Nothing was changed.`));
+    effects.out(info('Re-run and pick one of the numbers, or name a daemon directly with --state-dir.'));
+    return { action: 'refuse', exitCode: EXIT_REFUSED, detected };
+  }
+  args.stateDir = chosen.stateDir;
+  effects.out(ok(chosen.action === 'create'
+    ? `creating a new daemon at ${chosen.stateDir}`
+    : `using the ours daemon at ${chosen.stateDir}`));
+  return { ...chosen, detected };
 }
 
 /**
@@ -198,13 +265,51 @@ export async function runDaemonPhase(args, effects) {
     }
     steps.push(service.step);
   } catch (error) {
+    // THE DAEMON MAY BE DOWN, AND NOT BECAUSE ANYTHING ASKED IT TO BE.
+    //
+    // `install-service` can STOP a running daemon before it fails — it installs a
+    // unit that will own the process, and a failure after that point leaves nothing
+    // running. v3 simply ended the run there, so a person who typed ours-install
+    // and got an error was also, silently, left without the daemon they had before.
+    // The nightly flow re-runs `start` and, crucially, tells the two outcomes
+    // apart: "the service failed but the daemon is back" is a bad evening, and "the
+    // service failed AND it will not come back" is the one that needs a human now.
+    const recovery = error?.servicePlan ? await recoverDaemon(args, effects, dir, configPath) : null;
     rollBack(effects, journal, args, 'the daemon did not reach the state its config describes — putting the config back', {
       replacedUnit: error?.servicePlan?.action === 'adopt' ? error.servicePlan.unitPath : null,
     });
+    if (recovery) {
+      effects.out(recovery.recovered
+        ? ok('your daemon is running again — nothing was committed, and the service is unchanged')
+        : warn('and the daemon did NOT come back up — start it yourself before anything else: '
+          + `ours daemon start --config ${configPath}`));
+    }
     throw error;
   }
 
   return { target, steps };
+}
+
+/**
+ * Put the daemon back after a failed boot-service install.
+ *
+ * Only attempted when the failure came from the SERVICE step (`error.servicePlan`
+ * is what says so) — a daemon that never started has nothing to recover, and
+ * running `start` after a failed `start` would just fail again with a second, less
+ * useful error on top of the first.
+ *
+ * A dry run recovers nothing because it stopped nothing. The recovery's own failure
+ * is REPORTED, never thrown: the caller is already carrying the real error, and
+ * losing it to a second one would hide what actually went wrong.
+ */
+async function recoverDaemon(args, effects, dir, configPath) {
+  if (args.dryRun) return null;
+  try {
+    await effects.run('ours', ['daemon', 'start', '--config', configPath]);
+    return { recovered: true };
+  } catch (recoveryError) {
+    return { recovered: false, reason: reason(recoveryError) };
+  }
 }
 
 /**
@@ -396,6 +501,11 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
     stateDir: dir,
     installedVersion: effects.installedVersion(component.pkg),
     channel: args.channel,
+    // The broker is a value the INSTALLER knows and cowork cannot guess — the one
+    // the operator chose in this run. `home` is for cowork's OWN state directory,
+    // never the daemon's.
+    brokerUrl: args.brokerUrl,
+    home: effects.home,
   });
   if (plan.action === 'refuse' || plan.action === 'leave-embedded') {
     effects.out(warn(`cowork: ${plan.message}`));
@@ -654,8 +764,31 @@ export async function runFleetPhase(args, effects, { target, isDefaultStateDir }
     return { key: 'fleet', label: plan.label, state: 'skipped' };
   }
   const install = await attempt(effects, args.dryRun, plan.install.join(' '), () => effects.run(plan.install[0], plan.install.slice(1)));
+  // THE PAIR IS PASSED AS DELIBERATE INSURANCE AGAINST AN UNRESOLVED
+  // CONTRADICTION, not because the question was settled.
+  //
+  // Two written analyses disagree, and NEITHER was verified — ours-fleet is not in
+  // this repo:
+  //   lib/nightly-install.mjs:611 says fleet resolves its daemon from
+  //     OURS_CONFIG / OURS_PORT / OURS_STATE_DIR and has no concept of a registry,
+  //     so an `init` run without the pair points every role at the historical
+  //     default daemon — which, when the selected daemon is not the default, may
+  //     be one the user does not even have.
+  //   lib/extras.mjs:180 says `init` takes no daemon argument of any kind, reads no
+  //     daemon config, and resolves per role through
+  //     resolveEndpoint({ ...process.env, ...role.env }) — so the pair is
+  //     unnecessary here.
+  // Passing it is harmless if extras.mjs is right and load-bearing if
+  // nightly-install.mjs is. When the cheap action is safe under both readings and
+  // the expensive one is only safe under one, take the cheap one. (Coordinator
+  // ruling, 2026-08-17.)
+  //
+  // Passed for EVERY state directory, not only a non-default one, exactly as the
+  // nightly flow does: `init` is a one-time host setup and the pair is what names
+  // the daemon it was set up beside.
+  const initEnv = daemonEnv(target.stateDir, target.port);
   const init = install.ok
-    ? await attempt(effects, args.dryRun, `${plan.init.join(' ')} (one-time host setup: units, dirs, linger)`, () => effects.run(plan.init[0], plan.init.slice(1)))
+    ? await attempt(effects, args.dryRun, `${plan.init.join(' ')} (one-time host setup: units, dirs, linger)`, () => effects.run(plan.init[0], plan.init.slice(1), { env: initEnv }))
     : install;
   if (!init.ok) {
     effects.out(info(`retry manually: ${plan.init.join(' ')}`));
@@ -773,6 +906,19 @@ export async function endScreen(args, effects, { summary, target, isDefaultState
     ? `  ${c.yellow('Some pieces need a hand — see the notes above; re-run ours-install after fixing.')}`
     : `  ${c.green('Everything installed cleanly. No problems.')}`);
 
+  // Said BEFORE the hand-off prompt, because it is the only thing here the
+  // operator must do himself for any of the rest to work. A harness that was
+  // running when its plugin landed spawns no ours MCP server until it restarts,
+  // and someone who goes back to that harness, finds no ours tools and reads a
+  // successful install as a failed one is the exact outcome this prevents.
+  const restarts = restartHints(summary);
+  if (restarts.length > 0) {
+    effects.out('');
+    effects.out(`  ${c.bold('Before this works:')} your harness spawns the ours MCP server when it starts, so`);
+    effects.out('  a harness that was already open has not picked it up yet.');
+    for (const hint of restarts) effects.out(`  ${c.green('→')} ${hint.action}`);
+  }
+
   const has = (key) => summary.some((r) => r.key === key && (r.state === 'installed' || r.state === 'current'));
   const { text, empty } = buildHandoffPromptV3({
     identity: !has('identity'),
@@ -840,6 +986,11 @@ export async function runInstall(argv, effects) {
   // machine this cannot run on. v2 exited 0 there and so does this, so a script
   // that wrapped the old installer keeps its meaning.
   if (!runPreflight(effects).ok) return EXIT_OK;
+
+  // Which daemon, before anything is decided about it. Only args.stateDir can
+  // change here; every refusal downstream is unaffected.
+  const selection = await runSelectionPhase(args, effects);
+  if (selection.action === 'refuse') return EXIT_REFUSED;
 
   const daemon = await runDaemonPhase(args, effects);
   if (daemon.refused) return EXIT_REFUSED;

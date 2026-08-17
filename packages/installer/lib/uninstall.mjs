@@ -221,7 +221,9 @@ export function planStatePurge({ stateDir, purge = false, assumeYes = false, exi
  * directory on this machine still has a daemon config; otherwise keep them and
  * say which daemon still needs them.
  */
-export function planGlobalPackages({ stateDir, otherStateDirsWithConfig = [], pluginPackages = [] }) {
+export const CONNECTOR_PACKAGES = { tg: '@ours.network/tg-connector', cowork: '@ours.network/cowork' };
+
+export function planGlobalPackages({ stateDir, otherStateDirsWithConfig = [], pluginPackages = [], detachedComponents = [] }) {
   const dir = resolve(stateDir);
   const others = otherStateDirsWithConfig.map((d) => resolve(d)).filter((d) => d !== dir);
   if (others.length > 0) {
@@ -230,7 +232,26 @@ export function planGlobalPackages({ stateDir, otherStateDirsWithConfig = [], pl
   // The harness-plugin launchers follow the SAME rule, not a second one: they
   // speak to a daemon through ours-mcp, so a second daemon still on the machine
   // still needs them, and the one condition above already decides that.
-  return { action: 'remove', packages: ['@ours.network/cli', '@ours.network/mcp', ...pluginPackages], stillNeededBy: [] };
+  // A connector's package goes only when BOTH conditions hold: the operator
+  // confirmed removing its attachment in THIS run, and this was the last daemon —
+  // the same condition already decided once above.
+  //
+  // WHY NOT NIGHTLY'S THREE-WAY CHOICE. The nightly uninstaller asks per connector
+  // for detach / uninstall / reassign:<profile> and removes the package only on
+  // `uninstall`. v3 has no such lifecycle question and inventing one here would be
+  // deciding scope in a patch. What v3 DOES have is the operator's explicit yes to
+  // "remove its attachment too", which is a narrower thing than nightly's
+  // `uninstall` — so this stays behind the last-daemon condition rather than
+  // standing on the confirmation alone. A connector detached while another daemon
+  // survives keeps its package, because that daemon may still be using it.
+  const connectors = detachedComponents
+    .map((key) => CONNECTOR_PACKAGES[key])
+    .filter(Boolean);
+  return {
+    action: 'remove',
+    packages: ['@ours.network/cli', '@ours.network/mcp', ...pluginPackages, ...connectors],
+    stillNeededBy: [],
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -403,7 +424,14 @@ export function planUninstall({ home, env = {}, endpoint, stateDir, purge = fals
     daemon: planDaemonRemoval({ stateDir: dir, cliStartedIt }),
     state: planStatePurge({ stateDir: dir, purge, assumeYes, exists, typedConfirmation }),
     plugins,
-    packages: planGlobalPackages({ stateDir: dir, otherStateDirsWithConfig, pluginPackages: plugins.packages }),
+    packages: planGlobalPackages({
+      stateDir: dir,
+      otherStateDirsWithConfig,
+      pluginPackages: plugins.packages,
+      // Only the components the operator explicitly confirmed removing — never
+      // every component that merely happens to point here.
+      detachedComponents: pointing.map((p) => p.key).filter((key) => confirmedComponents.includes(key)),
+    }),
   };
 }
 

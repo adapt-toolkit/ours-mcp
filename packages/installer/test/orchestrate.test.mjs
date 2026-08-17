@@ -462,3 +462,190 @@ test('the replaced legacy unit is NAMED in the rollback, because it cannot be re
   assert.deepEqual(e.recorder.restored.map(([p]) => p), [join(OURS, 'config.json')],
     'the config still goes back; only the unit does not');
 });
+
+test('the end screen tells a running harness it must restart before any of this works', async () => {
+  // THE REPRODUCTION for the restart hints: v3 printed "Everything installed
+  // cleanly" and nothing else, so a user went back to an already-open Claude Code,
+  // found no ours tools, and read a successful install as a failed one.
+  const e = fx({
+    env: { OURS_ASSUME_YES: '1' },
+    harnesses: [{ name: 'claude-code', status: 'ok', label: 'Claude Code' }],
+  });
+  await runInstall([], e);
+  const screen = said(e);
+  assert.match(screen, /restart Claude Code/);
+  assert.match(screen, /already open has not picked it up yet/);
+  assert.ok(
+    screen.indexOf('restart Claude Code') < screen.indexOf('ONE LAST STEP')
+      || !screen.includes('ONE LAST STEP'),
+    'said before the hand-off prompt: it is the only thing here the operator must do himself',
+  );
+});
+
+// ------------------------------------------------- the selection screen (C1) --
+
+const SECOND_DIR = join(HOME, '.ours-work');
+
+test('several daemons are SHOWN and the operator picks — never asked to type a path', async () => {
+  const e = fx({
+    known: [OURS, SECOND_DIR],
+    json: {
+      [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS },
+      [join(SECOND_DIR, 'config.json')]: { port: 3060, stateDir: SECOND_DIR },
+    },
+    net: { 3060: { ok: true, stateDir: SECOND_DIR } },
+    lines: ['2'],
+  });
+  await runInstall([], e);
+  const screen = said(e);
+  assert.match(screen, /Which ours daemon is this for\?/);
+  assert.match(screen, /1\) .*\.ours\b/);
+  assert.match(screen, /2\) .*\.ours-work/);
+  assert.match(screen, /3\) create a new one at .*\.ours-2/);
+  assert.match(screen, /using the ours daemon at .*\.ours-work/);
+  assert.ok(
+    e.recorder.askedLines.every((p) => !/state directory|path/i.test(p)),
+    'the prompt asks for a NUMBER; spec §2 forbids asking for a path',
+  );
+});
+
+test('the Telegram connector is never offered as a daemon to install into', async () => {
+  // ~/.ours-telegram matches a ~/.ours* scan and has a config.json. Offering it
+  // would let the operator pick it and have a daemon created inside the
+  // connector's own directory.
+  const TG_DIR = join(HOME, '.ours-telegram');
+  const e = fx({
+    known: [OURS, TG_DIR],
+    json: {
+      [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS },
+      [join(TG_DIR, 'config.json')]: { botToken: 's', daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: OURS },
+    },
+    net: { 3050: { ok: true, stateDir: OURS } },
+  });
+  await runInstall([], e);
+  assert.doesNotMatch(said(e), /Which ours daemon is this for\?/, 'one daemon, so no screen');
+  assert.doesNotMatch(said(e), /\.ours-telegram/);
+  assert.match(said(e), /the only one found/);
+});
+
+test('exactly one daemon: no question, but the run SAYS which one', async () => {
+  const e = fx({
+    known: [OURS],
+    json: { [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS } },
+    net: { 3050: { ok: true, stateDir: OURS } },
+  });
+  await runInstall([], e);
+  assert.deepEqual(e.recorder.askedLines.filter((p) => /Choose/.test(p)), [], 'no choice offered');
+  assert.match(said(e), /using the ours daemon at .*\.ours \(port 3050\) — the only one found/);
+});
+
+test('--state-dir outranks everything detected: no screen at all', async () => {
+  const e = fx({
+    known: [OURS, SECOND_DIR],
+    json: {
+      [join(OURS, 'config.json')]: { port: 3050 },
+      [join(SECOND_DIR, 'config.json')]: { port: 3060 },
+    },
+  });
+  await runInstall(['--state-dir', TG], e);
+  assert.doesNotMatch(said(e), /Which ours daemon is this for\?/);
+  assert.match(said(e), new RegExp(`target ${TG}`));
+});
+
+test('a non-interactive run never sees the screen, whatever is on the machine', async () => {
+  const e = fx({
+    env: { OURS_ASSUME_YES: '1' },
+    known: [OURS, SECOND_DIR],
+    json: { [join(OURS, 'config.json')]: { port: 3050 }, [join(SECOND_DIR, 'config.json')]: { port: 3060 } },
+  });
+  await runInstall([], e);
+  assert.doesNotMatch(said(e), /Which ours daemon is this for\?/);
+  assert.deepEqual(e.recorder.askedLines, [], 'nothing asked at all');
+});
+
+test('an answer that is not on the list REFUSES and changes nothing', async () => {
+  const e = fx({
+    known: [OURS, SECOND_DIR],
+    json: { [join(OURS, 'config.json')]: { port: 3050 }, [join(SECOND_DIR, 'config.json')]: { port: 3060 } },
+    lines: ['/etc/passwd'],
+  });
+  assert.equal(await runInstall([], e), EXIT_REFUSED);
+  assert.deepEqual(e.recorder.ran, [], 'nothing installed');
+  assert.deepEqual(e.recorder.wrote, [], 'nothing written');
+  assert.match(said(e), /not one of the numbers offered/);
+});
+
+test('picking "create a new one" targets the DERIVED directory, not the default', async () => {
+  const e = fx({
+    known: [OURS, SECOND_DIR],
+    json: { [join(OURS, 'config.json')]: { port: 3050 }, [join(SECOND_DIR, 'config.json')]: { port: 3060 } },
+    lines: ['3'],
+  });
+  await runInstall([], e);
+  assert.match(said(e), /creating a new daemon at .*\.ours-2/);
+  assert.ok(e.recorder.wrote.some(([p]) => p === join(HOME, '.ours-2', 'config.json')));
+});
+
+test('a left-over profile registry is NAMED as dead, and never deleted', async () => {
+  // Anyone who used the nightly installer has one, and after the switch nothing
+  // reads it. Deleting a file that describes someone's daemons is not an
+  // installer's business — but leaving it looking live is worse than saying it is
+  // not.
+  const registry = join(OURS, 'installer-profiles.json');
+  const e = fx({ json: { [join(OURS, 'config.json')]: { port: 3050 } } });
+  const withRegistry = { ...e, exists: (p) => p === registry };
+  await runInstall([], withRegistry);
+  assert.match(said(e), /installer-profiles\.json is left over .* no longer read/);
+  assert.match(said(e), /It is left alone/);
+  assert.deepEqual(e.recorder.removed ?? [], [], 'nothing deleted');
+});
+
+// ------------------------------------------ daemon recovery after a failed unit --
+
+test('a failed install-service does not leave the daemon down without trying to bring it back', async () => {
+  // install-service can STOP a running daemon before it fails: it installs a unit
+  // that will own the process. v3 just ended the run there, so a person who typed
+  // ours-install and got an error was also, silently, left without the daemon they
+  // had before.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' } },
+    net: { 3050: { ok: true, stateDir: OURS } },
+    runFails: ['install-service'],
+    env: { OURS_ASSUME_YES: '1' },
+  });
+  await assert.rejects(() => runInstall([], e));
+  const started = e.recorder.ran.filter((c) => c.join(' ').includes('daemon start'));
+  assert.equal(started.length, 1, 'exactly one recovery attempt');
+  assert.deepEqual(started[0], ['ours', 'daemon', 'start', '--config', join(OURS, 'config.json')]);
+  assert.match(said(e), /your daemon is running again/);
+});
+
+test('the two outcomes are told apart, because only one of them needs a human now', async () => {
+  // "The service failed but the daemon is back" is a bad evening. "The service
+  // failed AND it will not come back" is the one that needs someone tonight.
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' } },
+    net: { 3050: { ok: true, stateDir: OURS } },
+    runFails: ['install-service', 'daemon start'],
+    env: { OURS_ASSUME_YES: '1' },
+  });
+  await assert.rejects(() => runInstall([], e));
+  assert.match(said(e), /the daemon did NOT come back up/);
+  assert.match(said(e), /ours daemon start --config .*config\.json/, 'and the exact command to fix it');
+});
+
+test('a daemon that never started is not "recovered" — there is nothing to recover', async () => {
+  // Running start after a failed start would fail again and stack a second, less
+  // useful error on top of the first.
+  const e = fx({ runFails: ['daemon start'], env: { OURS_ASSUME_YES: '1' } });
+  await assert.rejects(() => runInstall([], e));
+  const starts = e.recorder.ran.filter((c) => c.join(' ').includes('daemon start'));
+  assert.equal(starts.length, 1, 'the original attempt only — no retry');
+  assert.doesNotMatch(said(e), /running again|did NOT come back up/);
+});
+
+test('a dry run recovers nothing, because it stopped nothing', async () => {
+  const e = fx({ runFails: ['install-service'], env: { OURS_ASSUME_YES: '1' } });
+  await runInstall(['--dry-run'], e);
+  assert.deepEqual(e.recorder.ran, [], 'a dry run performs nothing at all');
+});

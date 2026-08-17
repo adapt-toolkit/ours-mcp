@@ -1004,10 +1004,13 @@ test('channel follows the installer\'s own version unless the environment says o
   assert.equal(resolveChannel('nightly', stablePkg.version), 'nightly', 'and can opt a stable installer into nightlies');
 });
 
-test('a packaged nightly installer contains and selects the topology-first profile flow', () => {
-  // Build the artifact the way the nightly publish does. Optional consumers are no longer
-  // assumed here: topology-first behavior (including assume-yes keeping Telegram/Rooms off)
-  // is exercised hermetically in nightly-install.test.mjs.
+test('a packaged nightly installer ships and selects the V3 flow', () => {
+  // PREMISE REVERSED BY THE OWNER'S RULING (2026-08-17): the nightly artifact used
+  // to be asserted to select runNightlyInstaller. Nightly is now v3 end to end, so
+  // what the staged artifact must ship and select is v3's orchestrator and its
+  // libraries — and the check that the nightly build installs NIGHTLY packages
+  // moves with it, because that is the property that actually matters about a
+  // nightly artifact.
   const tmp = mkdtempSync(join(tmpdir(), 'installer-pkg-'));
   const stage = join(tmp, 'pkg');
   mkdirSync(stage, { recursive: true });
@@ -1017,11 +1020,12 @@ test('a packaged nightly installer contains and selects the topology-first profi
   writeFileSync(join(stage, 'package.json'), JSON.stringify({ ...pkg, version: '0.17.0-nightly.1' }, null, 2));
 
   const source = readFileSync(join(stage, 'install.mjs'), 'utf8');
-  assert.match(source, /if \(CHANNEL === 'nightly'\)[\s\S]*return runNightlyInstaller\(/,
-    'the staged Nightly artifact selects the topology-first orchestrator');
-  assert.ok(existsSync(join(stage, 'lib', 'nightly-install.mjs')), 'the staged artifact ships that orchestrator');
-  assert.match(readFileSync(join(stage, 'lib', 'nightly-install.mjs'), 'utf8'), /pkgSpec\('mcp', 'nightly'\)/,
-    'the topology-first flow installs the Nightly daemon build');
+  assert.match(source, /if \(CHANNEL === 'nightly'\)[\s\S]{0,600}runInstallV3\(/,
+    'the staged Nightly artifact selects the v3 orchestrator');
+  assert.ok(existsSync(join(stage, 'lib', 'orchestrate.mjs')), 'the staged artifact ships v3');
+  assert.ok(existsSync(join(stage, 'lib', 'detect.mjs')), 'including the selection screen');
+  assert.match(readFileSync(join(stage, 'lib', 'components.mjs'), 'utf8'), /componentSpec\(/,
+    'and the channel reaches the component packages, so a nightly build installs nightly ones');
   rmSync(tmp, { recursive: true, force: true });
 });
 

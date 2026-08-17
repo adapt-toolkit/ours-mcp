@@ -225,3 +225,65 @@ test('an unmapped channel falls back to latest rather than inventing a tag', () 
   const p = planMcpAttachment({ stateDir: OURS, isDefaultStateDir: true, channel: 'banana' });
   assert.deepEqual(p.install, ['npm', 'i', '-g', '@ours.network/mcp'], 'never @banana — that would 404');
 });
+
+// ------------------------------------------------------- cowork seeding (7.3) --
+
+test('a FIRST cowork install gets the keys the installer knows, not just a daemon block', () => {
+  // v3 wrote `{ daemon: {...} }` and nothing else on a fresh config: no version, no
+  // broker, no REST port. The broker in particular is a value cowork cannot guess —
+  // it is the one the operator chose in this run, and a cowork pointed at a
+  // different broker cannot reach the agents it was installed to talk to.
+  const p = planCoworkAttachment({
+    existing: null, endpoint: 'http://127.0.0.1:3050', stateDir: OURS,
+    installedVersion: '0.5.0', brokerUrl: 'wss://chosen.example', home: HOME,
+  });
+  assert.equal(p.config.version, 1);
+  assert.equal(p.config.brokerUrl, 'wss://chosen.example');
+  assert.equal(p.config.stateDir, join(HOME, '.ours-cowork'), "cowork's OWN state directory");
+  assert.equal(p.config.rest.port, 3052);
+  assert.deepEqual(p.config.daemon, { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir: OURS });
+  assert.notEqual(p.config.stateDir, p.config.daemon.stateDir, 'the two state directories are never the same value');
+});
+
+test("an EXISTING cowork config keeps every key it already had", () => {
+  const existing = {
+    version: 1, brokerUrl: 'wss://theirs.example', stateDir: '/opt/cowork',
+    rest: { enabled: false, port: 9999 }, somethingOfTheirs: true,
+  };
+  const p = planCoworkAttachment({
+    existing, endpoint: 'http://127.0.0.1:3050', stateDir: OURS,
+    installedVersion: '0.5.0', brokerUrl: 'wss://ours.example', home: HOME,
+  });
+  assert.equal(p.config.brokerUrl, 'wss://theirs.example', 'never overwritten with ours');
+  assert.equal(p.config.stateDir, '/opt/cowork');
+  assert.deepEqual(p.config.rest, { enabled: false, port: 9999 });
+  assert.equal(p.config.somethingOfTheirs, true);
+  assert.deepEqual(p.seeded, [], 'nothing seeded into a config that already has it');
+});
+
+test('an EXISTING config missing those keys is left alone, not topped up', () => {
+  // The narrower line, and it is deliberate: a config the operator already has is
+  // theirs. Adding keys to it on a re-run would rewrite a file for no reason the
+  // operator asked for. Only a file this run CREATES gets defaults.
+  const existing = { daemon: { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir: OURS } };
+  const p = planCoworkAttachment({
+    existing, endpoint: 'http://127.0.0.1:3050', stateDir: OURS,
+    installedVersion: '0.5.0', brokerUrl: 'wss://b', home: HOME,
+  });
+  assert.equal(p.action, 'unchanged');
+  assert.deepEqual(p.seeded, []);
+  assert.equal(p.config.brokerUrl, undefined, 'no broker added to a file that is not ours to edit');
+});
+
+test('an already-complete cowork config is still not rewritten', () => {
+  const existing = {
+    version: 1, brokerUrl: 'wss://b', stateDir: join(HOME, '.ours-cowork'), rest: { enabled: true, port: 3052 },
+    daemon: { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir: OURS },
+  };
+  const p = planCoworkAttachment({
+    existing, endpoint: 'http://127.0.0.1:3050', stateDir: OURS,
+    installedVersion: '0.5.0', brokerUrl: 'wss://b', home: HOME,
+  });
+  assert.equal(p.action, 'unchanged');
+  assert.equal(p.changed, false);
+});

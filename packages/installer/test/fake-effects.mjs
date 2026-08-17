@@ -19,7 +19,7 @@ export const TG = resolve(HOME, '.ours-tg');
 export function fx({
   json = {}, text = {}, net = {}, taken = [], versions = {}, env = {}, answers = [],
   unitUnchanged = false, harnesses = [], lines = [], platform = 'linux', nodeVersion = '22.0.0',
-  runFails = [], voiceReady = false, interactiveOk = true, restoreFails = [],
+  runFails = [], voiceReady = false, interactiveOk = true, restoreFails = [], known = [],
 } = {}) {
   const recorder = { ran: [], ranEnv: [], wrote: [], out: [], asked: [], askedLines: [], interactive: [], restored: [] };
   let answerIndex = 0;
@@ -34,6 +34,10 @@ export function fx({
     platform: { platform, release: '6.0.0' },
     nodeVersion,
     exists: () => false,
+    // Detection for the selection screen. Empty by default so a test that says
+    // nothing about existing daemons gets the same walk it always had: nothing
+    // detected, no screen, the default state directory.
+    knownStateDirs: () => known,
     username: () => 'me',
     detectHarnesses: () => harnesses,
     clipboard: () => false,

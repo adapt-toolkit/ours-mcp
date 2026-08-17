@@ -1,3 +1,26 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// NO LONGER REACHED BY ANY CODE PATH, DELIBERATELY AND TEMPORARILY.
+//
+// The nightly channel now runs the v3 installer end to end (owner ruling
+// 2026-08-17: v3 SUBSUMES the nightly flow), so the two dispatch sites that led
+// here — install.mjs and uninstall.mjs — were removed. This file is retained on
+// purpose rather than deleted in the same commit.
+//
+// WHY IT IS STILL HERE. The behaviour inventory
+// (/home/fleet/work/dev1-installer-notes/NIGHTLY-BEHAVIOUR-INVENTORY.md) lists
+// what this flow does that v3 does not, and that list is not finished being
+// carried across. Deleting the implementation and its tests before the one-for-one
+// replacement exists is how a test that was covering something real gets removed
+// alongside the ones that were not. Its tests still run and still pass, because
+// they exercise this module directly.
+//
+// The retirement — removing this file and retiring each of its tests against a
+// named v3 equivalent — is its own piece of work. Until then this is ORPHANED AND
+// SAID SO, which is the opposite of the failure the staging existed to prevent:
+// seven commits of feature reachable by no code path, with git reporting no
+// conflict and nothing saying it had happened.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
