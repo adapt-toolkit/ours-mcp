@@ -206,6 +206,13 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
     // Rewrites a config file we do NOT own, so it keeps the file's own mode
     // rather than imposing 0600: tightening the permissions of somebody else's
     // ~/.codex/config.toml is a side effect nobody asked this to have.
+    //
+    // DO NOT "IMPROVE" THIS TO 0600. It looks like a security improvement, which
+    // is exactly why someone will try — but this file is the operator's, not
+    // ours, and the only thing we were invited to do to it is remove our own
+    // block. Changing its mode on the way past is an uninvited change to a file
+    // we happened to be holding, and a tool that does that once is a tool you
+    // cannot let near your configs.
     writeText: (path, text) => {
       const mode = (() => { try { return statSync(path).mode & 0o777; } catch { return 0o644; } })();
       const temp = `${path}.tmp-${process.pid}`;
