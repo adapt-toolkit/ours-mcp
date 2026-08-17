@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import { runInstall, runDaemonPhase, runServicePhase, EXIT_OK, EXIT_REFUSED } from '../lib/orchestrate.mjs';
 import { CLI_UNIT_MARKER } from '../lib/plan.mjs';
+import { isWholeDaemonEnv, DAEMON_ENV_KEYS } from '../lib/effects.mjs';
 
 const HOME = '/home/me';
 const OURS = resolve(HOME, '.ours');
@@ -20,7 +21,7 @@ const LEGACY_UNIT = '[Unit]\nDescription=ours MCP daemon (secure agent-to-agent 
 // A recording effects layer. `json`/`text` seed the filesystem; `net` seeds the
 // probe; everything mutating is recorded rather than done.
 function fx({ json = {}, text = {}, net = {}, taken = [], versions = {}, env = {}, answers = [], unitUnchanged = false } = {}) {
-  const recorder = { ran: [], wrote: [], out: [], asked: [] };
+  const recorder = { ran: [], ranEnv: [], wrote: [], out: [], asked: [] };
   let answerIndex = 0;
   return {
     recorder,
@@ -33,8 +34,11 @@ function fx({ json = {}, text = {}, net = {}, taken = [], versions = {}, env = {
     readJson: (p) => (Object.prototype.hasOwnProperty.call(json, p) ? json[p] : null),
     readText: (p) => (Object.prototype.hasOwnProperty.call(text, p) ? text[p] : null),
     writeJson: (p, body) => { recorder.wrote.push([p, body]); },
-    run: async (cmd, cmdArgs) => {
+    run: async (cmd, cmdArgs, opts = {}) => {
       recorder.ran.push([cmd, ...cmdArgs]);
+      // Recorded separately so the existing deepEqual assertions on `ran` keep
+      // working; the pair invariant is checked against this.
+      recorder.ranEnv.push(opts.env ?? null);
       // The CLI answers with its plan when asked for --json; the unit-unchanged
       // case is what a repeat run sees.
       const stdout = cmdArgs.includes('install-service') && cmdArgs.includes('--json')
@@ -52,9 +56,14 @@ const said = (e) => e.recorder.out.join('\n');
 
 // ------------------------------------------------------ the safety invariant --
 
-test('NO code path this orchestrator takes ever runs systemctl', () => {
+test('NO code path this orchestrator takes ever runs systemctl, or splits the daemon pair', () => {
   // The one rule that outranks every feature here. systemd is reached only
   // through `ours daemon install-service`, which owns its own refusals.
+  //
+  // Extended with the second host constraint (spec §2): now that run() can carry
+  // an environment, EVERY invocation must carry the whole daemon pair or none of
+  // it. A half pair is the quiet failure — the child falls back to ~/.ours and
+  // attaches to a daemon the operator did not choose.
   const cases = [
     { json: {}, net: {} },
     { json: { [join(OURS, 'config.json')]: { port: 3050 } }, net: { 3050: { ok: true, stateDir: OURS } } },
@@ -67,6 +76,9 @@ test('NO code path this orchestrator takes ever runs systemctl', () => {
       assert.ok(!cmd.includes('systemctl'), `systemctl must never be run: ${cmd.join(' ')}`);
       assert.ok(!cmd.includes('loginctl'), `loginctl must never be run: ${cmd.join(' ')}`);
     }
+    e.recorder.ranEnv.forEach((env, i) => {
+      assert.ok(isWholeDaemonEnv(env), `half a daemon pair handed to: ${e.recorder.ran[i].join(' ')}`);
+    });
   }));
 });
 
@@ -260,5 +272,18 @@ test('lib/effects.mjs never reaches for systemctl or a unit file', async () => {
     .split('\n').filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*') && !l.trim().startsWith('/*')).join('\n');
   for (const f of ['systemctl', 'loginctl', 'systemd/user']) {
     assert.ok(!code.includes(f), `${f} must not appear in the effects layer's code`);
+  }
+  // Extended for the env parameter: a daemon environment reaches a CHILD and
+  // never this process. If the effects layer ever assigned into process.env, a
+  // state directory chosen by one run would outlive it and be inherited by
+  // everything the operator started from the same shell afterwards.
+  assert.ok(!/process\.env\s*\[/.test(code) && !/process\.env\.[A-Za-z_]+\s*=[^=]/.test(code),
+    'the effects layer must never write into process.env');
+  // And there is exactly ONE constructor for that environment: no code above the
+  // pair section names a daemon variable, so "which call sites can emit half a
+  // pair" stays answerable by reading one function rather than the whole file.
+  const beforeThePair = code.split('DAEMON_ENV_KEYS')[0];
+  for (const key of DAEMON_ENV_KEYS) {
+    assert.ok(!beforeThePair.includes(key), `${key} must only be named by the pair constructor, not by ${'realEffects'}`);
   }
 });
