@@ -5,11 +5,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import {
-  CREATED_BY, stateDirCreationMarker, wasCreatedByInstaller, componentsPointingHere,
+  STATE_DIR_EVIDENCE, looksLikeStateDir, componentsPointingHere,
   planComponentDetach, planDaemonRemoval, planStatePurge, planGlobalPackages,
   planUninstall, NON_INTERACTIVE_ANSWERS, refusalSurvivesAssumeYes,
 } from '../lib/uninstall.mjs';
-import { planDaemonConfig } from '../lib/plan.mjs';
 
 const HOME = '/home/me';
 const OURS = resolve(HOME, '.ours');
@@ -17,7 +16,8 @@ const TG = resolve(HOME, '.ours-tg');
 const TG_CFG = join(HOME, '.ours-telegram', 'config.json');
 const COWORK_CFG = join(HOME, '.ours-cowork', 'config.json');
 const files = (map) => (path) => (Object.prototype.hasOwnProperty.call(map, path) ? map[path] : null);
-const MADE_BY_US = { ...stateDirCreationMarker(1), port: 3050, stateDir: OURS };
+const isStateDir = () => true;   // every purge test targets a real state dir unless it says otherwise
+const notStateDir = () => false;
 
 // ------------------------------------------------ §8 step 1 — the refusal ----
 
@@ -100,51 +100,57 @@ test('a daemon the CLI did not start is named, not signalled, and the run contin
 // ------------------------------------------------ §8 step 5 — state, purged --
 
 test('state is KEPT by default, with the hint', () => {
-  const p = planStatePurge({ stateDir: OURS, config: MADE_BY_US });
+  const p = planStatePurge({ stateDir: OURS, exists: isStateDir });
   assert.equal(p.action, 'keep');
   assert.match(p.hint, /--purge/);
 });
 
-test('--purge never deletes a state directory this installer did not create', () => {
-  // Fail-safe direction: no marker means NOT ours to purge, so a hand-made or
-  // pre-existing ~/.ours can never be deleted by this flag.
-  const p = planStatePurge({ stateDir: OURS, purge: true, config: { port: 3050 }, typedConfirmation: OURS });
+test('PURGE MEANS PURGE: provenance is not a gate — any state directory qualifies', () => {
+  // The owner's ruling. A hand-made or pre-existing ~/.ours is purged like any
+  // other; the installer does not ask whether it made the directory.
+  const p = planStatePurge({ stateDir: OURS, purge: true, exists: isStateDir, typedConfirmation: OURS });
+  assert.equal(p.action, 'purge');
+});
+
+test('but a directory that is not a state directory at all is refused', () => {
+  // This is NOT provenance re-entering by the back door: it asks "is this a state
+  // directory", not "is it ours". With provenance gone, the typed path would
+  // otherwise be the only thing between `--state-dir ~ --purge` and a deleted
+  // home directory — and a typed path is no protection against a path typed
+  // exactly as intended but meant differently.
+  const p = planStatePurge({ stateDir: '/home/me', purge: true, exists: notStateDir, typedConfirmation: '/home/me' });
   assert.equal(p.action, 'keep');
-  assert.match(p.reason, /was not created by an installer run/);
-  assert.equal(wasCreatedByInstaller({ createdBy: CREATED_BY }), true);
-  assert.equal(wasCreatedByInstaller(null), false);
+  assert.match(p.reason, /does not look like an ours state directory/);
+  assert.deepEqual(STATE_DIR_EVIDENCE, ['config.json', 'daemon-token', 'ours-cli-daemon.json', 'root.json']);
+  assert.equal(looksLikeStateDir(OURS, (f) => f.endsWith('daemon-token')), true, 'any one artefact is enough');
+  assert.equal(looksLikeStateDir(OURS, () => false), false);
 });
 
 test('--purge is never taken non-interactively', () => {
-  const p = planStatePurge({ stateDir: OURS, purge: true, assumeYes: true, config: MADE_BY_US, typedConfirmation: OURS });
+  const p = planStatePurge({ stateDir: OURS, purge: true, assumeYes: true, exists: isStateDir, typedConfirmation: OURS });
   assert.equal(p.action, 'keep');
   assert.match(p.reason, /never deleted non-interactively/);
   assert.equal(NON_INTERACTIVE_ANSWERS.purge, false);
 });
 
 test('--purge demands the full path TYPED, not a y/N', () => {
-  const asked = planStatePurge({ stateDir: OURS, purge: true, config: MADE_BY_US });
+  const asked = planStatePurge({ stateDir: OURS, purge: true, exists: isStateDir });
   assert.equal(asked.action, 'confirm-typed');
   assert.equal(asked.expected, OURS);
+  assert.match(asked.prompt, new RegExp(OURS.replace(/[.]/g, '\\.')), 'the prompt names the directory it will destroy');
   assert.match(asked.prompt, /identity keys and message history/);
-  assert.match(asked.prompt, /No peer can give them back/);
+  assert.match(asked.prompt, /exist nowhere else and no peer can give them back/);
   for (const wrong of ['y', 'yes', '', '/home/me/.our', `${OURS}/`]) {
-    assert.equal(planStatePurge({ stateDir: OURS, purge: true, config: MADE_BY_US, typedConfirmation: wrong }).action, 'confirm-typed', `${JSON.stringify(wrong)} must not pass`);
+    assert.equal(planStatePurge({ stateDir: OURS, purge: true, exists: isStateDir, typedConfirmation: wrong }).action, 'confirm-typed', `${JSON.stringify(wrong)} must not pass`);
   }
 });
 
 test('all four gates open → the exact directory, never a parent or a glob', () => {
-  const p = planStatePurge({ stateDir: OURS, purge: true, config: MADE_BY_US, typedConfirmation: OURS });
+  const p = planStatePurge({ stateDir: OURS, purge: true, exists: isStateDir, typedConfirmation: OURS });
   assert.equal(p.action, 'purge');
   assert.deepEqual(p.paths, [OURS]);
   assert.ok(!p.paths.some((x) => x.includes('*')), 'no globs');
   assert.ok(!p.paths.includes(HOME), 'never the parent');
-});
-
-test('the creation marker survives the config merge, so purge stays possible', () => {
-  const created = { ...stateDirCreationMarker(1), port: 3050 };
-  const merged = planDaemonConfig(created, { port: 3060, stateDir: OURS, brokerUrl: 'wss://b' });
-  assert.equal(wasCreatedByInstaller(merged.config), true, 'an update must not erase how the directory came to exist');
 });
 
 // --------------------------------------------- §8 step 6 — global packages --

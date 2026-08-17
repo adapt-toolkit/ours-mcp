@@ -31,7 +31,6 @@ import {
   tgConfigPath, coworkConfigPath, summarizeComponentRun,
 } from './components.mjs';
 import { summarizeRun } from './rerun.mjs';
-import { stateDirCreationMarker } from './uninstall.mjs';
 import { ok, info, warn, heading } from './ui.mjs';
 
 export const EXIT_OK = 0;
@@ -99,12 +98,12 @@ export async function runDaemonPhase(args, effects) {
   steps.push({ id: 'cli', changed: true, packageRefresh: true });
 
   // The config file — merged, never rewritten, and untouched when it already
-  // matches. The creation marker is added ONLY when this run creates the
-  // directory, so --purge can later tell ours from pre-existing.
+  // matches. No provenance marker is written: the owner ruled that --purge works
+  // on any state directory, so a `createdBy` key would have had no consumer, and
+  // an unread key in a user's config file is future confusion for nothing.
   const configPath = join(dir, 'config.json');
-  const existing = effects.readJson(configPath);
   const merged = planDaemonConfig(
-    creating && existing === null ? stateDirCreationMarker(effects.now()) : existing,
+    effects.readJson(configPath),
     { port: target.port, stateDir: dir, brokerUrl: args.brokerUrl },
   );
   if (merged.changed) {

@@ -11,7 +11,7 @@
 // THE BIAS OF THIS WHOLE FILE IS TOWARD KEEPING THINGS. State is kept by default,
 // a component's config file is kept even when its daemon keys are removed, and
 // global packages are kept while any other daemon still needs them. The one
-// destructive operation, --purge, is gated four separate ways (§8 step 5) because
+// destructive operation, --purge, is separately gated (§8 step 5) because
 // it deletes identity keys, and no other step here is irreversible.
 
 import { join, resolve } from 'node:path';
@@ -19,23 +19,23 @@ import { unitNameForStateDir } from './plan.mjs';
 import { tgConfigPath, coworkConfigPath } from './components.mjs';
 
 /**
- * Marker recorded in config.json at CREATION time only, never on an update, so
- * `--purge` can tell a state directory this installer made from one that was
- * already there.
+ * Does this directory even look like an ours state directory?
  *
- * SPEC GAP, flagged rather than assumed: §8 step 5 says purge applies "only when
- * this state directory was created by an installer run rather than pre-existing",
- * but nothing on disk records that today. This is the cheapest thing that does,
- * it is additive, and the merge in planDaemonConfig preserves unrelated keys. The
- * fail-safe direction is deliberate — no marker means NOT ours to purge, so a
- * hand-made or pre-existing ~/.ours can never be deleted by this flag.
+ * WHY THIS EXISTS. The owner removed the "created by an installer run" gate —
+ * purge means purge, on any state directory. That was a deliberate ruling and
+ * this does not reintroduce it: this asks "is this a state directory at all",
+ * not "is it ours". With provenance gone, the typed path would otherwise be the
+ * only thing between `ours-uninstall --state-dir ~ --purge` and a deleted home
+ * directory, and a typed path is no protection against a path typed exactly as
+ * intended but meant differently.
+ *
+ * A directory qualifies if it carries any of the artefacts only a daemon writes.
+ * Absent all of them, purge refuses and says why — the operator can still delete
+ * the directory themselves, which is the right place for that decision.
  */
-export const CREATED_BY = '@ours.network/install';
-export function stateDirCreationMarker(now) {
-  return { createdBy: CREATED_BY, createdAt: now };
-}
-export function wasCreatedByInstaller(config) {
-  return Boolean(config && typeof config === 'object' && config.createdBy === CREATED_BY);
+export const STATE_DIR_EVIDENCE = ['config.json', 'daemon-token', 'ours-cli-daemon.json', 'root.json'];
+export function looksLikeStateDir(stateDir, exists) {
+  return STATE_DIR_EVIDENCE.some((name) => exists(join(resolve(stateDir), name)));
 }
 
 /**
@@ -116,33 +116,33 @@ export function planDaemonRemoval({ stateDir, cliStartedIt }) {
 }
 
 /**
- * §8 step 5 — state. Kept unless every one of four gates opens.
+ * §8 step 5 — state. Kept unless every gate opens.
  *
- * The gates, and why each exists:
- *   --purge given          — never the default; deleting identity keys is opt-in.
- *   interactive            — an unattended run never deletes state (§9).
- *   created by an installer— a pre-existing or hand-made directory is not ours.
- *   typed confirmation     — a y/N is too easy to answer wrongly for something
- *                            that destroys keys no peer can give back.
+ *   --purge given      — never the default; deleting identity keys is opt-in.
+ *   interactive        — an unattended run never deletes state (§9).
+ *   looks like a state directory — see looksLikeStateDir.
+ *   typed confirmation — the full path, not a y/N. The owner removed the
+ *                        provenance condition, not the deliberateness, and with
+ *                        provenance gone this is the last thing standing between
+ *                        a mistyped command and someone's identity keys.
  *
- * Returns the exact directory, never a glob or a parent, and only when all four
- * are satisfied.
+ * Returns the exact directory, never a glob or a parent, and only when every gate
+ * is satisfied.
  */
-export function planStatePurge({ stateDir, purge = false, assumeYes = false, config, typedConfirmation = null }) {
+export function planStatePurge({ stateDir, purge = false, assumeYes = false, exists = () => true, typedConfirmation = null }) {
   const dir = resolve(stateDir);
   const keep = (reason) => ({ action: 'keep', stateDir: dir, reason, hint: 're-run with --purge to delete identities and history' });
   if (!purge) return keep('state is kept by default');
   if (assumeYes) return keep('state is never deleted non-interactively');
-  if (!wasCreatedByInstaller(config)) {
-    return keep(`${dir} was not created by an installer run; refusing to delete a directory this installer did not make`);
+  if (!looksLikeStateDir(dir, exists)) {
+    return keep(`${dir} does not look like an ours state directory (none of ${STATE_DIR_EVIDENCE.join(', ')}); refusing to delete it`);
   }
-  const expected = dir;
-  if (typedConfirmation !== expected) {
+  if (typedConfirmation !== dir) {
     return {
       action: 'confirm-typed',
       stateDir: dir,
-      expected,
-      prompt: `This permanently deletes ${dir}, including the identity keys and message history of every identity in it. No peer can give them back.\nType the full path to confirm:`,
+      expected: dir,
+      prompt: `This permanently deletes ${dir} and everything in it, including the identity keys and message history of every identity there. Those keys exist nowhere else and no peer can give them back.\nType the full path to confirm:`,
     };
   }
   return { action: 'purge', stateDir: dir, paths: [dir] };
@@ -166,7 +166,7 @@ export function planGlobalPackages({ stateDir, otherStateDirsWithConfig = [] }) 
  * The whole §8 order, refusing at step 1 rather than starting and stopping
  * half-way.
  */
-export function planUninstall({ home, env = {}, endpoint, stateDir, purge = false, assumeYes = false, confirmedComponents = [], readJson, cliStartedIt = true, otherStateDirsWithConfig = [], typedConfirmation = null }) {
+export function planUninstall({ home, env = {}, endpoint, stateDir, purge = false, assumeYes = false, confirmedComponents = [], readJson, exists = () => true, cliStartedIt = true, otherStateDirsWithConfig = [], typedConfirmation = null }) {
   const dir = resolve(stateDir);
   const pointing = componentsPointingHere({ home, env, endpoint, stateDir: dir, readJson });
   const unconfirmed = pointing.filter((p) => !confirmedComponents.includes(p.key));
@@ -185,7 +185,7 @@ export function planUninstall({ home, env = {}, endpoint, stateDir, purge = fals
     stateDir: dir,
     detach: pointing.map((p) => ({ key: p.key, service: [`ours-${p.key === 'tg' ? 'tg-connector' : 'cowork'}`, 'uninstall-service'] })),
     daemon: planDaemonRemoval({ stateDir: dir, cliStartedIt }),
-    state: planStatePurge({ stateDir: dir, purge, assumeYes, config: readJson(join(dir, 'config.json')), typedConfirmation }),
+    state: planStatePurge({ stateDir: dir, purge, assumeYes, exists, typedConfirmation }),
     packages: planGlobalPackages({ stateDir: dir, otherStateDirsWithConfig }),
   };
 }

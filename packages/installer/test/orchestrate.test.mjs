@@ -9,7 +9,6 @@ import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import { runInstall, runDaemonPhase, runServicePhase, EXIT_OK, EXIT_REFUSED } from '../lib/orchestrate.mjs';
 import { CLI_UNIT_MARKER } from '../lib/plan.mjs';
-import { CREATED_BY } from '../lib/uninstall.mjs';
 
 const HOME = '/home/me';
 const OURS = resolve(HOME, '.ours');
@@ -122,7 +121,7 @@ test('creating a daemon: CLI, config with the creation marker, start, then servi
   const written = JSON.parse(body);
   assert.equal(written.port, 3051);
   assert.equal(written.stateDir, TG);
-  assert.equal(written.createdBy, CREATED_BY, 'so --purge can later tell ours from pre-existing');
+  assert.ok(!('createdBy' in written), 'no provenance marker: --purge works on any state directory, so it would have no consumer');
   // Order matters: the daemon is started before its boot service is installed.
   const ids = e.recorder.ran.map((c) => c.join(' '));
   assert.ok(ids.findIndex((s) => s.includes('daemon start')) < ids.findIndex((s) => s.includes('install-service')));
