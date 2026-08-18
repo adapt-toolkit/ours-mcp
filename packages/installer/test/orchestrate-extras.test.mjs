@@ -270,11 +270,10 @@ test('an unreachable daemon gives the exact retry command, naming THIS daemon', 
   const failing = { ...e, run: async () => { throw new Error('ours-mcp create-root: daemon not running'); } };
   const row = await runIdentityPhase({ ...ARGS, assumeYes: true }, failing, { target: AT_TG, mcpReady: true });
   assert.equal(row.state, 'failed');
-  // The command changed with the daemon; what it must still do has not. The hint
-  // NAMES THIS DAEMON — ours-mcp is selected by environment, so the pair travels
-  // as an env prefix where the SDK CLI took a --config flag. A retry command
-  // without it starts the DEFAULT daemon.
-  assert.match(said(e), new RegExp(`OURS_CONFIG=${join(TG, 'config.json')} ours-mcp start`));
+  // The hint NAMES THIS DAEMON. A retry command without the config path starts the
+  // DEFAULT daemon, and the operator ends up with an identity on a daemon they did
+  // not choose, with no error to tell them.
+  assert.match(said(e), new RegExp(`ours daemon start --config ${join(TG, 'config.json')}`));
 });
 
 // -------------------------------------------------- the summary + hand-off ---
@@ -360,7 +359,7 @@ test('no harness at all no longer abandons the daemon', async () => {
   assert.equal(await runInstall([], e), EXIT_OK);
   // The daemon's package is @ours.network/mcp now: it is the only MCP-capable
   // daemon in the stack, and the SDK CLI's daemon does not mount /mcp at all.
-  assert.ok(ranAsText(e).some((s) => s.includes('@ours.network/mcp')), 'the daemon is still installed');
+  assert.ok(ranAsText(e).some((s) => s.includes('@ours.network/cli')), 'the daemon is still installed');
   assert.match(said(e), /No Claude Code, Codex or Hermes found/);
 });
 
@@ -380,7 +379,7 @@ test('a second daemon alongside the first says whose daemon holds the default po
   assert.equal(await runInstall(['--state-dir', TG], e), EXIT_OK);
   assert.match(said(e), /creating a daemon here/);
   assert.match(said(e), /port 3050 is held by another ours daemon \(state directory .*\.ours\); this one uses/);
-  assert.ok(ranAsText(e).some((s) => s === 'ours-mcp start'), 'and it really is created');
+  assert.ok(ranAsText(e).some((s) => s.includes('daemon start')), 'and it really is created');
 });
 
 test('runPreflight names what it checked, so a supported machine is not silent', () => {

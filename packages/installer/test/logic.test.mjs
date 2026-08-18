@@ -259,12 +259,15 @@ test('parseVersion / parseStatus: pull versions + resolved broker/port out of CL
   assert.equal(parseVersion('nothing here'), '');
   const st = parseStatus([
     'ours-mcp: running',
-    '  url:    http://localhost:3070/mcp (reachable)',
+    '  api:    http://localhost:3070 (reachable)',
     '  broker: wss://broker1.ours.network',
   ].join('\n'));
   assert.equal(st.broker, 'wss://broker1.ours.network');
   assert.equal(st.port, 3070);
   assert.deepEqual(parseStatus('ours-mcp: stopped'), { broker: null, port: null });
+  // The historical `url:` line still parses: a current CLI can be asked to report
+  // on an older running daemon, and reading that as "no port" would be wrong.
+  assert.equal(parseStatus('  url:    http://localhost:3070/mcp (reachable)').port, 3070);
 });
 
 test('defaults mirror the daemon core config', () => {

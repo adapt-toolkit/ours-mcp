@@ -88,11 +88,11 @@ test('a --port disagreeing with the running daemon exits 2 and writes nothing', 
 
 // ------------------------------------------------------- §§3-4 the daemon ----
 
-test('creating a daemon: the daemon package, config, start, then service', async () => {
+test('creating a daemon: the MCP server, the CLI, config, start, then service', async () => {
   const e = fx();
   const r = await runDaemonPhase({ stateDir: TG, port: 3051, portExplicit: true, dryRun: false, brokerUrl: 'wss://b' }, e);
   assert.equal(r.target.action, 'create');
-  assert.deepEqual(r.steps.map((s) => s.id), ['daemon-package', 'config', 'start', 'service']);
+  assert.deepEqual(r.steps.map((s) => s.id), ['mcp-package', 'cli', 'config', 'start', 'service']);
   const [path, body] = e.recorder.wrote[0];
   assert.equal(path, join(TG, 'config.json'));
   const written = JSON.parse(body);
@@ -101,7 +101,7 @@ test('creating a daemon: the daemon package, config, start, then service', async
   assert.ok(!('createdBy' in written), 'no provenance marker: --purge works on any state directory, so it would have no consumer');
   // Order matters: the daemon is started before its boot service is installed.
   const ids = e.recorder.ran.map((c) => c.join(' '));
-  assert.ok(ids.findIndex((s) => s === 'ours-mcp start') < ids.findIndex((s) => s.includes('install-service')));
+  assert.ok(ids.findIndex((s) => s.includes('daemon start')) < ids.findIndex((s) => s.includes('install-service')));
 });
 
 test('updating an existing daemon never starts one and never moves the port', async () => {
@@ -130,17 +130,16 @@ test('an existing daemon found only by its PID record is still an update', async
 
 // ------------------------------------------------------------- §4 the unit ---
 
-test('a legacy ours-mcp unit is adopted silently, and the DECISION is now the whole guard', async () => {
-  // --force is gone: ours-mcp's install-service takes no flags and writes the unit
-  // unconditionally, so there is no marker check behind classifyUnit any more.
-  // What used to be belt (the decision) and braces (the CLI's refusal) is now the
-  // decision alone — which makes planServiceInstall's `foreign` refusal
-  // load-bearing rather than a second opinion.
+test('a legacy ours-mcp unit is adopted silently, with --force and one line', async () => {
+  // --force is back with the SDK CLI's install-service, and so is the marker check
+  // behind it: the CLI refuses to overwrite a unit it did not write, which restores
+  // the second opinion behind classifyUnit that #74 had to give up.
   const e = fx({ text: { [unitPath('ours.service')]: LEGACY_UNIT } });
   const r = await runServicePhase({ dryRun: false }, e, OURS, 3050);
   assert.equal(r.plan.action, 'adopt');
   assert.deepEqual(e.recorder.asked, [], 'no prompt — the owner ruled it silent');
-  assert.ok(e.recorder.ran.some((x) => x.join(' ') === 'ours-mcp install-service'));
+  const cmd = e.recorder.ran.find((x) => x.includes('install-service'));
+  assert.ok(cmd.includes('--force'), 'adoption needs --force, and this is the only place it is passed');
   assert.match(said(e), /replaced .*ours\.service/);
   assert.doesNotMatch(said(e), /lost|delete|erase|wipe|destroy/i, 'no false data-loss wording');
 });
@@ -343,7 +342,7 @@ test('a daemon that fails to start does not leave a config naming its port', asy
   // (target.mjs findDaemon), probes the port nothing listens on, and has only the
   // ours-cli-daemon.json lookup between it and creating a SECOND daemon on this
   // state directory — two writers on one state_data.bin.
-  const e = fx({ runFails: ['ours-mcp start'] });
+  const e = fx({ runFails: ['daemon start'] });
   await assert.rejects(() => runInstall([], e));
   assert.deepEqual(e.recorder.restored.map(([p]) => p), [join(OURS, 'config.json')]);
   assert.match(said(e), /did not reach the state its config describes/);
@@ -367,7 +366,7 @@ test('an existing config is rolled back to its PREVIOUS bytes, not deleted', asy
 });
 
 test('the rollback states what it could NOT undo', async () => {
-  const e = fx({ runFails: ['ours-mcp start'] });
+  const e = fx({ runFails: ['daemon start'] });
   await assert.rejects(() => runInstall([], e));
   assert.match(said(e), /completed package installs were not rolled back/,
     'the CLI package install always ran by this point; saying so is the honest boundary');
@@ -383,15 +382,15 @@ test('a REFUSAL after the config write rolls it back too', async () => {
 });
 
 test('a failed rollback is REPORTED, never swallowed and never thrown over the real error', async () => {
-  const e = fx({ runFails: ['ours-mcp start'], restoreFails: [join(OURS, 'config.json')] });
+  const e = fx({ runFails: ['daemon start'], restoreFails: [join(OURS, 'config.json')] });
   // The original failure must be what propagates: losing it to a second error
   // raised by the recovery would hide the thing that actually went wrong.
-  await assert.rejects(() => runInstall([], e), /ours-mcp exited 1/, 'the original failure survives');
+  await assert.rejects(() => runInstall([], e), /ours exited 1/, 'the original failure survives');
   assert.match(said(e), /could NOT roll back .*config\.json: permission denied/);
 });
 
 test('a --dry-run snapshots nothing, because it wrote nothing', async () => {
-  const e = fx({ runFails: ['ours-mcp start'] });
+  const e = fx({ runFails: ['daemon start'] });
   const code = await runInstall(['--dry-run'], e);
   assert.equal(code, EXIT_OK, 'a dry run never reaches a real failure');
   assert.deepEqual(e.recorder.restored, []);
@@ -620,11 +619,9 @@ test('a failed install-service does not leave the daemon down without trying to 
     env: { OURS_ASSUME_YES: '1' },
   });
   await assert.rejects(() => runInstall([], e));
-  const started = e.recorder.ran.filter((c) => c.join(' ') === 'ours-mcp start');
+  const started = e.recorder.ran.filter((c) => c.join(' ').includes('daemon start'));
   assert.equal(started.length, 1, 'exactly one recovery attempt');
-  assert.deepEqual(started[0], ['ours-mcp', 'start']);
-  const startEnv = e.recorder.ranEnv[e.recorder.ran.findIndex((c) => c.join(' ') === 'ours-mcp start')];
-  assert.equal(startEnv.OURS_CONFIG, join(OURS, 'config.json'), 'selected by environment, not by a flag');
+  assert.deepEqual(started[0], ['ours', 'daemon', 'start', '--config', join(OURS, 'config.json')]);
   assert.match(said(e), /your daemon is running again/);
 });
 
@@ -634,20 +631,20 @@ test('the two outcomes are told apart, because only one of them needs a human no
   const e = fx({
     json: { [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' } },
     net: { 3050: { ok: true, stateDir: OURS } },
-    runFails: ['install-service', 'ours-mcp start'],
+    runFails: ['install-service', 'daemon start'],
     env: { OURS_ASSUME_YES: '1' },
   });
   await assert.rejects(() => runInstall([], e));
   assert.match(said(e), /the daemon did NOT come back up/);
-  assert.match(said(e), /OURS_CONFIG=.*config\.json ours-mcp start/, 'and the exact command to fix it');
+  assert.match(said(e), /ours daemon start --config .*config\.json/, 'and the exact command to fix it');
 });
 
 test('a daemon that never started is not "recovered" — there is nothing to recover', async () => {
   // Running start after a failed start would fail again and stack a second, less
   // useful error on top of the first.
-  const e = fx({ runFails: ['ours-mcp start'], env: { OURS_ASSUME_YES: '1' } });
+  const e = fx({ runFails: ['daemon start'], env: { OURS_ASSUME_YES: '1' } });
   await assert.rejects(() => runInstall([], e));
-  const starts = e.recorder.ran.filter((c) => c.join(' ') === 'ours-mcp start');
+  const starts = e.recorder.ran.filter((c) => c.join(' ').includes('daemon start'));
   assert.equal(starts.length, 1, 'the original attempt only — no retry');
   assert.doesNotMatch(said(e), /running again|did NOT come back up/);
 });
@@ -666,18 +663,22 @@ test('a dry run recovers nothing, because it stopped nothing', async () => {
 // Whether launchctl accepts the agent is still unproven — nothing here is macOS —
 // but it is now real code rather than a documented refusal.
 
-test('macOS attempts the boot service like any other platform', async () => {
+test('on macOS the run does NOT call install-service, and does not die trying', async () => {
+  // The SDK CLI's install-service throws on any non-linux platform — its adapter
+  // factory's first line — so calling it does not degrade, it fails the run after
+  // preflight said the platform was supported. The skip is back with the daemon.
   const e = fx({ platform: 'darwin', env: { OURS_ASSUME_YES: '1' } });
-  const code = await runInstall([], e);
-  assert.equal(code, EXIT_OK);
-  assert.ok(e.recorder.ran.some((c) => c.join(' ').includes('install-service')), 'attempted, not skipped');
-  assert.doesNotMatch(said(e), /not available on macOS/, 'and nothing claims a gap that no longer exists');
+  assert.equal(await runInstall([], e), EXIT_OK, 'the daemon is fine; only the boot service is not');
+  assert.ok(!e.recorder.ran.some((c) => c.join(' ').includes('install-service')), 'never attempted');
+  assert.match(said(e), /not available on macOS/);
+  assert.match(said(e), /Boot service/, 'and it is marked in the summary, not just in a line');
+  assert.match(said(e), /needs attention/);
 });
 
 test('Linux is completely unaffected — same walk, same service install', async () => {
   const e = fx({ env: { OURS_ASSUME_YES: '1' } });
   await runInstall([], e);
-  assert.ok(e.recorder.ran.some((c) => c.join(' ') === 'ours-mcp install-service'));
+  assert.ok(e.recorder.ran.some((c) => c.join(' ').includes('daemon install-service')));
   assert.doesNotMatch(said(e), /not available on/);
 });
 
@@ -695,7 +696,11 @@ test('a NIGHTLY installer with NO env var installs nightly, not latest', async (
   const installs = e.recorder.ran.filter((c) => c.join(' ').startsWith('npm i -g')).map((c) => c[c.length - 1]);
   assert.ok(installs.length > 0, 'something was installed');
   for (const spec of installs) {
-    assert.match(spec, /@nightly$/, `every package must be nightly, got ${spec}`);
+    // @ours.network/cli is exempt and must stay exempt: it publishes only `latest`,
+    // so pinning it to a nightly tag would 404. Everything that HAS a nightly tag
+    // must use it.
+    if (spec === '@ours.network/cli') continue;
+    assert.match(spec, /@nightly$/, `every package with a nightly tag must use it, got ${spec}`);
   }
 });
 

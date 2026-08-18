@@ -217,7 +217,10 @@ export async function runDaemonPhase(args, effects) {
 
   const steps = [];
 
-  // THE DAEMON IS ours-mcp, SO ITS PACKAGE COMES FIRST.
+  // The daemon is the ours-sdk CLI; ours-mcp is the per-session MCP server the
+  // harness spawns, and it reaches the daemon over the HTTP API. Both are
+  // installed here and both are required: an install without ours-mcp leaves a
+  // machine with a daemon and no MCP at all.
   //
   // This used to install @ours.network/cli, because the daemon used to be
   // `ours daemon serve`. That daemon does not mount /mcp — the SDK serves that
@@ -230,9 +233,11 @@ export async function runDaemonPhase(args, effects) {
   //
   // The order therefore inverts: the MCP package was a COMPONENT installed after
   // this phase, and it is now the thing this phase starts.
-  const daemonPkg = componentSpec(componentByKey('mcp'), args.channel);
-  await perform(effects, args.dryRun, `ours daemon installed (npm i -g ${daemonPkg})`, () => effects.run('npm', ['i', '-g', daemonPkg]));
-  steps.push({ id: 'daemon-package', changed: true, packageRefresh: true });
+  const mcpPkg = componentSpec(componentByKey('mcp'), args.channel);
+  await perform(effects, args.dryRun, `MCP server installed (npm i -g ${mcpPkg})`, () => effects.run('npm', ['i', '-g', mcpPkg]));
+  steps.push({ id: 'mcp-package', changed: true, packageRefresh: true });
+  await perform(effects, args.dryRun, 'ours CLI installed (npm i -g @ours.network/cli)', () => effects.run('npm', ['i', '-g', '@ours.network/cli']));
+  steps.push({ id: 'cli', changed: true, packageRefresh: true });
 
   // The config file — merged, never rewritten, and untouched when it already
   // matches. No provenance marker is written: the owner ruled that --purge works
@@ -254,6 +259,7 @@ export async function runDaemonPhase(args, effects) {
   // lookup exists to prevent; this is what stops the installer from setting up the
   // conditions for it.
   const journal = configJournal(effects, { dryRun: args.dryRun });
+  let serviceUnsupported = null;
   if (merged.changed) {
     journal.snapshot(configPath);
     await perform(effects, args.dryRun, `write ${configPath} (port ${target.port})`, () => effects.writeJson(configPath, merged.text));
@@ -264,18 +270,12 @@ export async function runDaemonPhase(args, effects) {
 
   try {
     if (creating) {
-      // `start`, not `serve`: start backgrounds the daemon and polls until the port
-      // is open, which is the same observable readiness the old path had. `serve`
-      // runs in the foreground and would never return.
-      //
-      // Selected by ENVIRONMENT rather than flags — ours-mcp reads OURS_CONFIG /
-      // OURS_PORT / OURS_STATE_DIR — and daemonEnv is the one place that pair is
-      // built, so the daemon this run created is the daemon that starts.
-      await perform(effects, args.dryRun, `start the daemon on port ${target.port}`, () => effects.run('ours-mcp', ['start'], { env: daemonEnv(dir, target.port) }));
+      await perform(effects, args.dryRun, `start the daemon on port ${target.port}`, () => effects.run('ours', ['daemon', 'start', '--config', configPath]));
       steps.push({ id: 'start', changed: true });
     }
 
     const service = await runServicePhase(args, effects, dir, target.port);
+    if (service.unsupported) serviceUnsupported = service.unsupported;
     if (service.refused) {
       // A REFUSAL IS A FAILURE TO REACH THE STATE, not a special case. An unknown
       // unit file stops the run just as a failed start does, and it stops it with
@@ -304,12 +304,12 @@ export async function runDaemonPhase(args, effects) {
       effects.out(recovery.recovered
         ? ok('your daemon is running again — nothing was committed, and the service is unchanged')
         : warn('and the daemon did NOT come back up — start it yourself before anything else: '
-          + `OURS_CONFIG=${configPath} ours-mcp start`));
+          + `ours daemon start --config ${configPath}`));
     }
     throw error;
   }
 
-  return { target, steps };
+  return { target, steps, serviceUnsupported };
 }
 
 /**
@@ -327,7 +327,7 @@ export async function runDaemonPhase(args, effects) {
 async function recoverDaemon(args, effects, dir, configPath, port) {
   if (args.dryRun) return null;
   try {
-    await effects.run('ours-mcp', ['start'], { env: daemonEnv(dir, port) });
+    await effects.run('ours', ['daemon', 'start', '--config', configPath]);
     return { recovered: true };
   } catch (recoveryError) {
     return { recovered: false, reason: reason(recoveryError) };
@@ -371,7 +371,20 @@ function rollBack(effects, journal, args, why, { packagesInstalled = true, repla
  * positively identified as ours-mcp's, and never for one we cannot identify.
  */
 export async function runServicePhase(args, effects, dir, port) {
-  const plan = planServiceInstall({ stateDir: dir, home: effects.home, readText: effects.readText });
+  const plan = planServiceInstall({
+    stateDir: dir, home: effects.home, readText: effects.readText, platform: effects.platform?.platform,
+  });
+  // NOT a refusal and NOT a failure: the daemon is running and correct, and only
+  // the boot service could not be installed — `ours daemon install-service` throws
+  // on any non-linux platform. The run CONTINUES, says so, and the summary marks
+  // it, because the person this hurts reboots in a fortnight and finds nothing
+  // listening.
+  if (plan.action === 'unsupported') {
+    effects.out(warn(`ours: ${plan.message}`));
+    effects.out(info(`Your daemon is installed and running now. To start it after a reboot, run:  ${plan.manual.join(' ')} ${join(dir, 'config.json')}`));
+    effects.out(info('Nothing else in this run depends on the boot service.'));
+    return { step: { id: 'service', changed: false, reason: 'not available on this platform' }, plan, unsupported: plan };
+  }
   if (plan.action === 'refuse') {
     effects.out(warn(`ours: refusing to continue — ${plan.message}`));
     return { refused: plan };
@@ -671,6 +684,9 @@ export function runPreflight(effects) {
     return { ok: false, platform: plat };
   }
   effects.out(ok(`Platform: ${plat.label} (supported)`));
+  if (effects.platform?.platform && effects.platform.platform !== 'linux') {
+    effects.out(info(`On ${plat.label} the daemon runs, but installing a BOOT SERVICE is not available — you will start it yourself after a reboot.`));
+  }
   const version = String(effects.nodeVersion ?? '0');
   if (Number.parseInt(version.split('.')[0], 10) < 20) {
     effects.out(warn(`Node.js ${version} — ours needs v20 or newer. Update Node and re-run.`));
@@ -743,7 +759,7 @@ export async function runIdentityPhase(args, effects, { target, mcpReady }) {
       // by environment instead, so the pair travels as an env prefix rather than a
       // flag. A retry command that omits it would start the DEFAULT daemon — which
       // is how someone ends up with an identity on a daemon they did not choose.
-      effects.out(info(`Fix: run 'OURS_CONFIG=${env.OURS_CONFIG} ours-mcp start', then 'OURS_CONFIG=${env.OURS_CONFIG} ours-mcp create-root "${name}"'.`));
+      effects.out(info(`Fix: run 'ours daemon start --config ${env.OURS_CONFIG}', then 'OURS_CONFIG=${env.OURS_CONFIG} ours-mcp create-root "${name}"'.`));
       return { key: 'identity', label: 'Human identity', state: 'failed', note: 'daemon not reachable' };
     }
     effects.out(warn(`Couldn't create your human identity: ${text.split('\n')[0]}`));
@@ -1110,6 +1126,17 @@ export async function runInstall(argv, effects) {
     state: target.action === 'create' ? 'installed' : 'current',
     note: `port ${target.port}`,
   }];
+  // The skip must not read as success: same "needs attention" mark a failed
+  // component gets, so the closing screen cannot say everything is clean.
+  if (daemon.serviceUnsupported) {
+    summary.push({
+      key: 'service',
+      label: 'Boot service',
+      state: 'failed',
+      note: `not available on ${daemon.serviceUnsupported.platform === 'darwin' ? 'macOS' : daemon.serviceUnsupported.platform} — start the daemon yourself after a reboot`,
+    });
+  }
+
   const components = await runComponentPhase(args, effects, target);
   for (const component of COMPONENTS) {
     const state = components.installed.includes(component.key) ? 'installed'
