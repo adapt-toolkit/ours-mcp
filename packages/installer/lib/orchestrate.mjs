@@ -1029,7 +1029,19 @@ export async function runInstall(argv, effects) {
   if (args.version) { effects.out(`ours-install v${effects.version ?? '?'}`); return EXIT_OK; }
 
   args.brokerUrl = args.brokerUrl ?? effects.brokerUrl;
-  args.channel = resolveChannel(effects.env.OURS_CHANNEL ?? effects.env.OURS_INSTALL_CHANNEL);
+  // THE INSTALLER'S OWN VERSION IS THE CHANNEL SIGNAL WHEN NOTHING SAYS OTHERWISE.
+  //
+  // resolveChannel falls back to `selfVersion` only when the environment is
+  // silent, and this call passed no selfVersion — so a NIGHTLY installer with no
+  // OURS_CHANNEL set resolved to `latest` and installed the whole stack at latest.
+  // That is what put fleet@latest and a stable ours-mcp on a nightly machine.
+  //
+  // The v2 bin has always done this correctly (install.mjs:53 passes pkgVersion());
+  // the v3 orchestrator dropped the argument. @ours.network/install is published on
+  // BOTH dist-tags from one lockstep bump, so its own version is the only thing
+  // that distinguishes a nightly installer from a stable one when the operator has
+  // said nothing.
+  args.channel = resolveChannel(effects.env.OURS_CHANNEL ?? effects.env.OURS_INSTALL_CHANNEL, effects.version);
 
   effects.out(banner());
   effects.out(heading(`ours: target ${args.stateDir}${args.portExplicit ? `, port ${args.port}` : ''}`));

@@ -678,3 +678,43 @@ test('Linux is completely unaffected — same walk, same service install', async
   assert.ok(e.recorder.ran.some((c) => c.join(' ') === 'ours-mcp install-service'));
   assert.doesNotMatch(said(e), /not available on/);
 });
+
+// ------------------------------------------- the channel signal of last resort --
+
+test('a NIGHTLY installer with NO env var installs nightly, not latest', async () => {
+  // THE DEFECT THIS PINS, and the reason every other channel test missed it: they
+  // all set OURS_CHANNEL. resolveChannel only falls back to the installer's own
+  // version when the environment is silent, and the v3 orchestrator passed no
+  // version at all — so the one case nobody tested, a published nightly installer
+  // run with no env, resolved to `latest` and installed the whole stack stable.
+  const e = fx({ env: { OURS_ASSUME_YES: '1' }, harnesses: [{ name: 'codex', status: 'ok', label: 'Codex' }] });
+  e.version = '0.17.0-nightly.7';
+  await runInstall([], e);
+  const installs = e.recorder.ran.filter((c) => c.join(' ').startsWith('npm i -g')).map((c) => c[c.length - 1]);
+  assert.ok(installs.length > 0, 'something was installed');
+  for (const spec of installs) {
+    assert.match(spec, /@nightly$/, `every package must be nightly, got ${spec}`);
+  }
+});
+
+test('a STABLE installer with no env var still installs latest', async () => {
+  const e = fx({ env: { OURS_ASSUME_YES: '1' }, harnesses: [{ name: 'codex', status: 'ok', label: 'Codex' }] });
+  e.version = '0.16.0';
+  await runInstall([], e);
+  const installs = e.recorder.ran.filter((c) => c.join(' ').startsWith('npm i -g')).map((c) => c[c.length - 1]);
+  for (const spec of installs) {
+    assert.doesNotMatch(spec, /@nightly$/, `a stable installer must never install a nightly, got ${spec}`);
+  }
+});
+
+test('an explicit env var still outranks the installer version, both ways', async () => {
+  const pinned = fx({ env: { OURS_ASSUME_YES: '1', OURS_CHANNEL: 'latest' } });
+  pinned.version = '0.17.0-nightly.7';
+  await runInstall([], pinned);
+  assert.ok(!pinned.recorder.ran.some((c) => c.join(' ').includes('@nightly')), 'a nightly installer can be pinned to stable');
+
+  const optedIn = fx({ env: { OURS_ASSUME_YES: '1', OURS_CHANNEL: 'nightly' } });
+  optedIn.version = '0.16.0';
+  await runInstall([], optedIn);
+  assert.ok(optedIn.recorder.ran.some((c) => c.join(' ').includes('@nightly')), 'and a stable one can opt in');
+});
