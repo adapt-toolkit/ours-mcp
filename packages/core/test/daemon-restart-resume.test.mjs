@@ -22,6 +22,9 @@ import { createServer } from 'node:net';
 
 import { connectConnector, spawnDaemon, waitForDaemon, sleep } from './fixtures/connector-client.mjs';
 
+const T0 = Date.now();
+const mark = (...m) => console.log(`  [diag +${((Date.now() - T0) / 1000).toFixed(2)}s]`, ...m);
+
 const freePort = () => new Promise((resolve, reject) => {
   const s = createServer();
   s.on('error', reject);
@@ -46,17 +49,30 @@ try {
   ok(isOk(await conn.call('get_messages')), '(2) get_messages works on the first daemon');
 
   // ── the daemon dies and comes back on the same port and state dir ─────────
+  mark('killing daemon 1, pid', daemon.pid);
   daemon.kill('SIGKILL');
   await sleep(500);
+  mark('spawning daemon 2 on port', port);
   daemon = spawnDaemon(port, dir);
   await waitForDaemon(port);
+  mark('daemon 2 answered /version');
+  try {
+    const v = await (await fetch(`http://127.0.0.1:${port}/version`)).text();
+    mark('/version body:', v.slice(0, 200));
+  } catch (e) { mark('/version re-read threw:', String(e)); }
 
   // The connector is ALIVE throughout and made no bind call of any kind.
   const gm = await conn.call('get_messages');
+  mark('get_messages ->', JSON.stringify(gm).slice(0, 900));
   ok(isOk(gm) && !/No identity bound/i.test(JSON.stringify(gm)),
     '(3) the SAME connector works against the SECOND daemon with no choose_identity');
 
   const ci = await conn.call('current_identity');
+  mark('current_identity ->', JSON.stringify(ci).slice(0, 900));
+  const li = await conn.call('list_identities');
+  mark('list_identities ->', JSON.stringify(li).slice(0, 900));
+  const cx = await conn.call('choose_identity', { name: 'Dora' });
+  mark('explicit choose_identity ->', JSON.stringify(cx).slice(0, 900));
   ok(isOk(ci) && /Dora/.test(JSON.stringify(ci)),
     '(4) current_identity is still Dora after the daemon restart');
 } finally {

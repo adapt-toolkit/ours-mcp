@@ -57,7 +57,8 @@ jobs:
           test -f packages/core/dist/cli.js
           ls packages/core/dist/mufl_code/*.muflo
           test -f packages/claude-code/dist/hooks/runner.js
-      - run: npm test
+      - name: DIAG only daemon-restart-resume (scratch branch)
+        run: node packages/core/test/daemon-restart-resume.test.mjs
 
   # Bumps every managed workspace package and native plugin manifest in one
   # [skip ci] commit, pins plugin core dependencies, and pushes
