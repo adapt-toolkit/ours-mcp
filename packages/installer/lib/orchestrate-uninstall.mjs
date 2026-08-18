@@ -330,6 +330,9 @@ export async function runPluginPhase(plugins, { args, effects, selection = null 
         effects.out(warn(`${block.path}: ${stripped.reason}. Remove it by hand.`));
         continue;
       }
+      // Deliberately NOT journalled: this write IS the state its bytes describe, so
+      // nothing behind it can fail and leave them untrue. Adding one would undo a
+      // completed removal.
       await perform(effects, args.dryRun, `remove the ours managed block from ${block.path} (file kept)`, () => effects.writeText(block.path, stripped.text));
     }
     for (const dir of harness.dirs) {
