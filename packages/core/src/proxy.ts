@@ -507,6 +507,35 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   down.onclose = () => void shutdown(0);
   down.onerror = (e) => log('downstream error:', String(e));
 
+  // THE EXIT PATH. `down.onclose` above looks like it covers "the client went
+  // away". It does not, and cannot: StdioServerTransport.start() registers only
+  // 'data' and 'error' on stdin — no 'end', no 'close' — and it invokes
+  // `onclose?.()` ONLY from its own close(), which we call solely inside
+  // shutdown(). So onclose can fire only after the very thing it was meant to
+  // trigger has already happened. Every real termination a client performs
+  // (clean exit, being killed, its stdio closing) reaches this process as stdin
+  // EOF and NOTHING ELSE, and until now nothing here listened for it: the proxy
+  // outlived every session it served, holding ~134 MB and — once the daemon
+  // reaped its session for a dead client pid — spinning a core forever.
+  //
+  // cli.ts's own comment on the `proxy` case says "Runs until stdin closes".
+  // This is what makes that true. We listen on stdin ourselves rather than
+  // teaching the SDK transport to, because the transport is not ours and the
+  // guarantee is: when the thing that spawned us stops talking, we stop.
+  //
+  // SIGHUP is deliberately not the answer here. It is delivered only to the
+  // foreground process group of a controlling terminal, and a harness that
+  // spawns an MCP stdio server over pipes has no tty at all — so a hangup has
+  // no addressee and the escape hatch fails closed exactly where it is needed.
+  const clientGone = (why: string): void => {
+    log(`stdin ${why} — the client is gone; shutting down`);
+    void shutdown(0);
+  };
+  // 'end' is the EOF itself; 'close' covers a destroyed handle that never got to
+  // emit 'end'. shutdown() is idempotent, so hearing both is harmless.
+  process.stdin.once('end', () => clientGone('reached EOF'));
+  process.stdin.once('close', () => clientGone('closed'));
+
   // Inject a synthetic, swallowed choose_identity to re-bind the disk-seeded
   // identity on a fresh boot. PLAIN bind (never force): if a genuinely live other
   // session holds it, the daemon refuses and we stay unbound (fail-closed — the
