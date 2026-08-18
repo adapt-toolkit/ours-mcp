@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 //
-// ours-mcp — CLI / daemon manager for the ours MCP server.
+// ours-mcp — CLI / daemon manager for the ours daemon.
 //
-// The server is meant to run as ONE long-lived background daemon (HTTP transport)
-// that many Claude Code sessions connect to over http://localhost:<port>/mcp —
-// one shared ADAPT wrapper hosting N identities. This CLI starts/stops/inspects
-// that daemon. The Claude Code plugin only *connects*; it never spawns the
-// server unless `autoStart` is explicitly enabled (config.json / OURS_AUTOSTART).
+// The daemon runs as ONE long-lived background process — one shared ADAPT wrapper
+// hosting N identities — and serves an HTTP API on http://localhost:<port>. This
+// CLI starts/stops/inspects it, and is itself a CLIENT of that API.
+//
+// ⚠ IT NO LONGER SERVES /mcp, AND THIS CLI NO LONGER SPEAKS MCP TO ANYTHING.
+// A Claude Code session does not connect to the daemon's port; it spawns
+// `ours-mcp proxy`, which is the stdio MCP server (src/connector.ts) and reaches
+// the daemon over the same API this CLI uses. Three consumers — the MCP server,
+// this CLI, the SDK — one API, no special cases. Any code here that constructs an
+// MCP client is a regression, not a shortcut.
+//
+// The plugin only *connects*; it never spawns the daemon unless `autoStart` is
+// explicitly enabled (config.json / OURS_AUTOSTART).
 //
 //   ours-mcp start     start the daemon in the background (idempotent)
 //   ours-mcp stop      stop the running daemon
@@ -35,8 +43,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 import * as fs from 'node:fs';
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport as HttpClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+// ⚠ NO MCP CLIENT IMPORTS. The CLI is a client of the daemon's HTTP API, exactly
+// like the MCP server and the SDK — it does not speak MCP to anything. `Client`
+// and `StreamableHTTPClientTransport` were here for create-root, which is now one
+// typed call; re-adding either is a sign that something is reaching for /mcp again.
+import { OursClient, OursError } from '@ours.network/sdk';
 import {
   loadConfig,
   configPath,
@@ -368,7 +379,7 @@ async function cmdStart(): Promise<void> {
   if (progressShown && interactive) process.stderr.write('\n');
 
   if (result.ok) {
-    out(`ours-mcp is up on http://localhost:${PORT}/mcp`);
+    out(`ours-mcp is up: API on http://localhost:${PORT} (MCP is the "ours-mcp proxy" connector, not this port)`);
     out(`  broker: ${BROKER_URL}`);
     out(`  state:  ${STATE_DIR}`);
     out(`  logs:   ${LOG_PATH}`);
@@ -441,7 +452,7 @@ async function cmdStatus(): Promise<void> {
     if (await portOpen(PORT)) {
       const info = await fetchDaemonInfo();
       out('ours-mcp: running (no pidfile — likely a stale process or external launcher)');
-      out(`  url:    http://localhost:${PORT}/mcp (reachable)`);
+      out(`  api:    http://localhost:${PORT} (reachable)`);
       reportVersions(info);
       return;
     }
@@ -454,7 +465,7 @@ async function cmdStatus(): Promise<void> {
   const info = up ? await fetchDaemonInfo() : null;
   out('ours-mcp: running');
   out(`  pid:    ${pid}`);
-  out(`  url:    http://localhost:${PORT}/mcp ${up ? '(reachable)' : '(port not answering!)'}`);
+  out(`  api:    http://localhost:${PORT} ${up ? '(reachable)' : '(port not answering!)'}`);
   out(`  broker: ${BROKER_URL}`);
   out(`  state:  ${STATE_DIR}`);
   out(`  logs:   ${LOG_PATH}`);
@@ -801,34 +812,80 @@ async function cmdCreateRoot(argv: string[]): Promise<void> {
     err(`create-root: the daemon is not running on port ${PORT} — start it with \`ours-mcp start\`.`);
     process.exit(1);
   }
-  const transport = new HttpClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), {
-    requestInit: { headers: apiHeaders() },
+  // ⚠ THIS WAS THE LAST /mcp CALLER IN THE PRODUCT, and it is the one the
+  // switch would have broken loudest. It opened an MCP session to the daemon's
+  // /mcp and called the create_root_identity TOOL — which is fine while the
+  // daemon hosts an MCP server, and fatal the moment it stops. The v3 installer
+  // runs `ours-mcp create-root` in its identity phase on every fresh install and
+  // the stable installer body calls it too, so landing the switch without this
+  // would have broken new installs at the identity step, on the stable channel.
+  // Found by Developer-1 reading the branch; a second one would have been found
+  // by a user.
+  //
+  // It is now the same mechanical change as the other thirty: one typed API call
+  // over /api/v1, no MCP anywhere. The CLI is a client of the daemon API exactly
+  // like the MCP server and the SDK — which is the property this whole change
+  // exists to establish, and a CLI that reached the engine through an MCP tool
+  // was the last exception to it.
+  //
+  // The COMMAND ITSELF is deliberately kept. The owner's "ours-mcp loses
+  // create-root as a CLI command" ruling is DEFERRED, not cancelled: it is
+  // blocked on the stable installer call site, a core test file and a tool
+  // description that cites it. Removing the command here would break every
+  // script that has it while buying nothing this change needs.
+  const client = new OursClient({
+    url: `http://127.0.0.1:${PORT}`,
+    apiToken: resolveApiToken(CONFIG, { generate: false })?.token,
+    leaseToken: LEASE_TOKEN,
+    clientPid: CLIENT_PID,
   });
-  const client = new Client({ name: 'ours-mcp-cli', version: CLI_VERSION });
   try {
-    await client.connect(transport);
-    // skip_if_root_exists keeps re-runs idempotent: if a root already exists the tool
-    // fails with "a root identity already exists" (mapped to a quiet exit-0 no-op below)
-    // rather than adopting `name` as a role (the interactive-tool behaviour).
-    const r = await client.callTool({ name: 'create_root_identity', arguments: { name, skip_if_root_exists: true } });
-    const text = (Array.isArray(r.content) ? (r.content as Array<{ text?: unknown }>) : [])
-      .map((c) => (typeof c.text === 'string' ? c.text : ''))
-      .join(' ')
-      .split(/\n\nAsk the user\b/)[0] // the monitor hint is agent-directed; meaningless on a CLI
-      .replace(/^create_root_identity failed: /, '')
-      .trim();
-    if (r.isError) {
-      if (/a root identity already exists/i.test(text)) {
-        out(`create-root: ${text.split('—')[0].trim()} — nothing to do.`);
-        return;
-      }
-      err(`create-root failed: ${text}`);
+    // skip_if_root_exists keeps re-runs idempotent: if a root already exists the
+    // operation refuses with "a root identity already exists" (mapped to a quiet
+    // exit-0 no-op below) rather than adopting `name` as a role (the interactive
+    // behaviour).
+    const r = await client.createRootIdentity({
+      name,
+      bio: '',
+      exposeLocal: false,
+      localAutoAccept: true,
+      skipIfRootExists: true,
+    });
+    // The TOOL used to render this prose and the CLI scraped it back out of the
+    // MCP content, stripping the agent-directed monitor hint with a regex. Now the
+    // CLI renders it from the same typed fields the tool renders from, and the
+    // hint is simply never built — one fewer thing to strip, and no prose parsing.
+    //
+    // The adoption counts are NOT decoration: on a host that already had loose
+    // identities, create-root pulls them under the new root, and the installer's
+    // output is where an operator finds out that happened.
+    const adoption = r.adopted.length > 0
+      ? ` Adopted ${r.adopted.length} existing identit${r.adopted.length === 1 ? 'y' : 'ies'} as role(s): ${r.adopted.join(', ')}.`
+      : '';
+    const failures = r.failed.length > 0
+      ? ` FAILED to adopt: ${r.failed.join(', ')} (see daemon log).`
+      : '';
+    // hierarchy === 'role' cannot reach here: skipIfRootExists makes an existing
+    // root a refusal, handled in the catch. Asserted rather than assumed, because
+    // silently printing "root created" for a role would be a lie in an installer.
+    if (r.hierarchy !== 'root') {
+      err(`create-root: expected a root, got ${r.hierarchy} under "${r.underRoot ?? '?'}" — refusing to report success.`);
       process.exit(1);
     }
-    out(text);
-  } finally {
-    try { await transport.terminateSession(); } catch { /* ignore */ }
-    try { await client.close(); } catch { /* ignore */ }
+    out(`Root identity "${r.info.name}" (${r.info.cid}) created — this host's root.${adoption}${failures}`);
+  } catch (e) {
+    // An OursError's .message IS the tool text, byte for byte (ours-sdk's
+    // api-error-parity gate holds it to the baseline), so the same regex that
+    // recognised the idempotent case over MCP still recognises it here.
+    const text = e instanceof OursError
+      ? e.message.split(/\n\nAsk the user\b/)[0].replace(/^create_root_identity failed: /, '').trim()
+      : String(e instanceof Error ? e.message : e);
+    if (e instanceof OursError && /a root identity already exists/i.test(text)) {
+      out(`create-root: ${text.split('—')[0].trim()} — nothing to do.`);
+      return;
+    }
+    err(`create-root failed: ${text}`);
+    process.exit(1);
   }
 }
 
