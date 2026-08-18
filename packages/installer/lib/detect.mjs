@@ -1,19 +1,17 @@
 // ours-install v3 — which daemons are already on this machine, and which one this
 // run is for.
 //
-// OWNER RULING (C1, 2026-08-17), and the whole shape of this file follows from it:
-// never ask the user to TYPE a state directory or a port — that is what spec §2
-// forbids and it stands — but when several daemons are DETECTED, show them and let
-// the user pick. Selection from what was found is not prompting for a path.
+// Never ask for a state directory or a port to be TYPED (spec §2). When several
+// daemons are DETECTED, show them and let one be picked: selecting from what was
+// found is not prompting for a path.
 //
 // Pure, like target.mjs and plan.mjs: the caller injects the directory listing and
 // the file reads, so the whole decision is testable without a filesystem.
 //
-// DETECTION, NOT A REGISTRY. Coordinator ruling: build this from what is actually
-// on disk rather than from a persisted ~/.ours/installer-profiles.json. A stored
-// list is a second source of truth that goes stale against the daemons that really
-// exist, and staleness in exactly that file is how an installer ends up
-// confidently offering a daemon that is gone.
+// DETECTION, NOT A REGISTRY. This is built from what is on disk rather than from a
+// persisted list: a stored list is a second source of truth that goes stale against
+// the daemons that really exist, which is how an installer ends up confidently
+// offering a daemon that is gone.
 
 import { basename, join, resolve } from 'node:path';
 
@@ -93,8 +91,7 @@ export function detectDaemons({ candidates = [], exists, readJson }) {
 /**
  * A state directory for a daemon this run would CREATE, derived and never typed.
  *
- * Spec §2 forbids asking for a path, and the C1 ruling did not change that — it
- * added "pick from what was found". So "create a new one" has to derive somewhere
+ * Spec §2 forbids asking for a path, so "create a new one" has to derive somewhere
  * to put it: `~/.ours` when free, else the first free `~/.ours-2`, `~/.ours-3`…
  * An operator who wants a specific path still has `--state-dir`, which bypasses
  * this screen entirely.
@@ -113,8 +110,8 @@ export function deriveNewStateDir(home, taken = [], { limit = 64 } = {}) {
 export const SELECT_CREATE = '__create__';
 
 // The nightly flow kept a registry of daemon profiles here. v3 does not read it —
-// detection replaced it (coordinator ruling) — so anyone who used that flow has a
-// file describing daemons that nothing consults any more.
+// detection replaced it — so anyone who used that flow has a file describing
+// daemons that nothing consults any more.
 //
 // It is NOT deleted. Quietly removing a file that describes someone's daemons is
 // not an installer's business, and the file is harmless. But leaving it looking

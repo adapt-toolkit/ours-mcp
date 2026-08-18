@@ -100,7 +100,7 @@ function pairFor(plan, target) {
 }
 
 /**
- * Which daemon is this run for? (C1, owner ruling 2026-08-17.)
+ * Which daemon is this run for?
  *
  * Never asks for a PATH — spec §2 stands — but when several daemons are DETECTED
  * it shows them and lets the operator pick, because choosing from what was found
@@ -209,8 +209,8 @@ export async function runDaemonPhase(args, effects) {
 
   // Asked ONCE, and only when this run is creating the daemon — an existing
   // daemon's broker is its own record, and re-asking would invite an operator to
-  // change it from a screen that is not about changing it. Owner ruling: the
-  // broker question stays in v3. It is orthogonal to --state-dir/--port, so it
+  // change it from a screen that is not about changing it. The broker question
+  // stays in v3: it is orthogonal to --state-dir/--port, so it
   // does not violate spec §2's "nothing about a state directory or a port
   // appears in any prompt".
   if (creating) args.brokerUrl = await askBroker(args, effects);
@@ -240,8 +240,8 @@ export async function runDaemonPhase(args, effects) {
   steps.push({ id: 'cli', changed: true, packageRefresh: true });
 
   // The config file — merged, never rewritten, and untouched when it already
-  // matches. No provenance marker is written: the owner ruled that --purge works
-  // on any state directory, so a `createdBy` key would have had no consumer, and
+  // matches. No provenance marker is written: --purge works on any state
+  // directory, so a `createdBy` key would have no consumer, and
   // an unread key in a user's config file is future confusion for nothing.
   const configPath = join(dir, 'config.json');
   const merged = planDaemonConfig(
@@ -367,7 +367,7 @@ function rollBack(effects, journal, args, why, { packagesInstalled = true, repla
  * The boot service: §4 step 4, including the legacy-unit case.
  *
  * A legacy ours-mcp unit is adopted SILENTLY, with one informational line naming
- * the file — the owner's decision. `--force` is passed ONLY here, only for a unit
+ * the file. `--force` is passed ONLY here, only for a unit
  * positively identified as ours-mcp's, and never for one we cannot identify.
  */
 export async function runServicePhase(args, effects, dir, port) {
@@ -621,7 +621,7 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
 }
 
 /**
- * The broker question (v2's Step 0a, kept by the owner's ruling).
+ * The broker question (v2's Step 0a, deliberately kept).
  *
  * Consent-first, with the undo built in: a mistaken custom address is one
  * keystroke back to the standard broker, because the alternative is an operator
@@ -697,7 +697,7 @@ export function runPreflight(effects) {
 }
 
 /**
- * The human identity: `ours-mcp create-root`, kept by the owner's ruling.
+ * The human identity: `ours-mcp create-root`.
  *
  * It needs `ours-mcp` on PATH and a reachable daemon, so under v3 it lands here
  * — after the component phase installed the MCP server, not back in the daemon
@@ -892,7 +892,6 @@ export async function runFleetPhase(args, effects, { target, isDefaultStateDir }
   // Passing it is harmless if extras.mjs is right and load-bearing if
   // nightly-install.mjs is. When the cheap action is safe under both readings and
   // the expensive one is only safe under one, take the cheap one. (Coordinator
-  // ruling, 2026-08-17.)
   //
   // Passed for EVERY state directory, not only a non-default one, exactly as the
   // nightly flow does: `init` is a one-time host setup and the pair is what names

@@ -7,8 +7,7 @@
 //
 // The three components are the MCP server, the Telegram connector and cowork.
 // None of them IS the daemon; all three attach to one. The messenger is out of
-// scope by the owner's instruction, and ours-fleet sits on top and is not
-// installed here.
+// scope here, and ours-fleet sits on top and is not installed here.
 
 import { join, resolve } from 'node:path';
 import { pkgSpec, resolveChannel } from './logic.mjs';
@@ -45,7 +44,7 @@ export const COMPONENTS = [
  * over. Every install path for these three now goes through here.
  *
  * All three publish a real `nightly` dist-tag (verified against the registry,
- * 2026-08-17), so none of these pins can 404. `pkgSpec` falls back to `latest`
+ * so none of these pins can 404. `pkgSpec` falls back to `latest`
  * for anything unmapped rather than inventing a tag, so an unknown component
  * degrades to today's behaviour instead of failing.
  *
@@ -88,10 +87,10 @@ export const COWORK_DAEMON_FLOOR = '0.4.1-nightly.20260816.4aaf940';
  * daemon side, and anything the installer clears here is gone. The installer's
  * entire business with the connector is three keys in one config file.
  *
- * This also keeps the door open for the route migration the owner is considering
- * — moving each route's packet into the shared daemon. That migration has to read
- * this registry to know which daemon identity corresponds to which route; an
- * installer that had trampled it would have destroyed the mapping.
+ * It also keeps a future route migration possible — moving each route's packet
+ * into the shared daemon has to read this registry to know which daemon identity
+ * corresponds to which route, and an installer that trampled it would have
+ * destroyed the mapping.
  */
 export const TG_STATE_DIR_NAME = '.ours-telegram';
 export const TG_REGISTRY_FILES = ['bots.json'];
