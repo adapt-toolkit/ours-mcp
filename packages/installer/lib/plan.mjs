@@ -94,10 +94,9 @@ export function classifyUnit(text) {
  *                                                  informational line naming it
  *   { action: 'refuse', exitCode: 2, … }         — unknown unit, or unusable state dir
  *
- * Adoption of a legacy unit is SILENT by the owner's decision: no prompt, no
- * question, so an upgrading user has no manual step. The one line of output
- * exists so the replacement is not literally invisible; it does not block and it
- * is not a warning.
+ * Adoption of a legacy unit is SILENT: no prompt, no question, so an upgrading
+ * user has no manual step. The one line of output exists so the replacement is not
+ * literally invisible; it does not block and it is not a warning.
  *
  * BECAUSE THERE IS NO PROMPT, `classifyUnit`'s `legacy` match is now the ENTIRE
  * safety boundary between a stranger's file and a silent rewrite. It must stay

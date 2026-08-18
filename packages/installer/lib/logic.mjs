@@ -26,7 +26,7 @@ export function canonHarnesses(raw) {
   return { names, unknown };
 }
 
-// ── Release CHANNEL / npm dist-tag selection (owner 2026-07-17) ─────────────────
+// ── Release CHANNEL / npm dist-tag selection ───────────────────────────────────
 // The installer normally installs everything at @latest (stable). Setting
 // OURS_CHANNEL=nightly (or OURS_INSTALL_CHANNEL) makes it install each package's
 // PRERELEASE dist-tag instead — for the packages that publish one.
@@ -37,8 +37,8 @@ export function canonHarnesses(raw) {
 //     from this repo by .github/workflows/scripts/bump-versions.sh)
 //   · fleet                                          → `nightly` (its own repo,
 //     adapt-toolkit/ours-fleet, publishes a nightly dist-tag of its own)
-//   · cowork (rooms)                                 → `nightly` (owner decision
-//     2026-08-16: cowork aligns with every other service rather than keeping its
+//   · cowork (rooms)                                 → `nightly` (cowork aligns
+//     with every other service rather than keeping its
 //     historical `next` tag)
 //
 // WHY FLEET FOLLOWS THE CHANNEL NOW. It used to be pinned to @latest with the note
@@ -49,7 +49,7 @@ export function canonHarnesses(raw) {
 // channel exists to prevent.
 //
 // WHY COWORK STILL NEEDS ITS OWN ENTRY. It historically published its prerelease
-// line as `next`; the owner's decision on 2026-08-16 is that it aligns with every
+// line as `next`; the decision is that it aligns with every
 // other service and publishes `nightly` instead. The entry stays because the map,
 // not a hardcoded string, is what makes such a change one line — and because an
 // UNMAPPED package deliberately falls back to `latest` rather than a guessed tag.
@@ -60,7 +60,7 @@ export function canonHarnesses(raw) {
 // build that predates it — the same architecture-boundary mismatch this whole
 // mechanism exists to prevent, pointed at Rooms instead of Telegram.
 //
-// SEQUENCING — load-bearing, and not yet satisfied. As of 2026-08-16 cowork
+// SEQUENCING — load-bearing, and not yet satisfied. cowork
 // publishes NO `nightly` dist-tag at all (its tags are latest=0.4.0 and
 // next=0.3.7-nightly.20260815.80ea770). `npm i -g @ours.network/cowork@nightly`
 // therefore 404s today, and a 404 fails the WHOLE install. So the nightly
@@ -81,7 +81,7 @@ const PKG_CHANNEL_TAGS = {
   codex: { nightly: 'nightly' },
   hermes: { nightly: 'nightly' },
   fleet: { nightly: 'nightly' },
-  cowork: { nightly: 'nightly' }, // aligned with every other service (owner, 2026-08-16)
+  cowork: { nightly: 'nightly' }, // aligned with every other service
 };
 
 // Normalize a raw channel selection to 'latest' | 'nightly'. Anything unrecognized
@@ -644,7 +644,7 @@ export function detectPlatform({ platform, release = '', env = {} } = {}) {
 //               tell the user plainly + how to fix, and ALWAYS still offer a manual path
 //   'unsafe'  — on PATH but the probe failed/looked wrong → don't auto-drive; offer manual path
 //   'absent'  — genuinely not installed → this harness is skipped (with a note)
-// The golden rule (owner edit #3): 'alias'/'unsafe'/'absent' NEVER dead-end — the caller always
+// The golden rule: 'alias'/'unsafe'/'absent' NEVER dead-end — the caller always
 // prints a manual-install path so the component still gets installed.
 export function classifyHarnessProbe({ onPath, versionOk, timedOut, shellType = '' } = {}) {
   if (versionOk) return { status: 'ok', detail: 'real program' };

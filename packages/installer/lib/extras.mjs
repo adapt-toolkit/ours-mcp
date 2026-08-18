@@ -1,8 +1,7 @@
 // ours-install v3 — the four retained extras, re-pointed at the v3 arrangement.
 //
-// Owner ruling 2026-08-17: the v3 installer KEEPS harness plugins, ours-fleet,
-// voice setup and the copy-paste hand-off prompt. Spec v3's silence about them
-// was an oversight, not a decision.
+// The v3 installer keeps harness plugins, ours-fleet, voice setup and the
+// copy-paste hand-off prompt; spec v3's silence about them was an oversight.
 //
 // They are not four more screens carried across, because v2 and v3 disagree
 // about which package IS the daemon. In v2 @ours.network/mcp is the daemon and
@@ -52,7 +51,7 @@ export const HARNESSES = [
  *
  * So §5's guarantee is ALREADY unmet today for every non-default state
  * directory, silently: the harness attaches to ~/.ours while the operator was
- * told the run targeted somewhere else. Owner ruling Q1 settles the shape:
+ * told the run targeted somewhere else. The shape is:
  *
  *   default state directory   today's behaviour, byte for byte.
  *   Hermes, non-default       real: the pair is handed to ours-hermes-install's
@@ -270,7 +269,7 @@ export function planFleet({ stateDir, isDefaultStateDir, wanted = true, channel 
 // -----------------------------------------------------------------------------
 
 /**
- * WHY THE INSTALLER OWNS THE RESTART NOW (owner ruling Q2).
+ * WHY THE INSTALLER OWNS THE RESTART.
  *
  * cmdVoiceSetup computes `managed = runningPid() !== null` from ours-mcp's OWN
  * pid record. A v3 daemon is started by `ours daemon start`, which writes
@@ -283,8 +282,8 @@ export function planFleet({ stateDir, isDefaultStateDir, wanted = true, channel 
  * CLI-started daemon, which is right. But v2's entire restart protocol
  * (restartHandled, the exit-2 branch, "voice setup performed the required
  * restart") can only fire for a `managed` daemon, so carrying it across would
- * ship a branch that can never be taken. The beat it owned now has no owner, and
- * the installer is the only process that knows the daemon is CLI-managed.
+ * ship a branch that can never be taken. Nothing else owns that beat, and the
+ * installer is the only process that knows the daemon is CLI-managed.
  *
  * One phase, AFTER the component phase — voice-setup is an `ours-mcp`
  * subcommand and v3 installs @ours.network/mcp as a COMPONENT, so it is not on
@@ -337,8 +336,8 @@ export function planVoice({
     // TOUCHES THIS NEXT — the reason the installer owns this beat at all may have
     // just evaporated: cmdVoiceSetup computes `managed = runningPid() !== null`
     // from ours-mcp's OWN pid record, and an ours-mcp daemon HAS one. Under the
-    // SDK-CLI daemon it never did, which is why the restart had no owner and the
-    // installer took it. If voice-setup now classifies the daemon as managed it
+    // SDK-CLI daemon it never did, which is why the installer took the restart.
+    // If voice-setup now classifies the daemon as managed it
     // will run its own restart protocol, and this becomes a second restart rather
     // than the only one. Not changed here: that is a behaviour question for
     // packages/core, not a rename.
