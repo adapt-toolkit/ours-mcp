@@ -130,18 +130,20 @@ export function planServiceInstall({ stateDir, home, readText, platform = 'linux
   // A real launchd adapter belongs in the SDK CLI, not here. Nothing in this
   // package can install a launchd agent, and pretending otherwise by writing a
   // plist ourselves would put a second service implementation in a second repo.
-  // THE macOS SKIP IS GONE, AND THAT IS A CONSEQUENCE OF THE DAEMON CHANGE.
-  //
-  // It existed because `ours daemon install-service` refuses on any non-linux
-  // platform — createLinuxUserSystemdAdapter() throws on its first line, and the
-  // whole @ours.network/cli package contains no launchd support. That was true and
-  // is no longer the relevant question: the unit is now installed by ours-mcp's
-  // own install-service, which handles systemd AND launchd
-  // (packages/core/src/cli.ts writes ~/Library/LaunchAgents and runs launchctl
-  // bootstrap). So macOS gets a real boot service rather than a named gap.
-  //
-  // A gap list that warns about something already fixed is as misleading as one
-  // that hides something broken, which is why the warning goes with the skip.
+  // `ours daemon install-service` supports Linux/systemd only: its adapter throws
+  // for any other platform, so calling it would fail the run rather than degrade.
+  // Skip it and say so; the daemon itself is unaffected.
+  if (platform && platform !== 'linux') {
+    return {
+      action: 'unsupported',
+      platform,
+      reason: 'no-service-manager',
+      message: platform === 'darwin'
+        ? 'installing a boot service is not available on macOS — the ours CLI can only manage a Linux user systemd service'
+        : `installing a boot service is not available on ${platform} — the ours CLI can only manage a Linux user systemd service`,
+      manual: ['ours', 'daemon', 'serve', '--config'],
+    };
+  }
   const derived = unitPathForStateDir(stateDir, home);
   if (!derived.ok) {
     return { action: 'refuse', exitCode: 2, reason: 'unusable-state-dir', message: derived.reason };
@@ -211,35 +213,12 @@ export function serviceInstallCommand({ stateDir, adoptLegacyUnit = false }) {
   // --json so the caller can read back whether the unit actually CHANGED. The
   // CLI owns that byte-comparison, and an installer that guessed at it would
   // report "nothing changed" on a run that rewrote a unit.
-  // ours-mcp's install-service, NOT the SDK CLI's, and the difference is not
-  // cosmetic. `ours daemon install-service` writes a unit whose ExecStart runs
-  // `ours daemon serve` — a daemon that does not mount /mcp — so the boot service
-  // would resurrect exactly the daemon the /mcp 404 came from. ours-mcp's writes
-  // ExecStart=<node> <ours-mcp> serve (packages/core/src/service-instance.ts:106),
-  // and it handles launchd as well as systemd.
-  //
-  // It takes no arguments: like `start`, it is selected by OURS_CONFIG /
-  // OURS_PORT / OURS_STATE_DIR, and it BAKES those resolved values into the unit.
-  // The caller passes the pair as an environment, which is why this returns a bare
-  // command and the orchestrator supplies daemonEnv.
-  //
-  // WHAT IS LOST, stated rather than discovered later. ours-mcp's install-service
-  // takes NO flags:
-  //
-  //   · no --json, so the caller cannot read back whether the unit actually
-  //     changed. `changed` is now assumed true, which is the safe direction for a
-  //     summary line but is an assumption where it used to be an answer.
-  //   · no --force, and no marker check either: it writes the unit file
-  //     unconditionally. The SDK CLI refused to overwrite a unit it had not
-  //     marked, and that refusal was the backstop behind classifyUnit. It is gone.
-  //     classifyUnit's `foreign` refusal is now the ONLY thing standing between a
-  //     stranger's unit file and an overwrite, so `adoptLegacyUnit` no longer
-  //     changes the COMMAND — it records that the caller already decided, and the
-  //     decision is enforced entirely by refusing to get here at all.
-  //
-  // That is a real reduction in defence in depth and it belongs in the PR, not in
-  // a comment nobody reads.
-  return ['ours-mcp', 'install-service'];
+  // --json so the caller can read back whether the unit actually CHANGED rather
+  // than assuming it did. --force is reachable only through the explicit argument
+  // above, and the CLI refuses to overwrite a unit it did not write.
+  const cmd = ['ours', 'daemon', 'install-service', '--yes', '--json', '--state-dir', dir, '--config', join(dir, 'config.json')];
+  if (adoptLegacyUnit) cmd.push('--force');
+  return cmd;
 }
 
 // -----------------------------------------------------------------------------

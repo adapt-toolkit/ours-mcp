@@ -119,15 +119,14 @@ test('planServiceInstall NEVER passes --force: no plan can reach it without an a
   assert.ok(!serviceInstallCommand({ stateDir: OURS }).includes('--force'), '--force is never a default');
 });
 
-test('the command carries NO flags — and --force is gone with the marker check it paired with', () => {
-  // ours-mcp's install-service takes no arguments: it is selected by OURS_CONFIG /
-  // OURS_PORT / OURS_STATE_DIR and bakes them into the unit. So adoptLegacyUnit no
-  // longer changes the command — and the SDK CLI's refusal to overwrite an
-  // unmarked unit, which used to sit behind classifyUnit, is gone with it.
-  // classifyUnit's `foreign` refusal is now the only thing between a stranger's
-  // unit and an overwrite.
-  assert.deepEqual(serviceInstallCommand({ stateDir: '/home/me/.ours' }), ['ours-mcp', 'install-service']);
-  assert.deepEqual(serviceInstallCommand({ stateDir: '/home/me/.ours', adoptLegacyUnit: true }), ['ours-mcp', 'install-service']);
+test('--force is reachable only through the explicit post-consent argument', () => {
+  // Back with the SDK CLI's install-service, and so is the marker check behind it:
+  // the CLI refuses to overwrite a unit it did not write, which restores the second
+  // opinion behind classifyUnit that the ours-mcp daemon period had to give up.
+  assert.ok(!serviceInstallCommand({ stateDir: '/home/me/.ours' }).includes('--force'));
+  assert.ok(serviceInstallCommand({ stateDir: '/home/me/.ours', adoptLegacyUnit: true }).includes('--force'));
+  assert.ok(serviceInstallCommand({ stateDir: '/home/me/.ours' }).includes('--json'),
+    '--json is back too: the CLI answers whether the unit CHANGED instead of us assuming');
 });
 
 test('a FOREIGN unit gets no confirmation prompt at all', () => {
@@ -166,13 +165,17 @@ test('planServiceInstall: a state dir with no usable name refuses instead of gue
   assert.equal(p.reason, 'unusable-state-dir');
 });
 
-test('serviceInstallCommand names no unit — ours-mcp derives it, as the CLI did', () => {
-  // The unit NAME is still not passed: ours-mcp derives it from its own resolved
-  // service name exactly as the SDK CLI derived it from --state-dir. One
-  // derivation, still in one place — just a different place.
+test('serviceInstallCommand selects the daemon and lets the CLI name the unit', () => {
   const cmd = serviceInstallCommand({ stateDir: '/home/me/.ours-work' });
-  assert.ok(!cmd.some((a) => a.endsWith('.service')), 'no unit name in the command');
-  assert.ok(!cmd.includes('--state-dir'), 'and no selection flags: the environment selects');
+  assert.ok(!cmd.some((a) => a.endsWith('.service')), 'the unit NAME is the CLI\'s derivation, not ours');
+  assert.ok(cmd.includes('--state-dir') && cmd.includes('/home/me/.ours-work'), 'we select the daemon');
+});
+
+test('a non-linux platform yields an UNSUPPORTED service plan, with what to do instead', () => {
+  const p = planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null, platform: 'darwin' });
+  assert.equal(p.action, 'unsupported');
+  assert.match(p.message, /not available on macOS/);
+  assert.deepEqual(p.manual, ['ours', 'daemon', 'serve', '--config'], 'a gap, not a dead end');
 });
 
 test('planDaemonConfig merges and preserves every unrelated key', () => {

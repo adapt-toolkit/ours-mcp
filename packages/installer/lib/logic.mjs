@@ -600,7 +600,10 @@ export function parseVersion(text) {
 export function parseStatus(text) {
   const s = String(text || '');
   const bm = s.match(/^\s*broker:\s*(\S+)/m);
-  const pm = s.match(/url:\s*https?:\/\/[^:\s/]+:(\d+)/i);
+  // `api:` is the current line and `url:` the historical one. Both are matched
+  // because a newly installed CLI can be asked to report on an older running
+  // daemon, and a parser that knows only today's wording reads that as "no port".
+  const pm = s.match(/(?:api|url):\s*https?:\/\/[^:\s/]+:(\d+)/i);
   return {
     broker: bm ? bm[1] : null,
     port: pm ? Number.parseInt(pm[1], 10) : null,
