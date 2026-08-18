@@ -219,7 +219,45 @@ const AUTORESTORE_OPT_OUT = ['1', 'true', 'yes', 'on'].includes(
 
 export async function runProxy(opts: ProxyOptions): Promise<void> {
   const url = new URL(opts.url);
-  const log = (...a: unknown[]) => process.stderr.write(`[ours-proxy] ${a.join(' ')}\n`);
+
+  // DIAGNOSTICS MUST NOT BECOME THE FAILURE. Every line below goes to stderr,
+  // and stderr is a pipe owned by the client. When the client dies that pipe
+  // dies with it, and a write to it fails — asynchronously, as an 'error' event
+  // on the stream, which Node turns into an uncaughtException.
+  //
+  // That used to close a loop: the write fails → uncaughtException → the handler
+  // catches it and calls log() to announce "proxy stays up" → that write fails →
+  // uncaughtException → … A/B'd on ours-mcp 0.16.0 across four variants that
+  // differed only in where stdout/stderr pointed: with stderr on a file the
+  // process sat at 55 jiffies over 111s; with stderr on a dead pipe it spun a
+  // full core. stdout made no difference either way. The handler written to
+  // prevent a silent death was what burned the CPU.
+  //
+  // So: one failed write disables logging permanently, and — since a proxy that
+  // can neither talk to its client nor report why has no reason to live — it
+  // takes the process down with it. Never retried, never reported via the
+  // channel that just failed.
+  let logDead = false;
+  const log = (...a: unknown[]): void => {
+    if (logDead) return;
+    try {
+      process.stderr.write(`[ours-proxy] ${a.join(' ')}\n`);
+    } catch {
+      logDead = true;
+      void shutdown(0);
+    }
+  };
+  // The asynchronous half. An EPIPE on a socket-backed stderr never surfaces as
+  // a synchronous throw, so the try above cannot see it; without this listener
+  // it becomes an uncaughtException instead, which is exactly the loop.
+  const stdioBroken = (): void => {
+    logDead = true; // no log() here — the channel we would use is the broken one
+    void shutdown(0);
+  };
+  process.stderr.on('error', stdioBroken);
+  // stdout is the JSON-RPC channel. If it is gone we cannot answer anyone, which
+  // is the same verdict for a different reason.
+  process.stdout.on('error', stdioBroken);
 
   // ---- per-process session state (in memory only — see header) -------------
   // Liveness pid = the CLIENT (Claude Code) process, not this connector (which
@@ -506,6 +544,35 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   };
   down.onclose = () => void shutdown(0);
   down.onerror = (e) => log('downstream error:', String(e));
+
+  // THE EXIT PATH. `down.onclose` above looks like it covers "the client went
+  // away". It does not, and cannot: StdioServerTransport.start() registers only
+  // 'data' and 'error' on stdin — no 'end', no 'close' — and it invokes
+  // `onclose?.()` ONLY from its own close(), which we call solely inside
+  // shutdown(). So onclose can fire only after the very thing it was meant to
+  // trigger has already happened. Every real termination a client performs
+  // (clean exit, being killed, its stdio closing) reaches this process as stdin
+  // EOF and NOTHING ELSE, and until now nothing here listened for it: the proxy
+  // outlived every session it served, holding ~134 MB and — once the daemon
+  // reaped its session for a dead client pid — spinning a core forever.
+  //
+  // cli.ts's own comment on the `proxy` case says "Runs until stdin closes".
+  // This is what makes that true. We listen on stdin ourselves rather than
+  // teaching the SDK transport to, because the transport is not ours and the
+  // guarantee is: when the thing that spawned us stops talking, we stop.
+  //
+  // SIGHUP is deliberately not the answer here. It is delivered only to the
+  // foreground process group of a controlling terminal, and a harness that
+  // spawns an MCP stdio server over pipes has no tty at all — so a hangup has
+  // no addressee and the escape hatch fails closed exactly where it is needed.
+  const clientGone = (why: string): void => {
+    log(`stdin ${why} — the client is gone; shutting down`);
+    void shutdown(0);
+  };
+  // 'end' is the EOF itself; 'close' covers a destroyed handle that never got to
+  // emit 'end'. shutdown() is idempotent, so hearing both is harmless.
+  process.stdin.once('end', () => clientGone('reached EOF'));
+  process.stdin.once('close', () => clientGone('closed'));
 
   // Inject a synthetic, swallowed choose_identity to re-bind the disk-seeded
   // identity on a fresh boot. PLAIN bind (never force): if a genuinely live other
@@ -814,6 +881,23 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     await up!.send(msg as unknown as JSONRPCMessage);
   }
 
+  // Is the process we exist to serve still there? The daemon asks exactly this
+  // question about the same pid (we hand it over as x-ours-client-pid) and reaps
+  // the session when the answer is no — so a proxy that reconnects without asking
+  // it is reconnecting into a reaper that will refuse it for the same reason,
+  // forever. Signal 0 checks existence without delivering anything.
+  //
+  // clientPid falls back to our own pid when the launcher gave us nothing and our
+  // ppid is unusable; in that case this is always true and the check correctly
+  // does nothing rather than guessing.
+  const clientAlive = (): boolean => {
+    if (clientPid === process.pid) return true; // unknowable — never act on it
+    try { process.kill(clientPid, 0); return true; } catch (e) {
+      // EPERM means it exists and is not ours to signal. Only ESRCH means gone.
+      return (e as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+  };
+
   // Re-establish a usable upstream session after a genuine drop, transparently
   // to Claude: replay initialize (so a new daemon session exists), send
   // initialized (so the daemon's notification SSE reopens), then re-bind the
@@ -824,6 +908,18 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     let delay = 500;
     for (;;) {
       if (shuttingDown) { reconnecting = false; return; }
+      // THE CHURN GUARD. Observed on 0.16.0: the daemon reaps the session because
+      // this client pid is dead, our standalone SSE GET then 400s, the SDK burns
+      // its retries, escalation lands here, we open a NEW session — and the reaper
+      // kills that one for the identical reason. An unbounded loop that cannot
+      // converge, and every turn of it costs a LIVE daemon real work on behalf of
+      // a client that no longer exists. Nobody is waiting for this reconnect.
+      if (!clientAlive()) {
+        log(`client pid ${clientPid} is gone — abandoning reconnect instead of churning the daemon's sessions`);
+        reconnecting = false;
+        void shutdown(0);
+        return;
+      }
       try {
         await openUpstream();
         if (initializeMsg) {
@@ -874,10 +970,19 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   // exit 1, which downstream sees only as "the connector went away", with no reason
   // recorded anywhere. Log loudly and keep serving: a proxy still up with one
   // failed operation is strictly better than one that vanished without a trace.
+  // A write error on our own stdio is NOT a bug to survive — it is the client
+  // being gone, arriving by a different door than stdin EOF. Surviving it is what
+  // produced the spin, so it is the one exception to "stays up".
+  const isStdioWriteError = (e: unknown): boolean => {
+    const code = (e as NodeJS.ErrnoException | undefined)?.code;
+    return code === 'EPIPE' || code === 'ECONNRESET' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_STREAM_WRITE_AFTER_END';
+  };
   process.on('unhandledRejection', (reason) => {
+    if (isStdioWriteError(reason)) { logDead = true; void shutdown(0); return; }
     log('UNHANDLED REJECTION (proxy stays up):', reason instanceof Error ? (reason.stack ?? reason.message) : String(reason));
   });
   process.on('uncaughtException', (err) => {
+    if (isStdioWriteError(err)) { logDead = true; void shutdown(0); return; }
     log('UNCAUGHT EXCEPTION (proxy stays up):', err?.stack ?? String(err));
   });
 
