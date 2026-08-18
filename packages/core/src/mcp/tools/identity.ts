@@ -11,7 +11,7 @@
 // src/api/identity.ts — none of them is re-derived here.
 //
 // WHY ctxFor IS CALLED PER HANDLER, NOT ONCE AT REGISTRATION
-// `SessionContext`'s three members are getters, and `ctxFor()` is the per-session
+// `SessionContext`'s three members are getters, and `clientFor()` is the per-session
 // factory Developer-2's server owns. chooseIdentity and createIdentity REBIND the
 // session as part of the call, so they must read the lease table as it is now.
 // Nothing below captures ctx.leaseToken() or ctx.sessionId() into a local.
@@ -32,7 +32,7 @@ import {
   listIdentities,
   removeIdentity,
 } from '@ours.network/sdk';
-import type { IdentityTreeRow, SessionContext } from '@ours.network/sdk';
+import type { IdentityTreeRow, OursClient } from '@ours.network/sdk';
 
 import { runTool, textResult } from '../tool.js';
 
@@ -92,7 +92,7 @@ const tempTag = (row: IdentityTreeRow): string => {
   }
 };
 
-export function registerIdentityTools(server: McpServer, ctxFor: () => SessionContext): void {
+export function registerIdentityTools(server: McpServer, clientFor: () => OursClient): void {
   server.tool(
     'create_identity',
     'Create a new self-sovereign identity (an ADAPT node) with the given display ' +
@@ -110,8 +110,8 @@ export function registerIdentityTools(server: McpServer, ctxFor: () => SessionCo
     },
     async ({ name, bio, expose_local, local_auto_accept }) =>
       runTool(
-        ctxFor(),
-        (ctx) => createIdentity(ctx, { name, bio, exposeLocal: expose_local, localAutoAccept: local_auto_accept }),
+        clientFor(),
+        (c) => c.createIdentity({ name, bio, exposeLocal: expose_local, localAutoAccept: local_auto_accept }),
         (r) => {
           // `underRoot` rather than r.info.rootName: the baseline names the root from
           // the in-memory Identity (index.ts:3596), which cannot degrade to '' when
@@ -154,8 +154,8 @@ export function registerIdentityTools(server: McpServer, ctxFor: () => SessionCo
     },
     async ({ name, bio, expose_local, local_auto_accept }) =>
       runTool(
-        ctxFor(),
-        (ctx) => createTemporaryIdentity(ctx, { name, bio, exposeLocal: expose_local, localAutoAccept: local_auto_accept }),
+        clientFor(),
+        (c) => c.createTemporaryIdentity({ name, bio, exposeLocal: expose_local, localAutoAccept: local_auto_accept }),
         (r) => {
           // r.info.name, not the `name` argument: when it was omitted the SDK minted
           // the random `tmp-…` one and that is what must be reported back.
@@ -186,8 +186,8 @@ export function registerIdentityTools(server: McpServer, ctxFor: () => SessionCo
     { name: z.string().min(1).optional().describe('Temporary identity to close. Defaults to the one bound to this session.') },
     async ({ name }) =>
       runTool(
-        ctxFor(),
-        (ctx) => closeTemporaryIdentityOp(ctx, { name }),
+        clientFor(),
+        (c) => c.closeTemporaryIdentityOp({ name }),
         (r) =>
           // `result: null` is the idempotent no-op — a name that no longer exists.
           // The baseline answers it with a NON-error result (index.ts:3720), which is
@@ -216,9 +216,9 @@ export function registerIdentityTools(server: McpServer, ctxFor: () => SessionCo
     },
     async ({ name, bio, expose_local, local_auto_accept, skip_if_root_exists }) =>
       runTool(
-        ctxFor(),
-        (ctx) =>
-          createRootIdentity(ctx, {
+        clientFor(),
+        (c) =>
+          c.createRootIdentity({
             name,
             bio,
             exposeLocal: expose_local,
@@ -275,7 +275,7 @@ export function registerIdentityTools(server: McpServer, ctxFor: () => SessionCo
     },
     async ({ name, path, force, expose_local, local_auto_accept, overwrite }) =>
       runTool(
-        ctxFor(),
+        clientFor(),
         // The one operation in this slice that is not session-scoped: it writes a
         // file, so the SDK takes no SessionContext.
         () =>
@@ -305,8 +305,8 @@ export function registerIdentityTools(server: McpServer, ctxFor: () => SessionCo
     },
     async ({ name, force }) =>
       runTool(
-        ctxFor(),
-        (ctx) => chooseIdentity(ctx, { name, force }),
+        clientFor(),
+        (c) => c.chooseIdentity({ name, force }),
         (r) => {
           let msg = `Bound to identity "${r.name}" (${r.cid}).`;
           if (r.switchedFrom) {
@@ -329,8 +329,8 @@ export function registerIdentityTools(server: McpServer, ctxFor: () => SessionCo
     {},
     async () =>
       runTool(
-        ctxFor(),
-        (ctx) => listIdentities(ctx),
+        clientFor(),
+        (c) => c.listIdentities(),
         (rows) => {
           if (rows.length === 0) {
             return textResult('No identities yet. Create a root with create_root_identity (or a flat identity with create_identity).');
@@ -370,7 +370,7 @@ export function registerIdentityTools(server: McpServer, ctxFor: () => SessionCo
     // not widen your contract on my own.
     async () => {
       try {
-        const r = await currentIdentity(ctxFor());
+        const r = await clientFor().currentIdentity();
         // `described: false` means ::actor::describe_identity threw — the five
         // described fields are UNKNOWN, not empty — and the baseline degrades to the
         // bare line, dropping the hierarchy, temporary, bio and persona sentences.
@@ -404,8 +404,8 @@ export function registerIdentityTools(server: McpServer, ctxFor: () => SessionCo
     { name: z.string().min(1).describe('Name of the identity to delete.') },
     async ({ name }) =>
       runTool(
-        ctxFor(),
-        (ctx) => removeIdentity(ctx, { name }),
+        clientFor(),
+        (c) => c.removeIdentity({ name }),
         (r) =>
           // A temporary identity goes out through its lifecycle path (ownership check
           // + best-effort remove-me notices), so it reports the notice counts; a

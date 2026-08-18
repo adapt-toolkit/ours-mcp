@@ -18,8 +18,8 @@
 // a protocol error exactly as runTool does.
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-import { OursError, listIncomingMessages, requireBound } from '@ours.network/sdk';
-import type { SessionContext } from '@ours.network/sdk';
+import { OursError } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
 
 import { fmtMsg } from '../format.js';
 
@@ -35,20 +35,33 @@ import { fmtMsg } from '../format.js';
  */
 export const inboxResourceUri = (name: string) => `ours://inbox/${encodeURIComponent(name)}`;
 
-export function registerInboxResource(server: McpServer, ctxFor: () => SessionContext): void {
+export function registerInboxResource(server: McpServer, clientFor: () => OursClient): void {
   server.resource(
     'inbox',
     'ours://inbox',
     { description: 'Decrypted incoming messages for the bound identity — auto-notifies on new arrivals.' },
     async () => {
-      const ctx = ctxFor();
+      const client = clientFor();
       // The baseline collapses ALL FOUR binding failures into one fixed sentence
       // and the generic 'ours://inbox' uri (index.ts:4100-4101) — it never renders
       // the specific error text the tools do. So the OursError is caught and
       // discarded on purpose here; only whether it threw is load-bearing.
+      //
+      // THIS IS THE ONE PLACE THE HARD SWITCH COSTS A SECOND ROUND TRIP, and it is
+      // worth saying rather than hiding. In-process this was `requireBound(ctx).name`
+      // — a map lookup. Over the API the bound identity's NAME is not a local fact,
+      // so it takes a call, and `currentIdentity` is the call that answers it. The
+      // alternative was to render the URI from a name this process cached at bind
+      // time, which is exactly the kind of local shadow of daemon-owned state that
+      // this whole change exists to remove: a rebind elsewhere would make the
+      // resource announce a URI for an identity we no longer hold.
+      //
+      // It also lands on the right side of the failure: `currentIdentity` throws the
+      // same four catalogued binding errors `requireBound` did, so the collapse
+      // below is unchanged, not approximated.
       let boundName: string;
       try {
-        boundName = requireBound(ctx).name;
+        boundName = (await client.currentIdentity()).name;
       } catch (err) {
         if (err instanceof OursError) {
           return {
@@ -64,7 +77,7 @@ export function registerInboxResource(server: McpServer, ctxFor: () => SessionCo
       // OursError ('list_incoming_messages failed: …') where the baseline
       // propagated the raw throw. Both surface as a protocol error from a
       // resource, which has no isError channel to report them on.
-      const inbox = await listIncomingMessages(ctx);
+      const inbox = await client.listIncomingMessages();
       const text = inbox.length === 0
         ? 'Inbox is empty.'
         : `Inbox (${inbox.length}):\n${inbox.map((m) => fmtMsg(m)).join('\n')}`;

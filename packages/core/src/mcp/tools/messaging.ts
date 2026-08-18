@@ -32,12 +32,12 @@ import {
   sendFile,
   sendMessage,
 } from '@ours.network/sdk';
-import type { SessionContext } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
 
 import { fmtMsg } from '../format.js';
 import { runTool, textResult } from '../tool.js';
 
-export function registerMessagingTools(server: McpServer, ctxFor: () => SessionContext): void {
+export function registerMessagingTools(server: McpServer, clientFor: () => OursClient): void {
   server.tool(
     'send_message',
     'Send an end-to-end-encrypted message to a known contact (by name or container id). ' +
@@ -65,8 +65,8 @@ export function registerMessagingTools(server: McpServer, ctxFor: () => SessionC
     },
     async ({ contact, text, reply_to_wire_id, reply_to_sentence }) =>
       runTool(
-        ctxFor(),
-        (ctx) => sendMessage(ctx, { contact, text, reply_to_wire_id, reply_to_sentence }),
+        clientFor(),
+        (c) => c.sendMessage({ contact, text, reply_to_wire_id, reply_to_sentence }),
         (v) => {
           switch (v.kind) {
             case 'refused':
@@ -123,8 +123,8 @@ export function registerMessagingTools(server: McpServer, ctxFor: () => SessionC
     },
     async ({ contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }) =>
       runTool(
-        ctxFor(),
-        (ctx) => sendFile(ctx, { contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }),
+        clientFor(),
+        (c) => c.sendFile({ contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }),
         (v) => {
           // The three facts the SDK carries for exactly this prefix (index.ts:4685):
           // `bytes` is the length of what was actually sent, so it is right for both
@@ -176,8 +176,8 @@ export function registerMessagingTools(server: McpServer, ctxFor: () => SessionC
     {},
     async () =>
       runTool(
-        ctxFor(),
-        (ctx) => listIncomingMessages(ctx),
+        clientFor(),
+        (c) => c.listIncomingMessages(),
         (inbox) => {
           if (inbox.length === 0) return textResult('Inbox is empty.');
           const unread = inbox.filter((m) => m.status === 'unread').length;
@@ -204,8 +204,8 @@ export function registerMessagingTools(server: McpServer, ctxFor: () => SessionC
     {},
     async () =>
       runTool(
-        ctxFor(),
-        (ctx) => getMessages(ctx),
+        clientFor(),
+        (c) => c.getMessages(),
         // The payload crosses the boundary as an OBJECT and is stringified HERE —
         // index.ts:4848's line, kept in ours-mcp (ours-sdk api/types.ts:320-327).
         (payload) => textResult(JSON.stringify(payload, null, 2)),
@@ -221,8 +221,8 @@ export function registerMessagingTools(server: McpServer, ctxFor: () => SessionC
     { msg_ids: z.array(z.number().int()).min(1).describe('Message ids (from get_messages) to defer back to unread.') },
     async ({ msg_ids }) =>
       runTool(
-        ctxFor(),
-        (ctx) => deferMessages(ctx, { msg_ids }),
+        clientFor(),
+        (c) => c.deferMessages({ msg_ids }),
         // `deferred` is the packet's own Visualize() string, interpolated unparsed
         // by the baseline (index.ts:4871) — not coerced to a number here either.
         (r) => textResult(`Deferred ${r.deferred} message(s) back to unread.`),

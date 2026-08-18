@@ -50,18 +50,9 @@ import {
   type OursConfig,
   type ApiVisibility,
 } from './config';
-import { runProxy } from '@ours.network/sdk/connector';
+import { runConnector } from './connector.js';
 
-import { connectorTransports } from './mcp/transports';
-import { annotateResultFrame, canRead } from './mcp/format';
 
-// proxy.ts:104-106, verbatim. The connector moved to the SDK; this flag did not
-// move with it, and passing `annotateResultFrame` bare would silently fall back
-// to the default probe and lose the override — which is exactly what
-// test/file-save-stream.test.mjs:206 spawns `OURS_FILES_ALWAYS_PROMPT=1` to catch.
-const FILES_ALWAYS_PROMPT = ['1', 'true', 'yes', 'on'].includes(
-  (process.env.OURS_FILES_ALWAYS_PROMPT ?? '').trim().toLowerCase(),
-);
 import { sttStatus } from './transcribe';
 import { linuxProcHasExited } from './process-state';
 import {
@@ -140,6 +131,27 @@ const err = (...p: unknown[]) => process.stderr.write(`${p.join(' ')}\n`);
 declare const __OURS_VERSION__: string;
 const CLI_VERSION =
   typeof __OURS_VERSION__ !== 'undefined' ? __OURS_VERSION__ : '0.0.0-dev';
+
+// ----- the connector's session identity (proxy.ts:229-237, verbatim rules) ----
+//
+// THE PID IS THE CLIENT'S, NOT OURS. The harness tears this process down when it
+// goes idle, so our own liveness says nothing about whether the session is still
+// wanted; the daemon's lease reclaim keys on the CLIENT. The launcher passes it
+// as OURS_CLIENT_PID (its own ppid); fall back to our ppid for a direct launch.
+//
+// ⚠ REJECT pids <= 1. macOS reparents orphans to launchd, and `pidAlive(1)` is
+// always true — a lease held under pid 1 can never be reclaimed by anyone, ever.
+const validPid = (n: number) => Number.isInteger(n) && n > 1;
+const envClientPid = Number(process.env.OURS_CLIENT_PID);
+const CLIENT_PID = validPid(envClientPid) ? envClientPid
+  : validPid(process.ppid) ? process.ppid
+  : process.pid;
+
+// The lease this session holds. MUST be respawn-stable: an idle harness wake-up
+// spawns a fresh connector, and a token derived from anything per-process would
+// orphan the lease it left behind — which, with force binding staying, means the
+// next session has to force past a lease that is nobody's.
+const LEASE_TOKEN = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim() || `client:${CLIENT_PID}`;
 
 type DaemonInfo = { version?: string; compat?: string; protocol?: number };
 
@@ -1419,19 +1431,20 @@ async function main(): Promise<void> {
         err('(or enable auto-start: `ours-mcp setup` → autoStart, or OURS_AUTOSTART=1)');
         process.exit(1);
       }
-      await runProxy({
-        url: `http://127.0.0.1:${PORT}/mcp`,
+      // NAME KEPT ON PURPOSE. This is no longer a proxy — it is the stdio MCP
+      // server itself (./connector.js) — but `.mcp.json` and all three plugin
+      // manifests launch `dist/cli.js proxy`, and renaming the verb in the same
+      // change that rewrites what it does would fan this PR out across every
+      // manifest for no behavioural gain. A rename is its own change, later.
+      await runConnector({
+        // The ORIGIN only. There is no `/mcp` to point at any more: the daemon
+        // does not mount it, because serve.ts no longer injects an MCP server.
+        url: `http://127.0.0.1:${PORT}`,
         ensureDaemon: CONFIG.autoStart ? ensureDaemonRunning : undefined,
-        stateDir: STATE_DIR,
         apiToken: resolveApiToken(CONFIG, { generate: false })?.token,
-        // The SDK owns the connector; ours-mcp owns what MCP looks like. These
-        // two options are the entire boundary between them.
-        transports: connectorTransports,
-        // NOT `annotateGetFilesResult` directly: the SDK hands this hook the whole
-        // JSON-RPC frame, where proxy.ts unwrapped `.result` before calling the
-        // annotator. Passing the annotator straight in silently annotates nothing.
-        // See THE FRAME CONTRACT in ./mcp/format.ts.
-        annotateResult: (msg) => annotateResultFrame(msg, FILES_ALWAYS_PROMPT ? () => false : canRead),
+        leaseToken: LEASE_TOKEN,
+        clientPid: CLIENT_PID,
+        version: CLI_VERSION,
       });
       break;
     case 'install-service':

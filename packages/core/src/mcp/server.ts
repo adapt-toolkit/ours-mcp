@@ -30,7 +30,7 @@
 // table as it is NOW.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-import type { SessionContext } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
 
 import { registerInboxResource } from './resources/inbox.js';
 import { registerContactsTools } from './tools/contacts.js';
@@ -43,19 +43,19 @@ import { registerProfileTools } from './tools/profile.js';
  * Build the per-session MCP server. Handed to `startDaemon` as
  * `mcp.createServer`, and called once per MCP session.
  */
-export function createOursMcpServer(ctx: SessionContext, version: string): McpServer {
+export function createOursMcpServer(client: OursClient, version: string): McpServer {
   const server = new McpServer(
     { name: 'ours', version },
     { capabilities: { logging: {}, resources: {} } },
   );
 
-  const ctxFor = () => ctx;
+  const clientFor = () => client;
 
-  registerIdentityTools(server, ctxFor);
-  registerContactsTools(server, ctxFor);
-  registerProfileTools(server, ctxFor);
-  registerMessagingTools(server, ctxFor);
-  registerFilesTools(server, ctxFor);
+  registerIdentityTools(server, clientFor);
+  registerContactsTools(server, clientFor);
+  registerProfileTools(server, clientFor);
+  registerMessagingTools(server, clientFor);
+  registerFilesTools(server, clientFor);
 
   // The one registration that is not a tool: `ours://inbox` (was
   // index.ts:4094-4107). Both developers flagged it as belonging to no
@@ -63,7 +63,7 @@ export function createOursMcpServer(ctx: SessionContext, version: string): McpSe
   // directly. Left behind when index.ts was gutted it would have gone on reading
   // the OLD engine, a live seam in the one place that is not a tool. It is a
   // seventh registrar for exactly the same reason as the other six.
-  registerInboxResource(server, ctxFor);
+  registerInboxResource(server, clientFor);
 
   return server;
 }

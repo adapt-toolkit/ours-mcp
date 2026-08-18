@@ -25,14 +25,19 @@
 // That is the same duplicated-module-state failure ours-sdk hit at Task 6, one
 // level up, so the cut is all-at-once by construction.
 //
-// The stdio branch stays here rather than in the SDK: `startDaemon` is the HTTP
-// daemon, and a single stdio session is ours-mcp's own front door.
+// THE STDIO BRANCH NO LONGER LIVES HERE. It used to, on the reasoning that
+// `startDaemon` is the HTTP daemon and a single stdio session is ours-mcp's own
+// front door. Both halves of that are still true; what changed is that the front
+// door is now a SEPARATE PROCESS talking to this daemon over its HTTP API
+// (`ours-mcp proxy`, ./connector.ts), because there must be exactly one MCP
+// server in the system and it must be a client of the API like everything else.
+// See the refusal in main() for what a caller gets if they ask for the old one.
 import * as fs from 'node:fs';
 
 import { startupProgress } from '@ours.network/sdk/daemon';
 
 import { loadConfig } from './config';
-import { serve, serveStdio } from './serve.js';
+import { serve } from './serve.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -59,9 +64,27 @@ async function main(): Promise<void> {
     throw new Error('forced startup failure (OURS_TEST_STARTUP_FAIL)');
   }
 
+  // `OURS_TRANSPORT=stdio` USED TO RUN AN MCP SERVER FROM THIS ENTRY POINT, AND
+  // NOW CANNOT — deliberately, and it closes a gap rather than opening one.
+  //
+  // That path built an MCP server directly on the in-process engine, which is the
+  // one thing the single-API rule forbids. It was also documented here as having
+  // NO DAEMON LIFECYCLE: no notify hook, no GC timer with its contact-restore /
+  // capability-reconcile / e2e-recovery sweeps, and no signal handler to save
+  // identity state on the way out (adapt-toolkit/ours-sdk#18). It survived only
+  // because it was dev-only — `npm run dev:stdio` was its sole caller.
+  //
+  // The stdio MCP server is now `ours-mcp proxy` (./connector.ts): a SEPARATE
+  // PROCESS that talks to this daemon over the API, so it inherits the daemon's
+  // full lifecycle by not needing one of its own. Refusing here with a pointer is
+  // better than either silently starting an HTTP daemon the caller did not ask
+  // for, or keeping a second engine-touching MCP server alive for `npm run`.
   if (TRANSPORT === 'stdio') {
-    await serveStdio(VERSION);
-    return;
+    throw new Error(
+      'OURS_TRANSPORT=stdio is no longer served by the daemon entry point. The stdio MCP server is a ' +
+      'separate process that talks to the daemon over its HTTP API: start the daemon (`ours-mcp start`) ' +
+      'and run `ours-mcp proxy` for the stdio surface.',
+    );
   }
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
