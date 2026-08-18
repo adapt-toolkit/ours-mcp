@@ -10,6 +10,8 @@ import {
   planUninstall, NON_INTERACTIVE_ANSWERS, refusalSurvivesAssumeYes,
   stripManagedBlock, planPluginRemoval, YAML_BLOCK,
   inspectComponentConfig, unreadableComponentConfigs,
+  planHarnessSelection, selectHarnesses, HARNESS_ORDER,
+  parseUninstallEnv, uninstallEnvEngaged, UNINSTALL_ENV_VARS,
 } from '../lib/uninstall.mjs';
 
 const HOME = '/home/me';
@@ -174,7 +176,7 @@ test('global packages are removed only when this was the last daemon', () => {
 
 test('assume-yes never turns a component on, never moves one, never deletes state', () => {
   assert.deepEqual(NON_INTERACTIVE_ANSWERS, {
-    daemon: true, mcp: true, tg: false, cowork: false, repointExistingConnector: false, purge: false,
+    daemon: true, mcp: true, tg: false, cowork: false, repointExistingConnector: false, plugins: false, purge: false,
   });
 });
 
@@ -365,4 +367,147 @@ test('a component pointing here that was NOT confirmed refuses before packages a
   });
   assert.equal(p.action, 'refuse');
   assert.deepEqual(p.components.map((c) => c.key), ['cowork']);
+});
+
+// ------------------------ item 9.5 — choosing which harnesses to detach ------
+
+test('a named selection removes exactly those harnesses, and their packages follow them', () => {
+  const found = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: true });
+  const choice = planHarnessSelection(found, { selection: ['codex'] });
+  assert.equal(choice.mode, 'explicit');
+  assert.deepEqual(choice.chosen, ['codex']);
+
+  const narrowed = selectHarnesses(found, choice.chosen);
+  assert.deepEqual(narrowed.harnesses.map((h) => h.key), ['codex']);
+  assert.deepEqual(narrowed.packages, ['@ours.network/codex'],
+    'the kept harness keeps its launcher — removing it would break a plugin that is still registered');
+  assert.deepEqual(narrowed.manual, [], 'Claude Code was not named, so its removal is not announced');
+});
+
+test('a harness named for removal that is not installed is REPORTED, not silently dropped', () => {
+  // exists() false everywhere: no Hermes or Codex files on this machine.
+  const found = planPluginRemoval({ home: HOME, exists: () => false, lastDaemon: true });
+  const choice = planHarnessSelection(found, { selection: ['hermes', 'claude-code'] });
+  assert.deepEqual(choice.chosen, ['claude-code']);
+  assert.deepEqual(choice.ignored, ['hermes']);
+});
+
+test('unattended with no selection keeps every plugin, and says how to select one', () => {
+  const found = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: true });
+  const choice = planHarnessSelection(found, { selection: null, assumeYes: true });
+  assert.equal(choice.mode, 'keep');
+  assert.deepEqual(choice.chosen, [], 'a run nobody is watching does not decide this on its own');
+  assert.match(choice.hint, /OURS_UNINSTALL=/);
+});
+
+test('a terminal with no selection is ASKED, one question per harness, in a stable order', () => {
+  const found = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: true });
+  const choice = planHarnessSelection(found, { selection: null, assumeYes: false });
+  assert.equal(choice.mode, 'ask');
+  assert.equal(choice.chosen, null, 'nothing is chosen until the operator answers');
+  assert.deepEqual(choice.offered.map((h) => h.key), HARNESS_ORDER);
+});
+
+test('an explicit selection outranks the another-daemon keep, which was a guess on the operator’s behalf', () => {
+  const guessed = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: false });
+  assert.equal(guessed.action, 'keep', 'unasked, a second daemon keeps the plugins');
+
+  const answered = planPluginRemoval({ home: HOME, exists: () => true, lastDaemon: false, explicitSelection: true });
+  assert.equal(answered.action, 'remove');
+  assert.deepEqual(answered.harnesses.map((h) => h.key).sort(), ['codex', 'hermes'],
+    'the operator named them, so the guess does not get to answer over them');
+});
+
+// ---------- item 10.9 — the seven documented OURS_UNINSTALL_* variables ------
+
+test('all seven documented variables are accounted for, none quietly dropped', () => {
+  assert.deepEqual(UNINSTALL_ENV_VARS, [
+    'OURS_UNINSTALL', 'OURS_UNINSTALL_PROFILE', 'OURS_UNINSTALL_FORGET_PROFILE',
+    'OURS_UNINSTALL_DAEMON', 'OURS_UNINSTALL_DATA', 'OURS_UNINSTALL_TELEGRAM',
+    'OURS_UNINSTALL_ROOMS',
+  ]);
+  for (const name of UNINSTALL_ENV_VARS) {
+    assert.equal(uninstallEnvEngaged({ [name]: 'x' }), true, `${name} engages the contract`);
+  }
+  assert.equal(uninstallEnvEngaged({}), false);
+  assert.equal(uninstallEnvEngaged({ OURS_UNINSTALL: '' }), true,
+    'an empty OURS_UNINSTALL is a deliberate "no harnesses", not an unset variable');
+});
+
+test('with none of the seven set, nothing about the run changes', () => {
+  const c = parseUninstallEnv({ OURS_ASSUME_YES: '1', HOME: '/home/me' });
+  assert.equal(c.engaged, false);
+  assert.equal(c.daemon, true, 'ours-uninstall still removes the daemon it is pointed at');
+  assert.equal(c.harnesses, null, 'and still decides the harnesses the way it always did');
+  assert.equal(c.action, undefined);
+});
+
+test('OURS_UNINSTALL is parsed the way the nightly picker parsed it', () => {
+  assert.deepEqual(parseUninstallEnv({ OURS_UNINSTALL: 'hermes,codex' }).harnesses, ['hermes', 'codex']);
+  assert.deepEqual(parseUninstallEnv({ OURS_UNINSTALL: 'all' }).harnesses, ['claude-code', 'codex', 'hermes']);
+  assert.deepEqual(parseUninstallEnv({ OURS_UNINSTALL: '1 3' }).harnesses, ['claude-code', 'hermes']);
+  assert.deepEqual(parseUninstallEnv({ OURS_UNINSTALL: 'none' }).harnesses, []);
+});
+
+test('OURS_UNINSTALL alone does NOT remove the daemon — that needs OURS_UNINSTALL_DAEMON', () => {
+  // The escalation this closes: a script asking for one harness plugin used to
+  // reach v3, which read none of these, and tore down the daemon instead.
+  assert.equal(parseUninstallEnv({ OURS_UNINSTALL: 'hermes' }).daemon, false);
+  assert.equal(parseUninstallEnv({ OURS_UNINSTALL: 'hermes', OURS_UNINSTALL_DAEMON: 'yes' }).daemon, true);
+  assert.equal(parseUninstallEnv({ OURS_UNINSTALL_DAEMON: 'no' }).daemon, false);
+});
+
+test('OURS_UNINSTALL_DATA=yes is REFUSED by name, and told where to go instead', () => {
+  const c = parseUninstallEnv({ OURS_UNINSTALL_DATA: 'yes' });
+  assert.equal(c.action, 'refuse');
+  assert.equal(c.exitCode, 2);
+  assert.equal(c.reason, 'uninstall-env-unsupported');
+  assert.deepEqual(c.refusals.map((r) => r.variable), ['OURS_UNINSTALL_DATA']);
+  assert.match(c.message, /--purge/, 'names the replacement, not just the problem');
+  assert.match(c.message, /Nothing was removed/);
+});
+
+test('OURS_UNINSTALL_DATA=no is not a refusal — it asks for what already happens', () => {
+  assert.equal(parseUninstallEnv({ OURS_UNINSTALL_DATA: 'no' }).action, undefined);
+});
+
+test('the registry variables are refused, because there is no registry', () => {
+  const profile = parseUninstallEnv({ OURS_UNINSTALL_PROFILE: 'blue' });
+  assert.equal(profile.action, 'refuse');
+  assert.match(profile.message, /--state-dir/, 'the state directory is what selects a daemon now');
+
+  const forget = parseUninstallEnv({ OURS_UNINSTALL_FORGET_PROFILE: 'yes' });
+  assert.equal(forget.action, 'refuse');
+});
+
+test('a connector lifecycle of detach is honoured; uninstall and reassign are refused', () => {
+  const detach = parseUninstallEnv({ OURS_UNINSTALL_TELEGRAM: 'detach', OURS_UNINSTALL_ROOMS: 'detach' });
+  assert.equal(detach.action, undefined);
+  assert.deepEqual(detach.confirmedComponents, ['tg', 'cowork']);
+
+  const pkg = parseUninstallEnv({ OURS_UNINSTALL_TELEGRAM: 'uninstall' });
+  assert.equal(pkg.action, 'refuse');
+  assert.match(pkg.message, /npm rm -g @ours\.network\/tg-connector/, 'says how to get the effect it cannot give');
+
+  const reassign = parseUninstallEnv({ OURS_UNINSTALL_ROOMS: 'reassign:default' });
+  assert.equal(reassign.action, 'refuse');
+  assert.deepEqual(reassign.confirmedComponents, [], 'and it is not half-honoured as a detach');
+});
+
+test('a harness name that is not a harness is refused, not shrugged off', () => {
+  const c = parseUninstallEnv({ OURS_UNINSTALL: 'hermez' });
+  assert.equal(c.action, 'refuse');
+  assert.deepEqual(c.refusals.map((r) => r.value), ['hermez']);
+});
+
+test('every unsupported variable in one run is reported at once', () => {
+  const c = parseUninstallEnv({
+    OURS_UNINSTALL_DATA: 'yes',
+    OURS_UNINSTALL_PROFILE: 'blue',
+    OURS_UNINSTALL_FORGET_PROFILE: 'yes',
+    OURS_UNINSTALL_ROOMS: 'reassign:default',
+  });
+  assert.deepEqual(c.refusals.map((r) => r.variable), [
+    'OURS_UNINSTALL_DATA', 'OURS_UNINSTALL_PROFILE', 'OURS_UNINSTALL_FORGET_PROFILE', 'OURS_UNINSTALL_ROOMS',
+  ], 'one run, one list — not four re-runs to discover them one at a time');
 });

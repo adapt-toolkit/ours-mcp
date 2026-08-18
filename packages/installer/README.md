@@ -289,40 +289,48 @@ or over the same raw-URL pattern as `install.sh` (pointing at `uninstall.sh`):
 curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/uninstall.sh | bash
 ```
 
-It uses the **same toggle UI** to pick what to remove — per-harness plugins, the ours data
-directory (`~/.ours`), and the `ours-mcp` daemon. It removes **only** what the installers
-created, and guards the two destructive items — the data directory and the daemon — behind
-an explicit typed `yes`.
+It removes **only** what the installers created — the sentinel-delimited managed blocks, the
+`ours` skill directories, the boot service, and the global packages — and it asks per harness
+which plugins to detach. The one irreversible step, deleting the state directory, is behind
+`--purge` **and** typing the directory's full path.
 
-On Nightly, uninstall is profile-aware. Removing a harness removes only its one association and
-managed plugin artifacts. A daemon/profile cannot be forgotten or removed while any harness,
-Telegram, or Rooms still depends on it. A dependent connector can be explicitly detached (stop its
-service and remove only its daemon target), uninstalled, or reassigned to a different retained
-profile; connector secrets and unrelated settings are preserved. These connector changes roll back
-if exact daemon removal or the registry commit fails. Only a profile with `ownership.service: true`
-may have its exact named service uninstalled; external profiles are forgotten as metadata only.
-Data removal is a separate confirmation that requires typing the exact state path and explicitly
-warns about identity/key loss. The global MCP package is retained while any profile/application
-still needs it.
+Which daemon is removed is chosen by its **state directory**, not by a profile id:
+`ours-uninstall --state-dir ~/.ours-blue`. The uninstall refuses before it touches anything if
+the Telegram connector or Rooms still points at that daemon (and refuses too if either config
+file cannot be parsed, since a file we cannot read cannot be shown *not* to point here); a
+dependent connector can be detached in the same run, which stops its service and removes only
+its daemon keys, keeping the file with its bot token and settings. Detaching Rooms returns it
+to embedded mode, and the run says so before it does it. Data removal (`--purge`) is separate,
+requires typing the exact state directory path, warns about identity/key loss, and never happens
+in a run with nobody watching. The global `@ours.network/cli` and `@ours.network/mcp` packages
+are kept while any other daemon on the machine still needs them, and a harness that keeps its
+plugin keeps its launcher package.
 
 Headless (no terminal), drive it with environment variables:
 
 ```sh
 OURS_UNINSTALL="hermes codex" \
-OURS_UNINSTALL_DATA=yes \
 OURS_UNINSTALL_DAEMON=yes \
   bash uninstall.sh
 ```
 
+Setting **any** of the seven variables below puts the run under this contract: nothing is
+prompted, and `OURS_UNINSTALL_DAEMON` alone decides whether the daemon goes. Setting **none** of
+them leaves the run exactly as it is interactively. Four of the seven describe things this
+uninstaller cannot do; it **refuses with exit 2 and removes nothing** rather than ignoring them,
+because a variable that silently does nothing reads as success to the script that set it.
+
 | var | meaning |
 |---|---|
-| `OURS_UNINSTALL` | harnesses to remove (space/comma list of `claude-code codex hermes`, or `all`) |
-| `OURS_UNINSTALL_DATA` | `yes` — remove the ours data directory (`~/.ours`) |
-| `OURS_UNINSTALL_DAEMON` | `yes` — remove the `ours-mcp` daemon |
-| `OURS_UNINSTALL_PROFILE` | Nightly profile id to forget/remove |
-| `OURS_UNINSTALL_FORGET_PROFILE` | Nightly `yes` — forget external/profile metadata only |
-| `OURS_UNINSTALL_TELEGRAM` | Nightly dependency action: `detach`, `uninstall`, or `reassign:<profile-id>` |
-| `OURS_UNINSTALL_ROOMS` | Nightly dependency action: `detach`, `uninstall`, or `reassign:<profile-id>` |
+| `OURS_UNINSTALL` | harness plugins to remove — space/comma list of `claude-code codex hermes`, or `all`, or `none`. Names not on that list are refused. |
+| `OURS_UNINSTALL_DAEMON` | `yes` — also remove the daemon (its boot service, its process, and the global packages). Anything else, or unset, removes **only** the harness plugins named above and leaves the daemon running. |
+| `OURS_UNINSTALL_TELEGRAM` | `detach` — detach the Telegram connector from this daemon. This is the confirmation an unattended run cannot otherwise be asked for; without it a run against a daemon Telegram points at refuses. |
+| `OURS_UNINSTALL_ROOMS` | `detach` — the same for Rooms. |
+| `OURS_UNINSTALL_DATA` | **Refused at `yes`.** State is never deleted with nobody present: it holds identity private keys that exist nowhere else. Run `ours-uninstall --state-dir <dir> --purge` from a terminal and type the full path. `no` is the default and is accepted. |
+| `OURS_UNINSTALL_PROFILE` | **Refused.** There is no profile registry; select the daemon with `--state-dir <path>`. |
+| `OURS_UNINSTALL_FORGET_PROFILE` | **Refused.** There is no daemon metadata to forget — a daemon this uninstaller is not pointed at is already left entirely alone. |
+| `OURS_UNINSTALL_TELEGRAM` / `_ROOMS` at `uninstall` | **Refused.** This detaches a connector, it does not uninstall one. Use `detach`, then `npm rm -g @ours.network/tg-connector` (or `@ours.network/cowork`). |
+| `OURS_UNINSTALL_TELEGRAM` / `_ROOMS` at `reassign:<id>` | **Refused.** There is no profile id to reassign to. Point the connector at the daemon you want with `ours-install --state-dir <path>`, then re-run the uninstall. |
 
 ## Notes
 
