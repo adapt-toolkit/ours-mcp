@@ -219,7 +219,45 @@ const AUTORESTORE_OPT_OUT = ['1', 'true', 'yes', 'on'].includes(
 
 export async function runProxy(opts: ProxyOptions): Promise<void> {
   const url = new URL(opts.url);
-  const log = (...a: unknown[]) => process.stderr.write(`[ours-proxy] ${a.join(' ')}\n`);
+
+  // DIAGNOSTICS MUST NOT BECOME THE FAILURE. Every line below goes to stderr,
+  // and stderr is a pipe owned by the client. When the client dies that pipe
+  // dies with it, and a write to it fails — asynchronously, as an 'error' event
+  // on the stream, which Node turns into an uncaughtException.
+  //
+  // That used to close a loop: the write fails → uncaughtException → the handler
+  // catches it and calls log() to announce "proxy stays up" → that write fails →
+  // uncaughtException → … A/B'd on ours-mcp 0.16.0 across four variants that
+  // differed only in where stdout/stderr pointed: with stderr on a file the
+  // process sat at 55 jiffies over 111s; with stderr on a dead pipe it spun a
+  // full core. stdout made no difference either way. The handler written to
+  // prevent a silent death was what burned the CPU.
+  //
+  // So: one failed write disables logging permanently, and — since a proxy that
+  // can neither talk to its client nor report why has no reason to live — it
+  // takes the process down with it. Never retried, never reported via the
+  // channel that just failed.
+  let logDead = false;
+  const log = (...a: unknown[]): void => {
+    if (logDead) return;
+    try {
+      process.stderr.write(`[ours-proxy] ${a.join(' ')}\n`);
+    } catch {
+      logDead = true;
+      void shutdown(0);
+    }
+  };
+  // The asynchronous half. An EPIPE on a socket-backed stderr never surfaces as
+  // a synchronous throw, so the try above cannot see it; without this listener
+  // it becomes an uncaughtException instead, which is exactly the loop.
+  const stdioBroken = (): void => {
+    logDead = true; // no log() here — the channel we would use is the broken one
+    void shutdown(0);
+  };
+  process.stderr.on('error', stdioBroken);
+  // stdout is the JSON-RPC channel. If it is gone we cannot answer anyone, which
+  // is the same verdict for a different reason.
+  process.stdout.on('error', stdioBroken);
 
   // ---- per-process session state (in memory only — see header) -------------
   // Liveness pid = the CLIENT (Claude Code) process, not this connector (which
@@ -903,10 +941,19 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   // exit 1, which downstream sees only as "the connector went away", with no reason
   // recorded anywhere. Log loudly and keep serving: a proxy still up with one
   // failed operation is strictly better than one that vanished without a trace.
+  // A write error on our own stdio is NOT a bug to survive — it is the client
+  // being gone, arriving by a different door than stdin EOF. Surviving it is what
+  // produced the spin, so it is the one exception to "stays up".
+  const isStdioWriteError = (e: unknown): boolean => {
+    const code = (e as NodeJS.ErrnoException | undefined)?.code;
+    return code === 'EPIPE' || code === 'ECONNRESET' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_STREAM_WRITE_AFTER_END';
+  };
   process.on('unhandledRejection', (reason) => {
+    if (isStdioWriteError(reason)) { logDead = true; void shutdown(0); return; }
     log('UNHANDLED REJECTION (proxy stays up):', reason instanceof Error ? (reason.stack ?? reason.message) : String(reason));
   });
   process.on('uncaughtException', (err) => {
+    if (isStdioWriteError(err)) { logDead = true; void shutdown(0); return; }
     log('UNCAUGHT EXCEPTION (proxy stays up):', err?.stack ?? String(err));
   });
 
