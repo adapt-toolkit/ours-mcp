@@ -389,6 +389,58 @@ test('a failed rollback is REPORTED, never swallowed and never thrown over the r
   assert.match(said(e), /could NOT roll back .*config\.json: permission denied/);
 });
 
+// ---------------------------------------------- the restore is read back --
+// A rollback that LIES is worse than one that admits it failed: the operator is
+// told the machine is back where it was, stops looking, and the next run reads a
+// config naming a port nothing listens on. `restore` returning proves a call
+// completed; only reading the bytes back proves the file holds them.
+
+test('a restore that silently did not take is reported as NOT restored', async () => {
+  const before = { port: 3050, stateDir: OURS, keepThis: true };
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: before },
+    net: { 3050: { ok: true, stateDir: OURS } },
+    runFails: ['install-service'],
+    env: { OURS_ASSUME_YES: '1' },
+    restoreDoesNotTake: [join(OURS, 'config.json')],
+  });
+  await assert.rejects(() => runInstall([], e));
+  assert.match(said(e), /could NOT roll back .*config\.json: the restore reported success but the bytes on disk are not the previous ones/);
+  assert.ok(!/rolled back .*config\.json to its previous contents/.test(said(e)),
+    'and it must NOT also be announced as restored — one file, one truthful line');
+});
+
+test('a file this run created whose removal did not take is reported, not called removed', async () => {
+  const e = fx({ runFails: ['daemon start'], restoreDoesNotTake: [join(OURS, 'config.json')] });
+  await assert.rejects(() => runInstall([], e));
+  assert.match(said(e), /could NOT roll back .*config\.json: this run created it and the removal did not take — the file is still there/);
+  assert.ok(!/removed .*config\.json/.test(said(e)), 'never claims a removal that did not happen');
+});
+
+test('bytes back but permissions drifted is reported as restored-with-a-caveat, naming both modes', async () => {
+  const before = { port: 3050, stateDir: OURS, keepThis: true };
+  const e = fx({
+    json: { [join(OURS, 'config.json')]: before },
+    net: { 3050: { ok: true, stateDir: OURS } },
+    runFails: ['install-service'],
+    env: { OURS_ASSUME_YES: '1' },
+    restoreChangesMode: [join(OURS, 'config.json')],
+  });
+  await assert.rejects(() => runInstall([], e));
+  // The contents ARE back, so this must not read as "your config is lost".
+  assert.match(said(e), /contents restored, but the permissions are 0644 and were 0600/);
+});
+
+test('a read-back that itself fails counts as not restored, never as success', async () => {
+  const e = fx({ runFails: ['daemon start'] });
+  const realSnapshot = e.snapshot;
+  let restoreDone = false;
+  e.restore = (p, snap) => { restoreDone = true; e.recorder.restored.push([p, snap]); };
+  e.snapshot = (p) => { if (restoreDone) throw new Error('EIO'); return realSnapshot(p); };
+  await assert.rejects(() => runInstall([], e));
+  assert.match(said(e), /could NOT roll back .*config\.json: restored, but the file could not be read back to confirm it \(EIO\)/);
+});
+
 test('a --dry-run snapshots nothing, because it wrote nothing', async () => {
   const e = fx({ runFails: ['daemon start'] });
   const code = await runInstall(['--dry-run'], e);

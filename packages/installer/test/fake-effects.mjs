@@ -20,7 +20,13 @@ export function fx({
   json = {}, text = {}, net = {}, taken = [], versions = {}, env = {}, answers = [],
   unitUnchanged = false, harnesses = [], lines = [], platform = 'linux', nodeVersion = '22.0.0',
   runFails = [], voiceReady = false, interactiveOk = true, restoreFails = [], known = [],
+  restoreDoesNotTake = [], restoreChangesMode = [],
 } = {}) {
+  // A restore that RETURNS without the bytes landing — the case a read-back
+  // catches and a returning call cannot. Distinct from `restoreFails`, which
+  // throws: this one succeeds loudly and lies quietly.
+  const notTaken = new Set();
+  const modeDrifted = new Set();
   const recorder = { ran: [], ranEnv: [], wrote: [], out: [], asked: [], askedLines: [], interactive: [], restored: [] };
   let answerIndex = 0;
   let lineIndex = 0;
@@ -52,9 +58,17 @@ export function fx({
     // describe the same file twice — and `restore` is RECORDED rather than done,
     // which is what lets a test assert that the bytes went back without a
     // filesystem. `restoreFails` makes the failure path reachable.
-    snapshot: (p) => ({ exists: Object.prototype.hasOwnProperty.call(json, p), text: Object.prototype.hasOwnProperty.call(json, p) ? `${JSON.stringify(json[p], null, 2)}\n` : '', mode: 0o600 }),
+    snapshot: (p) => {
+      const had = Object.prototype.hasOwnProperty.call(json, p);
+      // Once a restore has been claimed but did not take, the read-back is what
+      // the file ACTUALLY says — which is the whole point of reading it back.
+      if (notTaken.has(p)) return { exists: true, text: had ? 'these are not the previous bytes\n' : '{}\n', mode: 0o600 };
+      return { exists: had, text: had ? `${JSON.stringify(json[p], null, 2)}\n` : '', mode: modeDrifted.has(p) ? 0o644 : 0o600 };
+    },
     restore: (p, snap) => {
       if (restoreFails.includes(p)) throw new Error('permission denied');
+      if (restoreDoesNotTake.includes(p)) notTaken.add(p);
+      if (restoreChangesMode.includes(p)) modeDrifted.add(p);
       recorder.restored.push([p, snap]);
     },
     run: async (cmd, cmdArgs, opts = {}) => {

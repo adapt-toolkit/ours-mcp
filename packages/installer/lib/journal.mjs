@@ -71,7 +71,10 @@ export function configJournal(effects, { dryRun = false } = {}) {
       for (const entry of entries.slice().reverse()) {
         try {
           effects.restore(entry.path, entry.snapshot);
-          restored.push({ path: entry.path, existed: entry.snapshot?.exists !== false });
+          // A write that RETURNED is not a file that HOLDS. Read the bytes back.
+          const mismatch = verifyRestored(effects, entry);
+          if (mismatch) failed.push({ path: entry.path, reason: mismatch });
+          else restored.push({ path: entry.path, existed: entry.snapshot?.exists !== false });
         } catch (error) {
           failed.push({ path: entry.path, reason: error instanceof Error ? error.message : String(error) });
         }
@@ -81,6 +84,48 @@ export function configJournal(effects, { dryRun = false } = {}) {
     },
   };
 }
+
+/**
+ * Did the restore actually take? Returns null when it did, or the reason it did not.
+ *
+ * WHY THIS EXISTS. `restore` returning is evidence that a call completed, not that
+ * a file holds the bytes it was given. A full disk, a read-only mount, a rename
+ * that lands somewhere else, an editor holding the inode — each of those can let
+ * the write return and leave the old contents in place. Reporting on the call
+ * rather than on the state is how a rollback comes to LIE, and a rollback that
+ * lies is worse than one that admits it failed: the operator is told the machine
+ * is back where it was and stops looking.
+ *
+ * The read-back seam is `effects.snapshot`, the same one used to record the bytes
+ * in the first place — it already returns exactly the shape being compared, so
+ * this needs no second seam and no second notion of what a file's state is.
+ *
+ * Its own failure is a mismatch, not an exception: if the file cannot be read
+ * after being written, that is precisely the case this check exists to catch.
+ */
+function verifyRestored(effects, entry) {
+  const expected = entry.snapshot;
+  let actual;
+  try {
+    actual = effects.snapshot(entry.path);
+  } catch (error) {
+    return `restored, but the file could not be read back to confirm it (${error instanceof Error ? error.message : String(error)})`;
+  }
+  const shouldExist = expected?.exists !== false;
+  if (!shouldExist) {
+    return actual?.exists ? 'this run created it and the removal did not take — the file is still there' : null;
+  }
+  if (!actual?.exists) return 'the restore reported success but the file is not there';
+  if (actual.text !== expected.text) return 'the restore reported success but the bytes on disk are not the previous ones';
+  // Bytes first, permissions second: the contents are back either way, so this
+  // must not be reported as "could not restore the config".
+  if (expected.mode !== undefined && actual.mode !== undefined && actual.mode !== expected.mode) {
+    return `contents restored, but the permissions are ${fmtMode(actual.mode)} and were ${fmtMode(expected.mode)} — check them before re-running`;
+  }
+  return null;
+}
+
+const fmtMode = (mode) => `0${(mode & 0o777).toString(8).padStart(3, '0')}`;
 
 /**
  * The report, and it is half the feature.
