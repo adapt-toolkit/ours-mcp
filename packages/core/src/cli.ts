@@ -812,27 +812,12 @@ async function cmdCreateRoot(argv: string[]): Promise<void> {
     err(`create-root: the daemon is not running on port ${PORT} — start it with \`ours-mcp start\`.`);
     process.exit(1);
   }
-  // ⚠ THIS WAS THE LAST /mcp CALLER IN THE PRODUCT, and it is the one the
-  // switch would have broken loudest. It opened an MCP session to the daemon's
-  // /mcp and called the create_root_identity TOOL — which is fine while the
-  // daemon hosts an MCP server, and fatal the moment it stops. The v3 installer
-  // runs `ours-mcp create-root` in its identity phase on every fresh install and
-  // the stable installer body calls it too, so landing the switch without this
-  // would have broken new installs at the identity step, on the stable channel.
-  // Found by Developer-1 reading the branch; a second one would have been found
-  // by a user.
+  // Was the last /mcp caller in the product: it opened an MCP session and called
+  // the create_root_identity TOOL. The v3 and stable installers both run this, so
+  // it would have broken new installs at the identity step.
   //
-  // It is now the same mechanical change as the other thirty: one typed API call
-  // over /api/v1, no MCP anywhere. The CLI is a client of the daemon API exactly
-  // like the MCP server and the SDK — which is the property this whole change
-  // exists to establish, and a CLI that reached the engine through an MCP tool
-  // was the last exception to it.
-  //
-  // The COMMAND ITSELF is deliberately kept. The owner's "ours-mcp loses
-  // create-root as a CLI command" ruling is DEFERRED, not cancelled: it is
-  // blocked on the stable installer call site, a core test file and a tool
-  // description that cites it. Removing the command here would break every
-  // script that has it while buying nothing this change needs.
+  // The COMMAND is kept: the owner's "lose create-root as a CLI command" ruling is
+  // deferred, blocked on the stable installer call site.
   const client = new OursClient({
     url: `http://127.0.0.1:${PORT}`,
     apiToken: resolveApiToken(CONFIG, { generate: false })?.token,
@@ -851,32 +836,23 @@ async function cmdCreateRoot(argv: string[]): Promise<void> {
       localAutoAccept: true,
       skipIfRootExists: true,
     });
-    // The TOOL used to render this prose and the CLI scraped it back out of the
-    // MCP content, stripping the agent-directed monitor hint with a regex. Now the
-    // CLI renders it from the same typed fields the tool renders from, and the
-    // hint is simply never built — one fewer thing to strip, and no prose parsing.
-    //
-    // The adoption counts are NOT decoration: on a host that already had loose
-    // identities, create-root pulls them under the new root, and the installer's
-    // output is where an operator finds out that happened.
+    // Rendered from typed fields instead of scraped back out of MCP content. The
+    // adoption counts matter: create-root pulls loose identities under the new root
+    // and the installer output is where an operator learns that happened.
     const adoption = r.adopted.length > 0
       ? ` Adopted ${r.adopted.length} existing identit${r.adopted.length === 1 ? 'y' : 'ies'} as role(s): ${r.adopted.join(', ')}.`
       : '';
     const failures = r.failed.length > 0
       ? ` FAILED to adopt: ${r.failed.join(', ')} (see daemon log).`
       : '';
-    // hierarchy === 'role' cannot reach here: skipIfRootExists makes an existing
-    // root a refusal, handled in the catch. Asserted rather than assumed, because
-    // silently printing "root created" for a role would be a lie in an installer.
+    // Asserted, not assumed: printing "root created" for a role would be a lie in
+    // an installer.
     if (r.hierarchy !== 'root') {
       err(`create-root: expected a root, got ${r.hierarchy} under "${r.underRoot ?? '?'}" — refusing to report success.`);
       process.exit(1);
     }
     out(`Root identity "${r.info.name}" (${r.info.cid}) created — this host's root.${adoption}${failures}`);
   } catch (e) {
-    // An OursError's .message IS the tool text, byte for byte (ours-sdk's
-    // api-error-parity gate holds it to the baseline), so the same regex that
-    // recognised the idempotent case over MCP still recognises it here.
     const text = e instanceof OursError
       ? e.message.split(/\n\nAsk the user\b/)[0].replace(/^create_root_identity failed: /, '').trim()
       : String(e instanceof Error ? e.message : e);

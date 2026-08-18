@@ -47,18 +47,9 @@ export function registerInboxResource(server: McpServer, clientFor: () => OursCl
       // the specific error text the tools do. So the OursError is caught and
       // discarded on purpose here; only whether it threw is load-bearing.
       //
-      // THIS IS THE ONE PLACE THE HARD SWITCH COSTS A SECOND ROUND TRIP, and it is
-      // worth saying rather than hiding. In-process this was `requireBound(ctx).name`
-      // — a map lookup. Over the API the bound identity's NAME is not a local fact,
-      // so it takes a call, and `currentIdentity` is the call that answers it. The
-      // alternative was to render the URI from a name this process cached at bind
-      // time, which is exactly the kind of local shadow of daemon-owned state that
-      // this whole change exists to remove: a rebind elsewhere would make the
-      // resource announce a URI for an identity we no longer hold.
-      //
-      // It also lands on the right side of the failure: `currentIdentity` throws the
-      // same four catalogued binding errors `requireBound` did, so the collapse
-      // below is unchanged, not approximated.
+      // Costs a second round trip: the bound name is not a local fact any more.
+      // Caching it at bind time would be a local shadow of daemon-owned state that
+      // goes wrong exactly when a rebind happens elsewhere.
       let boundName: string;
       try {
         boundName = (await client.currentIdentity()).name;

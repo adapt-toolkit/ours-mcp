@@ -120,21 +120,11 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
           },
           isError: false,
         };
-        // ⚠ THE READABILITY PROBE RUNS HERE NOW, NOT IN A SHIM.
-        //
-        // It used to run in the proxy, on the JSON-RPC frame on its way back. This
-        // process IS the agent's OS user, so the question "can I read this path"
-        // is answerable right here — and it is answerable ONLY here: the daemon
-        // runs as someone else and cannot know this process's uid, which is why
-        // this stayed a client-side step when everything else became an API call.
-        //
-        // `annotateGetFilesResult` is the SAME function the proxy used, on the
-        // RESULT object rather than the frame — the frame wrapper existed only
-        // because the proxy saw frames. It PREPENDS and never substitutes: the
-        // daemon's own text can carry payload this side cannot reconstruct (a
-        // voice message is delivered as a TRANSCRIPT, not a path), so replacing it
-        // wholesale would drop real message content whenever an unreadable file
-        // shares a batch with one.
+        // The probe runs here because only this process knows its own uid. Same
+        // function the proxy used, on the RESULT rather than the frame — the frame
+        // wrapper existed only because the proxy saw frames, and passing it a frame
+        // annotates nothing, silently. PREPENDS, never substitutes: the daemon text
+        // can carry a voice transcript this side cannot reconstruct.
         annotateGetFilesResult(result, FILES_ALWAYS_PROMPT ? () => false : canRead);
         return result;
       } catch (e) {
@@ -186,26 +176,11 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
       wire_id: z.string().min(1).describe('wire_id of the received file (from get_files).'),
       dest_path: z.string().min(1).describe('Destination path on your local filesystem to write the copy to.'),
     },
-    // ⚠ THIS HANDLER NOW DOES THE WRITE ITSELF, AND THAT IS THE WHOLE TOOL.
-    //
-    // It used to be a REFUSAL. In the proxy world the connector intercepted
-    // save_file and never forwarded it, so reaching the daemon-side handler proved
-    // the connector was too old, and the handler's only job was to say so (via the
-    // SDK's `errSaveFileFallback`, whose text the error-parity gate holds to the
-    // baseline). The daemon could not do the write: it runs as its owner, so a
-    // cross-user destination is wrong-owner or EACCES.
-    //
-    // This process runs as the AGENT's OS user, so it can. That is the entire
-    // reason save_file exists, and it is now discharged here rather than in a shim.
-    // `saveFileFallbackNotice` is consequently unreachable from ours-mcp: it stays
-    // in the SDK for a third-party client that hits the daemon without a connector.
-    //
-    // STREAMED, NEVER BUFFERED. `openFile` returns the response body; `fetchFile`
-    // would hand back a Uint8Array and quietly make the whole file resident,
-    // breaking the promise in this tool's own description that the bytes never
-    // enter the conversation. Not an out-of-memory argument — the transport caps a
-    // file at ~2 MB — but that cap is a PIN that can differ from the core's real
-    // value in either direction, so it is not a bound this code may rely on.
+    // This handler DOES THE WRITE. It used to be a refusal because the daemon runs
+    // as its owner and a cross-user destination is EACCES; this process is the
+    // agent's user. STREAMED — `fetchFile` would make the whole file resident and
+    // break this tool's own promise. `saveFileFallbackNotice` is now unreachable
+    // from ours-mcp and stays in the SDK for clients with no connector.
     async ({ wire_id, dest_path }): Promise<McpTextResult> => {
       // proxy.ts:557, verbatim. A wire_id names a path segment on the daemon, so a
       // charset check belongs before the request, not after it.

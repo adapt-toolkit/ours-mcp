@@ -1,30 +1,6 @@
 // The ours connector: a stdio MCP server whose tools call the daemon's HTTP API.
-//
-// ============================================================================
-// WHAT THIS REPLACED, AND WHY THE REPLACEMENT IS SMALLER
-// ============================================================================
-// `runProxy` — an MCP-over-HTTP client that held one long-lived MCP session to
-// the daemon's `/mcp`, absorbed the harness's ~15-minute re-`initialize`,
-// replayed synthetic init + re-bind frames on a drop, tracked in-flight requests
-// behind a watchdog, and escalated a dead notification SSE through a cooldown and
-// a cap.
-//
-// Every one of those parts existed to keep ONE MCP SESSION ALIVE across a
-// transport that cannot resume. There is no such session here. This process is
-// the MCP server the harness talks to, and it reaches the daemon the same way the
-// CLI and the SDK do: ordinary requests to the typed API. There is nothing to
-// re-handshake, nothing to replay, and nothing to reconnect into.
-//
-// THE OWNER'S RULE, WHICH THIS FILE IS THE POINT OF: the daemon exposes THE API;
-// the MCP server, the CLI and the SDK are all clients of it. Nothing here may
-// reach past the API into the engine. If something is missing from the API it
-// gets implemented IN the API — never worked around in this file.
-//
-// ----- WHY `/mcp` IS NOT MENTIONED ANYWHERE BELOW ---------------------------
-// It is gone. `serve.ts` no longer injects an MCP integration into the SDK's
-// `startDaemon`, so the daemon does not mount the route at all (the SDK's
-// `startDaemon` 404s `/mcp` whenever nothing is injected). There is exactly one
-// MCP server in the system and it is this one.
+// Replaces `runProxy`, which existed to keep one MCP session alive across a
+// transport that cannot resume. There is no such session here.
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 import { OursClient } from '@ours.network/sdk';
@@ -49,41 +25,21 @@ export interface ConnectorOptions {
 }
 
 const log = (s: string) => {
-  // stdout is the MCP JSON-RPC channel; diagnostics go to stderr, always.
-  //
-  // ⚠ AND A FAILED STDERR WRITE IS SWALLOWED, DELIBERATELY. Once the harness is
-  // gone stderr is a dead pipe, and the previous connector's
-  // `uncaughtException` handler logged the failure TO STDERR and stayed up —
-  // which fed itself and burned a full core. Never report a stderr write failure
-  // via stderr.
+  // stdout is the JSON-RPC channel. NEVER report a stderr write failure via
+  // stderr: once the harness is gone that feeds itself and burns a core.
   try { process.stderr.write(`ours: ${s}\n`); } catch { /* the reader is gone */ }
 };
 
 /**
- * Prove the daemon serves the typed API before accepting a single frame.
+ * Prove the daemon serves the typed API before accepting a frame.
  *
- * ⚠⚠ DETECT BY PROBING THE ROUTE, NOT BY COMPARING A VERSION. ⚠⚠
+ * ⚠ PROBE THE ROUTE, NOT A VERSION. `/version` reports the HOST package's
+ * number, so three numberings exist and a semver compare across them is not
+ * well-defined. 404 = no typed surface; 401 is a DIFFERENT failure and must not
+ * be laundered into "too old".
  *
- * `GET /version` reports the HOST package's version, not the SDK's. Three
- * numberings therefore exist — the old bundled daemon's own number, whatever host
- * started an SDK daemon, and the SDK's — and A SEMVER COMPARISON ACROSS THEM IS
- * NOT WELL-DEFINED. `compat` is better behaved but it is still a number the
- * daemon CLAIMS; the route is evidence of what it DOES. Anyone tempted to
- * "simplify" this into a version check should note that the simplification is
- * undetectable until someone runs a mismatched pair, which is the worst possible
- * time to find out.
- *
- * A 404 specifically means "no typed surface". A 401 is a DIFFERENT failure — an
- * auth problem — and must not be laundered into "too old", or an operator spends
- * the afternoon upgrading a daemon that was fine.
- *
- * WHY THIS SURVIVES THE HARD SWITCH. The daemon and the connector now ship
- * together, so there is no population running one against an old other. But
- * INSTALLING A PACKAGE DOES NOT RESTART A RUNNING DAEMON: for the window between
- * upgrade and restart, this new connector meets the OLD daemon process still in
- * memory on the same host, every single time. That window is now the probe's main
- * job, and the difference it makes is between "ours is broken" and "restart the
- * daemon".
+ * Still needed after the hard switch: installing a package does not restart a
+ * running daemon, so a new connector meets the old process every upgrade.
  */
 export async function probeTypedApi(
   url: string,
@@ -105,15 +61,13 @@ export async function probeTypedApi(
     return { ok: false, reason: `the ours daemon at ${url} could not be reached: ${String(e)}` };
   }
 
+  // 400 is a catalogued OursError, i.e. it routed. 401 is reported as itself by
+  // the caller's auth handling, not as age.
   if (res.status !== 404) {
-    // 200 answered, 400 is a catalogued OursError (NOT_BOUND is the expected one
-    // on a fresh session) — both mean the route exists and routed. 401 falls here
-    // too and is reported as itself by the caller's own auth handling, not as age.
     return { ok: true };
   }
 
-  // Corroborate — but only in the message. `compat` is what the daemon SAYS; the
-  // 404 above is what it DID, and the 404 is the finding.
+  // Corroboration only — `compat` is a claim; the 404 is the finding.
   let found = 'unknown';
   try {
     const v = (await (await fetchImpl(`${url}/version`, { signal: AbortSignal.timeout(3000) })).json()) as {
@@ -135,29 +89,12 @@ export async function probeTypedApi(
 /**
  * Follow the bound identity and announce arrivals on its inbox resource.
  *
- * Three properties, each of which is a decision:
+ * Filtered daemon-side (`kinds`), keyed by identity NAME, and holds no session —
+ * so nothing can be reaped and there is nothing to reconnect into.
  *
- * 1. **Filtered daemon-side** (`kinds: ['inbound']`). notifications.log carries
- *    ~20 event kinds, including `e2e_app_send` on this identity's OWN outbound
- *    messages. Filtering here would make this the third copy of one predicate —
- *    the drift the single-API rule exists to prevent. The daemon's cursor
- *    advances past filtered-out events, so a narrow watch costs no more than a
- *    wide one.
- * 2. **Keyed by identity NAME**, so it starts on bind and restarts on rebind.
- *    The old MCP session was keyed by session and needed no name; this is genuinely
- *    new state, and the loop below is all of it.
- * 3. **It holds no session.** Each poll is an independent bounded request, so
- *    there is nothing for the daemon's session reaper to reap and nothing to
- *    reconnect into forever.
- *
- * REBIND LATENCY, STATED PLAINLY: a bind is picked up immediately (`bump()` is
- * called when a tool call completes and we have no watch running). A REBIND from
- * one identity to another while a poll is in flight is picked up when that poll
- * returns, i.e. within the daemon's long-poll ceiling (~25s). Making that instant
- * would mean either a mapping table of which tools rebind — a second vocabulary,
- * which is exactly what must not be built — or a `currentIdentity` round trip on
- * every single tool call. Neither is worth ~25s of stale inbox pushes on an
- * operation an agent performs a handful of times per session.
+ * A first bind is picked up immediately. A REBIND while a poll is in flight is
+ * picked up when that poll returns (~25s). Making it instant needs either a table
+ * of which tools rebind — a second vocabulary — or a round trip per tool call.
  */
 export class InboxWatcher {
   private bumped = true;
@@ -218,11 +155,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /**
  * Run the connector until stdin closes.
  *
- * ⚠ THE SHUTDOWN PATH IS LOAD-BEARING, NOT HYGIENE. This process HOLDS A LEASE
- * for its session. Force binding is staying (owner ruling), so a lease we fail to
- * release is a lease the NEXT session has to force past — which turns a
- * deliberately noisy handover into a confirmation prompt the user never earned.
- * Releasing on the way out is what keeps "force" meaning something.
+ * ⚠ This process HOLDS A LEASE. Force binding stays, so a lease we fail to
+ * release is one the next session must force past — a confirmation prompt the
+ * user never earned. Releasing is load-bearing, not hygiene.
  */
 export async function runConnector(opts: ConnectorOptions): Promise<void> {
   if (opts.ensureDaemon) {
@@ -238,11 +173,8 @@ export async function runConnector(opts: ConnectorOptions): Promise<void> {
 
   const probe = await probeTypedApi(opts.url, opts.apiToken);
   if (!probe.ok) {
-    // BOTH halves, and they are one decision rather than two options. A harness
-    // that sees an immediate exit usually reports "the MCP server failed to
-    // start" and SWALLOWS STDERR, so a startup-only refusal can be invisible; the
-    // tool-call answer below is the copy that reaches the model. Each covers the
-    // other's failure mode, and together they cost almost nothing.
+    // Both halves: a harness that sees an immediate exit reports "failed to start"
+    // and swallows stderr, so the instructions are the copy that reaches the model.
     log(probe.reason);
     await refuseOverStdio(probe.reason, opts.version);
     return;
@@ -266,14 +198,10 @@ export async function runConnector(opts: ConnectorOptions): Promise<void> {
       resolve();
     };
 
-    // ⚠ LISTEN ON `process.stdin`, NOT ON THE TRANSPORT.
-    //
-    // `StdioServerTransport` registers ONLY 'data' and 'error' on stdin, so its
-    // `onclose` NEVER FIRES when the harness goes away. A shutdown hung off it
-    // would never run, and the process would outlive every session — the measured
-    // shape was ~134-139 MB retained per abandoned session (bounded per session,
-    // not an unbounded per-operation leak). "The transport has an onclose, use
-    // that" is the obvious wrong answer here.
+    // ⚠ LISTEN ON process.stdin, NOT THE TRANSPORT: StdioServerTransport registers
+    // only 'data' and 'error', so its onclose never fires and the process outlives
+    // every session (~134-139 MB retained each). SIGHUP is not a safety net —
+    // a harness gives us no tty.
     process.stdin.on('end', () => finish('stdin closed'));
     process.stdin.on('close', () => finish('stdin closed'));
     process.on('SIGINT', () => finish('SIGINT'));
@@ -284,9 +212,7 @@ export async function runConnector(opts: ConnectorOptions): Promise<void> {
 
   watcher.stop();
 
-  // Best-effort, BOUNDED, and attempted on every path. Bounded because we must
-  // never hang an exit on a daemon that is already gone; attempted always because
-  // of the lease note above.
+  // Bounded so a dead daemon cannot hang the exit; attempted on every path.
   try {
     await Promise.race([
       client.releaseLease(),
@@ -300,20 +226,9 @@ export async function runConnector(opts: ConnectorOptions): Promise<void> {
 }
 
 /**
- * Complete the MCP handshake for the sole purpose of telling the model why
- * nothing works, then serve nothing.
- *
- * A connector that exits immediately is reported by most harnesses as "failed to
- * start" with stderr discarded, so the refusal has to reach the channel the model
- * actually reads. It travels as the initialize result's `instructions`, which is
- * surfaced to the model at session start.
- *
- * NO TOOLS ARE REGISTERED, and that is the whole behaviour — not a stub. A call
- * to any ours tool therefore fails as an unknown tool rather than returning
- * prose. Registering all thirty names as refusers would put the reason on every
- * failed call, but it would also mean this file carrying a second copy of the
- * tool list, which is the drift the single-vocabulary rule exists to prevent —
- * and the instructions are read before the first call anyway.
+ * Handshake, deliver the reason as the initialize `instructions`, serve nothing.
+ * No tools are registered — that is the behaviour, not a stub: a second copy of
+ * the tool list here would be the drift the single-vocabulary rule prevents.
  */
 async function refuseOverStdio(reason: string, version: string): Promise<void> {
   const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');

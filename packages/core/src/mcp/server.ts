@@ -14,11 +14,10 @@
 // identity, contacts, profile, messaging, files — so a tool and the operation
 // behind it are one import apart.
 //
-// MONITORING IS NOT IN THAT LIST ANY MORE. bind_monitoring_proxy and
-// get_monitoring_status were removed with the daemon-side control plane
-// (ours-sdk 0b84122), so there are no operations behind them to adapt. The
-// surface remains in the PROTOCOL CORE, untouched, for whenever it is
-// reimplemented — this repo simply no longer exposes it as MCP tools.
+// No monitoring tools: they were removed with the daemon-side control plane
+// (ours-sdk 0b84122) and the owner has ruled they stay out. A DEFERRAL, not a
+// deletion of the capability — pairing a messenger to a machine has no route
+// after this, and re-adding it needs an authorization rule that does not exist.
 //
 // ----- WHY `ctx` IS PASSED AS A THUNK -------------------------------------
 // `startDaemon` hands us a `SessionContext` whose three members are GETTERS
