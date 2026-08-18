@@ -84,6 +84,16 @@ await build({
   outfile: resolve(dist, 'cli.js'),
 });
 
+// The stdio connector. Loaded by cli.js through a COMPUTED specifier, exactly as
+// dist/index.js is, so esbuild cannot bundle it into the CLI — it pulls the MCP
+// tool registrars and, through them, the SDK engine, whose module-load side
+// effects print to stdout and corrupt every parseable CLI output.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/connector.ts')],
+  outfile: resolve(dist, 'connector.js'),
+});
+
 // Pure file helpers (mimeFromExt / sanitizeFilename). index.ts inlines these when
 // it imports './files.js', but emit them as a standalone module too so the
 // unit test (test/files-helpers.test.mjs) can import ../dist/files.js directly.

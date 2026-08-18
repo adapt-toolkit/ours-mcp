@@ -47,7 +47,13 @@ import * as fs from 'node:fs';
 // like the MCP server and the SDK — it does not speak MCP to anything. `Client`
 // and `StreamableHTTPClientTransport` were here for create-root, which is now one
 // typed call; re-adding either is a sign that something is reaching for /mcp again.
-import { OursClient, OursError } from '@ours.network/sdk';
+// ⚠ THE ./client SUBPATH, NOT THE ROOT BARREL. The root entry boots the ADAPT
+// engine at module load and prints to STDOUT ("### Deleting 0 objects…", the
+// reserved-identity line). Every CLI command that emits parseable output — any
+// --json flag — is corrupted by that. ./client is the client-only entry and pulls
+// none of it. Caught by test/voice-status-cli.test.mjs, which JSON.parses stdout.
+import type { ConnectorOptions } from './connector.js';
+import { OursClient, OursError } from '@ours.network/sdk/client';
 import {
   loadConfig,
   configPath,
@@ -61,7 +67,6 @@ import {
   type OursConfig,
   type ApiVisibility,
 } from './config';
-import { runConnector } from './connector.js';
 
 
 import { sttStatus } from './transcribe';
@@ -851,7 +856,12 @@ async function cmdCreateRoot(argv: string[]): Promise<void> {
       err(`create-root: expected a root, got ${r.hierarchy} under "${r.underRoot ?? '?'}" — refusing to report success.`);
       process.exit(1);
     }
-    out(`Root identity "${r.info.name}" (${r.info.cid}) created — this host's root.${adoption}${failures}`);
+    // ⚠ THE BASELINE SENTENCE, NOT A NEW ONE. The tool renders
+    // `Created root identity "X" (cid) and bound it to this session.` and the CLI
+    // printed it; porting the call is not licence to reword the output. The suffix
+    // differs only in dropping the agent-directed monitor hint, which never made
+    // sense on a CLI and was already stripped here by regex.
+    out(`Created root identity "${r.info.name}" (${r.info.cid}) and bound it to this session.${adoption}${failures}`);
   } catch (e) {
     const text = e instanceof OursError
       ? e.message.split(/\n\nAsk the user\b/)[0].replace(/^create_root_identity failed: /, '').trim()
@@ -1469,6 +1479,12 @@ async function main(): Promise<void> {
       // manifests launch `dist/cli.js proxy`, and renaming the verb in the same
       // change that rewrites what it does would fan this PR out across every
       // manifest for no behavioural gain. A rename is its own change, later.
+      // ⚠ IMPORTED LAZILY. ./connector pulls the MCP tool registrars, which pull the
+      // SDK root barrel, which BOOTS THE ADAPT ENGINE AT MODULE LOAD and prints to
+      // STDOUT. A static import here corrupts every CLI command that emits parseable
+      // output — caught by test/voice-status-cli.test.mjs, which JSON.parses stdout.
+      // Only this one command needs the connector; nothing else may pay for it.
+      const { runConnector } = await import(pathToFileURL(join(dirname(SELF), 'connector.js')).href) as { runConnector: (o: ConnectorOptions) => Promise<void> };
       await runConnector({
         // The ORIGIN only. There is no `/mcp` to point at any more: the daemon
         // does not mount it, because serve.ts no longer injects an MCP server.
