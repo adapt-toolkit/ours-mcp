@@ -31,6 +31,33 @@ export const INSTALL_RESERVED_PORTS = [3051, 3052];
 // The CLI-owned PID record that proves a daemon belongs to a state directory
 // even when nothing is recorded in its config (spec §1).
 export const CLI_PID_RECORD = 'ours-cli-daemon.json';
+// The SAME record, written by a different daemon. `ours daemon start` writes
+// ours-cli-daemon.json; `ours-mcp start` writes daemon.pid (packages/core
+// cli.ts PID_PATH). BOTH are read, and neither replaces the other: a machine
+// installed yesterday has the first and a machine installed today has the
+// second, and detection that goes blind on either one concludes "no daemon
+// here" and creates a SECOND daemon on a state directory that already has one.
+// Two writers on one state_data.bin is the corruption case this lookup exists
+// to prevent, so the lookup has to know both spellings.
+export const MCP_PID_RECORD = 'daemon.pid';
+export const PID_RECORDS = [CLI_PID_RECORD, MCP_PID_RECORD];
+
+/**
+ * The port a PID record names, whichever daemon wrote it.
+ *
+ * ours-cli-daemon.json is JSON with a `port`. daemon.pid is a bare pid — no
+ * port — so it proves a daemon EXISTS for this state directory without saying
+ * where. That distinction is the whole reason this returns both fields.
+ */
+export function readPidRecords(target, readJson, readText) {
+  const record = readJson(join(target, CLI_PID_RECORD));
+  const port = record && typeof record.port === 'number' && Number.isFinite(record.port) ? record.port : null;
+  const rawPid = typeof readText === 'function' ? readText(join(target, MCP_PID_RECORD)) : null;
+  const pid = rawPid !== null && rawPid !== undefined && /^\s*\d+\s*$/.test(String(rawPid))
+    ? Number.parseInt(String(rawPid).trim(), 10)
+    : null;
+  return { port, pid };
+}
 export const DAEMON_CONFIG = 'config.json';
 
 export class InstallUsageError extends Error {
@@ -192,7 +219,7 @@ export function classifyProbe(probe, targetStateDir) {
  * is still no I/O here, and `await` on a non-promise is the same value back, so
  * every existing fake keeps working unchanged.
  */
-export async function findDaemon({ stateDir, probe, readJson }) {
+export async function findDaemon({ stateDir, probe, readJson, readText }) {
   const target = resolve(stateDir);
   const config = readJson(join(target, DAEMON_CONFIG));
   const recordedPort = config && typeof config.port === 'number' && Number.isFinite(config.port) ? config.port : null;
@@ -204,8 +231,8 @@ export async function findDaemon({ stateDir, probe, readJson }) {
   if (byConfig.kind === 'present') return { ...byConfig, port: first, via: 'config', config };
   if (byConfig.kind === 'foreign' && !guessed) return { ...byConfig, port: first, via: 'config', config };
 
-  const record = readJson(join(target, CLI_PID_RECORD));
-  const recorded = record && typeof record.port === 'number' && Number.isFinite(record.port) ? record.port : null;
+  const records = readPidRecords(target, readJson, readText);
+  const recorded = records.port;
   if (recorded !== null && recorded !== first) {
     const byRecord = classifyProbe(await probe(recorded), target);
     if (byRecord.kind === 'present') return { ...byRecord, port: recorded, via: 'pid-record', config };
@@ -229,6 +256,12 @@ export async function findDaemon({ stateDir, probe, readJson }) {
   // daemon owns THIS directory. A foreign answer on a port the directory
   // actually RECORDED still refuses, because there the operator's own file said
   // the daemon was there and something else is.
+  // A bare pid record with no port still says a daemon OWNS this directory. It
+  // cannot say where, so this is not "present" — but it is a reason to report a
+  // stale record rather than silently create a second daemon beside it.
+  if (records.pid !== null && byConfig.kind !== 'present') {
+    return { kind: 'absent', reason: 'a daemon pid record exists but nothing answers', stalePidRecord: first, port: first, via: 'config', config };
+  }
   if (byConfig.kind === 'foreign') {
     return {
       kind: 'absent',
@@ -265,9 +298,9 @@ export async function findDaemon({ stateDir, probe, readJson }) {
  * if it is occupied that is a refusal, not a reason to shift. Only a derived port
  * is searched, from 3050 upward, skipping the reserved defaults.
  */
-export async function resolveTarget({ stateDir, port = null, portExplicit = false, probe, readJson, isTaken }) {
+export async function resolveTarget({ stateDir, port = null, portExplicit = false, probe, readJson, readText, isTaken }) {
   const target = resolve(stateDir);
-  const found = await findDaemon({ stateDir: target, probe, readJson });
+  const found = await findDaemon({ stateDir: target, probe, readJson, readText });
 
   if (found.kind === 'foreign') {
     return {

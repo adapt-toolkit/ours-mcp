@@ -23,8 +23,12 @@ import { pkgSpec, resolveChannel } from './logic.mjs';
 // effects.installedVersion('@ours.network/mcp@nightly') return null forever,
 // which fails the cowork version floor CLOSED and blanks the version column —
 // a silent regression that looks like "cowork is too old".
+// `required` is not a stronger default — it is the absence of a choice. The MCP
+// package IS the daemon now (the daemon phase installs and starts it), so an
+// operator who declined it would have no daemon at all, which is not a decision
+// anyone means to make. Declining has to be impossible rather than discouraged.
 export const COMPONENTS = [
-  { key: 'mcp', label: 'MCP server', pkg: '@ours.network/mcp', specKey: 'mcp', default: true },
+  { key: 'mcp', label: 'ours daemon + MCP server', pkg: '@ours.network/mcp', specKey: 'mcp', default: true, required: true },
   { key: 'tg', label: 'Telegram connector', pkg: '@ours.network/tg-connector', specKey: 'tg-connector', default: false },
   { key: 'cowork', label: 'cowork', pkg: '@ours.network/cowork', specKey: 'cowork', default: false },
 ];
@@ -114,7 +118,12 @@ export function planComponentSelection({ answers = {}, installed = {}, assumeYes
   return COMPONENTS.map((component) => {
     const already = installed[component.key] === true;
     const answer = assumeYes ? component.default : answers[component.key];
-    const wanted = answer === undefined ? (already || component.default) : answer === true;
+    // A required component ignores the answer entirely, including an explicit no.
+    // The daemon phase has already installed and started it by the time this runs;
+    // "skip" here would only produce a screen that contradicts the machine.
+    const wanted = component.required
+      ? true
+      : (answer === undefined ? (already || component.default) : answer === true);
     return {
       ...component,
       already,

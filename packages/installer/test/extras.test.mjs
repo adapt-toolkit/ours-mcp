@@ -154,19 +154,23 @@ test('voice setup is skipped when there is no ours-mcp to run it', () => {
   assert.equal(p.restartOwed, false);
 });
 
-test('the INSTALLER owns the restart beat, because a v3 daemon is always `external` to ours-mcp', () => {
-  // transactVoiceConfig returns at `if (daemonState !== 'managed')` for every
-  // CLI-started daemon: config written, nothing applied. So the restart has to
-  // come from here, and it names `ours daemon restart --config`, never
-  // `ours-mcp restart`.
+test('the restart beat is still planned, and now names ours-mcp because ours-mcp is the daemon', () => {
+  // THE REASON THIS BEAT EXISTS MAY HAVE JUST EVAPORATED, and that is recorded
+  // rather than acted on. It was taken by the installer because cmdVoiceSetup
+  // computes `managed = runningPid() !== null` from ours-mcp's OWN pid record,
+  // and an SDK-CLI daemon never wrote one — so voice-setup always classified it
+  // `external`, wrote the config and applied nothing. An ours-mcp daemon DOES
+  // write that record, so voice-setup may now do its own restart and this becomes
+  // a second one. That is a packages/core behaviour question, not a rename, and it
+  // is flagged in lib/extras.mjs rather than guessed at here.
   const p = planVoice({ mcpInstalled: true, ready: false, accepted: true, configChanged: true, stateDir: TG, port: 3061 });
   assert.equal(p.action, 'setup');
   assert.equal(p.restartOwed, true);
-  assert.deepEqual(p.restart, ['ours', 'daemon', 'restart', '--config', TG_CFG]);
+  assert.deepEqual(p.restart, ['ours-mcp', 'restart']);
   assert.deepEqual(p.env, { OURS_CONFIG: TG_CFG });
   assert.deepEqual(p.setup, ['ours-mcp', 'voice-setup']);
   assert.deepEqual(p.statusCheck, ['ours-mcp', 'voice-status', '--json']);
-  assert.ok(!JSON.stringify(p).includes('ours-mcp restart'), 'v2\'s restart command is dead under v3');
+  assert.ok(!JSON.stringify(p).includes('ours daemon restart'), "the SDK CLI's restart is dead: it would restart a daemon we no longer run");
 });
 
 test('an unchanged voice config owes no restart', () => {
