@@ -17,6 +17,10 @@
 // Not part of the npm chain: it needs the released artifact on disk. Run via
 // scripts/test-invite-compat.sh.
 import { connectConnector } from './fixtures/connector-client.mjs';
+// The OLD peer is a published release that still hosts /mcp — an MCP client is the
+// only way into it. The NEW peer has no /mcp at all. See bootDaemon.
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
@@ -45,7 +49,11 @@ const BPORT = await freePort();
 const broker = spawn('node', [BROKER, '--host', '127.0.0.1', '--port', String(BPORT), '--test_mode'], { stdio: 'ignore' });
 await sleep(2000);
 
-async function bootDaemon(cli, state, cwd) {
+// ⚠ THE TWO PEERS SPEAK DIFFERENT PROTOCOLS, AND THAT IS THE TEST.
+// `side: "old"` is a PUBLISHED release artifact: it still hosts /mcp and an MCP
+// client is the only way in. `side: "new"` is this tree, which hosts no MCP server
+// at all — its tools are reached by spawning the connector. Do not "unify" these.
+async function bootDaemon(cli, state, cwd, side) {
   const port = await freePort();
   const proc = spawn('node', [cli, 'serve'], {
     cwd,
@@ -54,16 +62,29 @@ async function bootDaemon(cli, state, cwd) {
   });
   for (let i = 0; i < 120; i++) { try { if ((await fetch(`http://127.0.0.1:${port}/version`)).ok) break; } catch {} await sleep(250); }
   const version = await fetch(`http://127.0.0.1:${port}/version`).then((r) => r.json()).catch(() => ({}));
-  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
-    requestInit: { headers: { 'x-ours-lease-token': `compat-${port}`, 'x-ours-client-pid': String(process.pid) } },
-  });
-  const client = new Client({ name: `compat-${port}`, version: '0.0.0' });
-  await client.connect(transport);
+  let client;
+  let transport;
+  let closeClient;
+  if (side === 'new') {
+    const conn = await connectConnector({ port, stateDir: state, leaseToken: `compat-${port}` });
+    client = conn.client;
+    closeClient = conn.close;
+  } else {
+    transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
+      requestInit: { headers: { 'x-ours-lease-token': `compat-${port}`, 'x-ours-client-pid': String(process.pid) } },
+    });
+    client = new Client({ name: `compat-${port}`, version: '0.0.0' });
+    await client.connect(transport);
+    closeClient = async () => {
+      try { await transport.terminateSession(); } catch { /* ignore */ }
+      try { await client.close(); } catch { /* ignore */ }
+    };
+  }
   const call = async (name, args = {}) => {
     const r = await withTimeout(client.callTool({ name, arguments: args }), 30_000, name);
     return { text: txt(r), isError: !!r.isError };
   };
-  return { proc, call, client, transport, version };
+  return { proc, call, client, transport, closeClient, version };
 }
 
 const blobOf = (invText) => {
@@ -86,8 +107,8 @@ async function receives(call, marker, ms = 20_000) {
 
 let oldD, newD;
 try {
-  oldD = await bootDaemon(OLD_CLI, oldState, OLD_DIR);
-  newD = await bootDaemon(NEW_CLI, newState, undefined);
+  oldD = await bootDaemon(OLD_CLI, oldState, OLD_DIR, 'old');
+  newD = await bootDaemon(NEW_CLI, newState, undefined, 'new');
   console.log(`  OLD daemon: v${oldD.version.version ?? '?'} unit ${unitHashOf(resolve(OLD_DIR, 'dist', 'mufl_code'))}… (published npm artifact)`);
   console.log(`  NEW daemon: v${newD.version.version ?? '?'} unit ${unitHashOf(join(HERE, '..', 'dist', 'mufl_code'))}… (this branch)`);
 
@@ -131,7 +152,7 @@ try {
 } finally {
   for (const d of [oldD, newD]) {
     if (!d) continue;
-    try { await d.transport.terminateSession(); await d.client.close(); } catch {}
+    try { await d.closeClient(); } catch { /* already gone */ }
     d.proc.kill('SIGTERM');
   }
   broker.kill('SIGTERM');
