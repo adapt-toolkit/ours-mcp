@@ -881,6 +881,23 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     await up!.send(msg as unknown as JSONRPCMessage);
   }
 
+  // Is the process we exist to serve still there? The daemon asks exactly this
+  // question about the same pid (we hand it over as x-ours-client-pid) and reaps
+  // the session when the answer is no — so a proxy that reconnects without asking
+  // it is reconnecting into a reaper that will refuse it for the same reason,
+  // forever. Signal 0 checks existence without delivering anything.
+  //
+  // clientPid falls back to our own pid when the launcher gave us nothing and our
+  // ppid is unusable; in that case this is always true and the check correctly
+  // does nothing rather than guessing.
+  const clientAlive = (): boolean => {
+    if (clientPid === process.pid) return true; // unknowable — never act on it
+    try { process.kill(clientPid, 0); return true; } catch (e) {
+      // EPERM means it exists and is not ours to signal. Only ESRCH means gone.
+      return (e as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+  };
+
   // Re-establish a usable upstream session after a genuine drop, transparently
   // to Claude: replay initialize (so a new daemon session exists), send
   // initialized (so the daemon's notification SSE reopens), then re-bind the
@@ -891,6 +908,18 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     let delay = 500;
     for (;;) {
       if (shuttingDown) { reconnecting = false; return; }
+      // THE CHURN GUARD. Observed on 0.16.0: the daemon reaps the session because
+      // this client pid is dead, our standalone SSE GET then 400s, the SDK burns
+      // its retries, escalation lands here, we open a NEW session — and the reaper
+      // kills that one for the identical reason. An unbounded loop that cannot
+      // converge, and every turn of it costs a LIVE daemon real work on behalf of
+      // a client that no longer exists. Nobody is waiting for this reconnect.
+      if (!clientAlive()) {
+        log(`client pid ${clientPid} is gone — abandoning reconnect instead of churning the daemon's sessions`);
+        reconnecting = false;
+        void shutdown(0);
+        return;
+      }
       try {
         await openUpstream();
         if (initializeMsg) {
