@@ -18,6 +18,7 @@ import { dirname, join, resolve } from 'node:path';
 import { atomicWriteConfig, snapshotConfig, restoreConfig } from './config.mjs';
 import { askYesNo, askLine as askLineOnTty } from './prompt.mjs';
 import { classifyHarnessProbe } from './logic.mjs';
+import { classifyStateDir } from './detect.mjs';
 
 /** GET http://127.0.0.1:<port>/state-dir — the unauthenticated identity probe. */
 async function probePort(port, { timeoutMs = 1500 } = {}) {
@@ -156,24 +157,41 @@ function copyToClipboard(text) {
 }
 
 /**
- * Every state directory on this machine that still has a daemon config.
+ * Every DAEMON state directory on this machine.
  *
- * `ours-uninstall` asks this exactly once, to answer one question: are the
- * GLOBAL packages still needed by somebody else? Getting it wrong the optimistic
- * way (reporting none) uninstalls the CLI out from under a second daemon that is
- * still running, so the search is deliberately conservative — it looks only where
- * a state directory can actually be, and an unreadable home means "there might be
- * others", not "there are none".
+ * ONE DEFINITION OF WHAT A DAEMON IS, and this function is why that matters.
  *
- * Where they can be: the default `~/.ours`, plus any `~/.ours*` sibling, which is
- * the shape every other part of this installer uses for a second daemon. A state
- * directory somewhere else entirely will not be found, and that is a KNOWN limit
- * rather than a claim — the failure is keeping a global package that could have
- * been removed, which is the harmless direction.
+ * It used to count any `~/.ours*` directory containing a config.json. Two of those
+ * are not daemons on a perfectly normal machine: `~/.ours-telegram/config.json` is
+ * the Telegram connector's and `~/.ours-cowork/config.json` is cowork's. So the
+ * uninstaller reported "@ours.network/cli kept — still used by the daemon at
+ * ~/.ours-telegram", and two things followed silently:
+ *
+ *   · planGlobalPackages kept cli, mcp and the plugin packages FOREVER on any
+ *     machine with the connector installed, naming a connector's config directory
+ *     as a daemon;
+ *   · worse, planPluginRemoval's `lastDaemon` went false, so the whole harness
+ *     plugin phase was skipped — with a reason that was not true. A plain
+ *     interactive `ours-uninstall` on a machine with the connector removed no
+ *     plugins at all.
+ *
+ * The selection screen had already closed exactly this: config.json is the one
+ * piece of evidence that is AMBIGUOUS, so it cannot be the test. That predicate
+ * lives in lib/detect.mjs and this now calls it rather than keeping a second,
+ * naive copy that drifted. A daemon is identified by an artefact only a daemon
+ * writes, or by a config whose SHAPE is a daemon's.
+ *
+ * Still deliberately conservative about WHERE it looks: only `~/.ours` and its
+ * `~/.ours*` siblings. A state directory somewhere else is not found, and an
+ * unreadable home means "there might be others", not "there are none" — because
+ * the caller uses this to decide whether a GLOBAL package is still needed, and
+ * being wrong the optimistic way uninstalls the CLI out from under a running
+ * daemon.
  */
 function knownStateDirsIn(home) {
   const found = [];
-  const consider = (dir) => { if (existsSync(join(dir, 'config.json'))) found.push(dir); };
+  const io = { exists: existsSync, readJson: readJsonFile };
+  const consider = (dir) => { if (classifyStateDir(dir, io).isDaemon) found.push(dir); };
   consider(join(home, '.ours'));
   try {
     for (const entry of readdirSync(home, { withFileTypes: true })) {
@@ -278,7 +296,7 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
   };
 }
 
-export const __testables = { probePort, portTakenSync, readJsonFile, readTextFile, installedVersionOf };
+export const __testables = { probePort, portTakenSync, readJsonFile, readTextFile, installedVersionOf, knownStateDirsIn };
 
 // -----------------------------------------------------------------------------
 // THE PAIR
