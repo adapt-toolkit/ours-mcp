@@ -407,7 +407,9 @@ test('a connector whose service fails does not keep a config pointing at this da
     answers: [true],   // yes, repoint it — the case that writes the most dangerous bytes
   });
   const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
-    { answers: { tg: true }, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+    // Both answers supplied, so the new component QUESTION asks nothing and the
+    // single fx answer belongs to the repoint prompt this test is about.
+    { answers: { tg: true, cowork: false }, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
     e,
     { stateDir: OURS, port: 3050 },
   );
@@ -677,4 +679,99 @@ test('Linux is completely unaffected — same walk, same service install', async
   await runInstall([], e);
   assert.ok(e.recorder.ran.some((c) => c.join(' ') === 'ours-mcp install-service'));
   assert.doesNotMatch(said(e), /not available on/);
+});
+
+// ------------------------------------------- the channel signal of last resort --
+
+test('a NIGHTLY installer with NO env var installs nightly, not latest', async () => {
+  // THE DEFECT THIS PINS, and the reason every other channel test missed it: they
+  // all set OURS_CHANNEL. resolveChannel only falls back to the installer's own
+  // version when the environment is silent, and the v3 orchestrator passed no
+  // version at all — so the one case nobody tested, a published nightly installer
+  // run with no env, resolved to `latest` and installed the whole stack stable.
+  const e = fx({ env: { OURS_ASSUME_YES: '1' }, harnesses: [{ name: 'codex', status: 'ok', label: 'Codex' }] });
+  e.version = '0.17.0-nightly.7';
+  await runInstall([], e);
+  const installs = e.recorder.ran.filter((c) => c.join(' ').startsWith('npm i -g')).map((c) => c[c.length - 1]);
+  assert.ok(installs.length > 0, 'something was installed');
+  for (const spec of installs) {
+    assert.match(spec, /@nightly$/, `every package must be nightly, got ${spec}`);
+  }
+});
+
+test('a STABLE installer with no env var still installs latest', async () => {
+  const e = fx({ env: { OURS_ASSUME_YES: '1' }, harnesses: [{ name: 'codex', status: 'ok', label: 'Codex' }] });
+  e.version = '0.16.0';
+  await runInstall([], e);
+  const installs = e.recorder.ran.filter((c) => c.join(' ').startsWith('npm i -g')).map((c) => c[c.length - 1]);
+  for (const spec of installs) {
+    assert.doesNotMatch(spec, /@nightly$/, `a stable installer must never install a nightly, got ${spec}`);
+  }
+});
+
+test('an explicit env var still outranks the installer version, both ways', async () => {
+  const pinned = fx({ env: { OURS_ASSUME_YES: '1', OURS_CHANNEL: 'latest' } });
+  pinned.version = '0.17.0-nightly.7';
+  await runInstall([], pinned);
+  assert.ok(!pinned.recorder.ran.some((c) => c.join(' ').includes('@nightly')), 'a nightly installer can be pinned to stable');
+
+  const optedIn = fx({ env: { OURS_ASSUME_YES: '1', OURS_CHANNEL: 'nightly' } });
+  optedIn.version = '0.16.0';
+  await runInstall([], optedIn);
+  assert.ok(optedIn.recorder.ran.some((c) => c.join(' ').includes('@nightly')), 'and a stable one can opt in');
+});
+
+// ------------------------------ the component question that was never asked --
+
+test('the optional components are ASKED, not silently defaulted', async () => {
+  // THE DEFECT: planComponentSelection has always read an `answers` map and
+  // nothing ever populated it, so tg and cowork fell to default:false and were
+  // skipped in silence — while the screen printed "not installed" as though it
+  // had been a decision. Components were the one phase with no question.
+  const e = fx({ answers: [true, true], versions: { '@ours.network/cowork': '0.5.0' } });
+  const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
+    { dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+    e,
+    { stateDir: OURS, port: 3050 },
+  );
+  const asked = e.recorder.asked.join(' | ');
+  assert.match(asked, /Install Telegram connector\?/, 'tg is asked — the same defect, different label');
+  assert.match(asked, /Install cowork\?/, 'and cowork, which is the one that was reported');
+  assert.ok(summary.installed.includes('tg') && summary.installed.includes('cowork'), 'a yes installs them');
+});
+
+test('the MCP server is never asked, because it is the daemon', async () => {
+  // A question whose only honest answer is yes is not a question — the daemon
+  // phase has already installed it by the time this runs.
+  const e = fx({ answers: [false, false] });
+  await (await import('../lib/orchestrate.mjs')).runComponentPhase(
+    { dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+    e,
+    { stateDir: OURS, port: 3050 },
+  );
+  assert.ok(!e.recorder.asked.some((p) => /MCP server|ours daemon/.test(p)), 'not offered as a choice');
+});
+
+test('declining leaves them out, and the run still completes', async () => {
+  const e = fx({ answers: [false, false] });
+  const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
+    { dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+    e,
+    { stateDir: OURS, port: 3050 },
+  );
+  assert.deepEqual(summary.skipped.sort(), ['cowork', 'tg']);
+  assert.deepEqual(e.recorder.wrote, [], 'nothing written for a component that was declined');
+});
+
+test('a non-interactive run asks NOTHING and keeps the documented answers', async () => {
+  // NON_INTERACTIVE_ANSWERS: mcp yes, tg no, cowork no. The unattended contract
+  // does not move because a question was added for humans.
+  const e = fx({ env: { OURS_ASSUME_YES: '1' } });
+  const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
+    { dryRun: false, assumeYes: true, brokerUrl: 'wss://b', channel: 'latest' },
+    e,
+    { stateDir: OURS, port: 3050 },
+  );
+  assert.deepEqual(e.recorder.asked, [], 'nothing asked');
+  assert.deepEqual(summary.skipped.sort(), ['cowork', 'tg']);
 });

@@ -424,6 +424,47 @@ function readChanged(stdout) {
 }
 
 /**
+ * THE QUESTION NOBODY WAS ASKING.
+ *
+ * `planComponentSelection` has always read an `answers` map — and NOTHING EVER
+ * POPULATED IT. `args.answers` is not produced by parseInstallArgs and is not
+ * written by any phase, so it was permanently `{}`, every optional component fell
+ * to its own default, and tg and cowork (both default false) were skipped in
+ * silence. The screen then printed "cowork — not installed" as though that had
+ * been a decision.
+ *
+ * This was the ONE phase with no question. Harness plugins ask, ours-fleet asks,
+ * voice asks, the broker asks. Components did not.
+ *
+ * IT IS NOT A COWORK BUG, and fixing only the component that got reported would
+ * have left the identical defect live under a different label: the Telegram
+ * connector is unreachable by exactly the same route, and nobody noticed only
+ * because tg is usually configured somewhere else.
+ *
+ * A REQUIRED component is never asked — since #74 the MCP package IS the daemon,
+ * the daemon phase has already installed it, and a question whose only honest
+ * answer is yes is not a question. Non-interactive runs are unchanged: assumeYes
+ * takes each component's own default, which is what NON_INTERACTIVE_ANSWERS
+ * documents (mcp yes, tg no, cowork no), so nothing about the unattended contract
+ * moves.
+ */
+export async function askComponents(args, effects) {
+  const answers = { ...(args.answers ?? {}) };
+  if (args.assumeYes) return answers;
+  const optional = COMPONENTS.filter((c) => !c.required && answers[c.key] === undefined);
+  if (optional.length === 0) return answers;
+  effects.out(heading('What else should this daemon carry?'));
+  for (const component of optional) {
+    const already = (args.installed ?? {})[component.key] === true;
+    answers[component.key] = await effects.ask(
+      already ? `Keep ${component.label}?` : `Install ${component.label}?`,
+      already || component.default,
+    );
+  }
+  return answers;
+}
+
+/**
  * Components: §5. A component that fails is reported with its retry command and
  * the run CONTINUES — a failed component is never a reason to undo a successful
  * one, or to undo the daemon.
@@ -432,8 +473,9 @@ export async function runComponentPhase(args, effects, target) {
   const dir = target.stateDir;
   const endpoint = `http://127.0.0.1:${target.port}`;
   const isDefaultStateDir = dir === join(effects.home, '.ours');
+  const answers = await askComponents(args, effects);
   const chosen = planComponentSelection({
-    answers: args.answers ?? {},
+    answers,
     installed: args.installed ?? {},
     assumeYes: args.assumeYes,
   });
@@ -1029,7 +1071,19 @@ export async function runInstall(argv, effects) {
   if (args.version) { effects.out(`ours-install v${effects.version ?? '?'}`); return EXIT_OK; }
 
   args.brokerUrl = args.brokerUrl ?? effects.brokerUrl;
-  args.channel = resolveChannel(effects.env.OURS_CHANNEL ?? effects.env.OURS_INSTALL_CHANNEL);
+  // THE INSTALLER'S OWN VERSION IS THE CHANNEL SIGNAL WHEN NOTHING SAYS OTHERWISE.
+  //
+  // resolveChannel falls back to `selfVersion` only when the environment is
+  // silent, and this call passed no selfVersion — so a NIGHTLY installer with no
+  // OURS_CHANNEL set resolved to `latest` and installed the whole stack at latest.
+  // That is what put fleet@latest and a stable ours-mcp on a nightly machine.
+  //
+  // The v2 bin has always done this correctly (install.mjs:53 passes pkgVersion());
+  // the v3 orchestrator dropped the argument. @ours.network/install is published on
+  // BOTH dist-tags from one lockstep bump, so its own version is the only thing
+  // that distinguishes a nightly installer from a stable one when the operator has
+  // said nothing.
+  args.channel = resolveChannel(effects.env.OURS_CHANNEL ?? effects.env.OURS_INSTALL_CHANNEL, effects.version);
 
   effects.out(banner());
   effects.out(heading(`ours: target ${args.stateDir}${args.portExplicit ? `, port ${args.port}` : ''}`));
