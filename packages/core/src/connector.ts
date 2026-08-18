@@ -155,9 +155,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /**
  * Run the connector until stdin closes.
  *
- * ⚠ This process HOLDS A LEASE. Force binding stays, so a lease we fail to
- * release is one the next session must force past — a confirmation prompt the
- * user never earned. Releasing is load-bearing, not hygiene.
+ * The lease is NOT released on exit — see the note at the shutdown site. That was
+ * my design and the test disproved it.
  */
 export async function runConnector(opts: ConnectorOptions): Promise<void> {
   if (opts.ensureDaemon) {
@@ -212,16 +211,17 @@ export async function runConnector(opts: ConnectorOptions): Promise<void> {
 
   watcher.stop();
 
-  // Bounded so a dead daemon cannot hang the exit; attempted on every path.
-  try {
-    await Promise.race([
-      client.releaseLease(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timed out')), 3000)),
-    ]);
-  } catch (e) {
-    log(`lease release failed (continuing to exit): ${String(e)}`);
-  }
-
+  // ⚠ THE LEASE IS DELIBERATELY *NOT* RELEASED HERE.
+  //
+  // stdin closing means the HARNESS is gone, and this process cannot tell "the
+  // session ended" from "the harness tore us down while idle and will respawn us".
+  // Releasing loses the binding in the second case, and the agent gets "No identity
+  // bound" on its next call — the exact bug the old session-restore record existed
+  // to paper over (test/lease-survives-respawn.test.mjs measures it both ways).
+  //
+  // Nothing leaks: a lease whose client pid is dead is auto-reclaimed WITHOUT force
+  // (ours-sdk src/api/identity.ts:397-403). So an abandoned lease is not a forced
+  // eviction for the next session; it is reclaimed on contention.
   try { await transport.close(); } catch { /* already gone */ }
 }
 
