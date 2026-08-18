@@ -6,6 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { OursClient } from '@ours.network/sdk';
 
 import { createOursMcpServer } from './mcp/server.js';
+import { getBoundIdentity } from './mcp/tool.js';
 import { inboxResourceUri } from './mcp/resources/inbox.js';
 import { pushInboxNotifications } from './mcp/push.js';
 
@@ -97,7 +98,6 @@ export async function probeTypedApi(
  * of which tools rebind — a second vocabulary — or a round trip per tool call.
  */
 export class InboxWatcher {
-  private bumped = true;
   private stopped = false;
   private bound: string | null = null;
   private readonly ac = new AbortController();
@@ -107,25 +107,19 @@ export class InboxWatcher {
     private readonly server: ReturnType<typeof createOursMcpServer>,
   ) {}
 
-  /** Called when any tool call completes: a bind may have just happened. */
-  bump(): void { this.bumped = true; }
-
   stop(): void { this.stopped = true; this.ac.abort(); }
 
   async run(): Promise<void> {
     while (!this.stopped) {
       if (this.bound === null) {
-        if (!this.bumped) { await sleep(500); continue; }
-        this.bumped = false;
-        try {
-          this.bound = (await this.client.currentIdentity()).name;
-          log(`[${this.bound}] watching for arrivals`);
-        } catch {
-          // NOT_BOUND is the ordinary case on a fresh session, not an error. Wait
-          // for the next completed tool call rather than polling the daemon.
-          this.bound = null;
-          continue;
-        }
+        // Read what runTool learned rather than asking the daemon again. This used
+        // to resolve currentIdentity() itself, gated on a bump() that nothing ever
+        // called — so the watch armed once before any bind, failed NOT_BOUND, and
+        // then waited forever. Caught by test/resource-updated.test.mjs.
+        const known = getBoundIdentity();
+        if (known === null) { await sleep(250); continue; }
+        this.bound = known;
+        log(`[${this.bound}] watching for arrivals`);
       }
       const name = this.bound;
       try {
@@ -141,9 +135,9 @@ export class InboxWatcher {
             : `new message from ${e.from ?? '?'}`;
           pushInboxNotifications(this.server, inboxResourceUri(name), summary, (what, err) =>
             log(`[${name}] ${what} failed: ${String(err)}`));
-          // Re-resolve after each delivered batch: a rebind between arrivals must
-          // not leave us announcing the previous identity's inbox.
-          if (this.bumped) { this.bound = null; break; }
+          // Re-read after each batch: a rebind must not leave us announcing the
+          // previous identity's inbox.
+          if (getBoundIdentity() !== name) { this.bound = null; break; }
         }
       } catch (e) {
         if (this.stopped) return;

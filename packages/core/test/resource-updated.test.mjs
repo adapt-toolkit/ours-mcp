@@ -14,8 +14,7 @@
 // first client's transport. If any link is broken — a lost registration, a sid
 // resolved too early, a summary that never fires — nothing arrives and this
 // times out.
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { connectConnector } from './fixtures/connector-client.mjs';
 import { LoggingMessageNotificationSchema, ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
@@ -33,26 +32,22 @@ const freePort = () => new Promise((res, rej) => {
   const s = createServer(); s.listen(0, () => { const p = s.address().port; s.close(() => res(p)); }); s.on('error', rej);
 });
 
-async function connector(url, token, pid) {
-  const transport = new StreamableHTTPClientTransport(new URL(url), {
-    requestInit: { headers: { 'x-ours-lease-token': token, 'x-ours-client-pid': String(pid) } },
-  });
-  const client = new Client({ name: `c-${token}`, version: '0.0.0' });
-  await client.connect(transport);
+async function connector(_url, token, pid) {
+  // Spawns the REAL connector: the resource update now travels
+  // daemon notifications endpoint -> connector -> this stdio client, and that whole
+  // chain is what this test exists to prove.
+  const c = await connectConnector({ port: PORT, stateDir: dir, leaseToken: token, clientPid: pid });
   return {
-    client,
-    call: (name, args = {}) => client.callTool({ name, arguments: args }),
-    text: async (name, args = {}) => {
-      const r = await client.callTool({ name, arguments: args });
-      return (r.content ?? []).map((c) => c.text ?? '').join('\n');
-    },
-    close: async () => { try { await transport.terminateSession(); } catch { /* going away */ } await client.close(); },
+    client: c.client,
+    call: (n, a = {}) => c.call(n, a),
+    text: async (n, a = {}) => c.txt(await c.call(n, a)),
+    close: c.close,
   };
 }
 
 const dir = mkdtempSync(join(tmpdir(), 'a2a-resupd-'));
 const PORT = await freePort();
-const URL_ = `http://127.0.0.1:${PORT}/mcp`;
+const URL_ = `http://127.0.0.1:${PORT}`;
 const daemon = spawn('node', [CLI, 'serve'], {
   env: {
     ...process.env, OURS_TRANSPORT: 'http', OURS_PORT: String(PORT), OURS_STATE_DIR: dir,
@@ -126,18 +121,19 @@ try {
   const wanted = `ours://inbox/${encodeURIComponent('Alice')}`;
 
   // MEASURED, NOT ASSUMED, AND NOT "FIXED": the inbox resource is updated on
-  // EVERY notify summary, not only on ones that change the inbox — accepting an
-  // invite pushes one too. That is the baseline's behaviour (pushNotification
-  // has never inspected the event), so it is noise rather than a regression, and
-  // quietly narrowing it here would be a behaviour change smuggled in under a
-  // test fix. It is named so the next person meets it as a known property.
-  // The consequence for THIS test is that "zero updates before the send" is the
-  // wrong pre-condition; the right one is a baseline count to measure against,
-  // which is also what stops the assertion below passing on leftover noise.
+  // THE NOISE THIS ASSERTION USED TO REQUIRE IS GONE, AND ON PURPOSE.
+  //
+  // It used to read `before > 0`, because pushNotification fired an inbox resource
+  // update for EVERY notify summary — including accepting an invite, which does not
+  // change the inbox. The comment here called it noise and said narrowing it would
+  // be "a behaviour change smuggled in under a test fix". It is not smuggled now:
+  // the connector watches `?kinds=inbound`, so contact_accepted no longer announces
+  // a change to a resource it did not change. The assertion is inverted rather than
+  // deleted, so the improvement is pinned and cannot silently regress into noise.
   const before = updates.length;
   const logsBefore = logs.length;
-  ok(before > 0 && updates.every((u) => u === wanted),
-    `pre-send updates are the known contact_accepted noise, on the same uri (${before} seen)`);
+  ok(before === 0,
+    `no pre-send inbox updates: contact_accepted is filtered out daemon-side (${before} seen)`);
 
   await B.call('send_message', { contact: 'Alice', text: 'does the resource update arrive?' });
 

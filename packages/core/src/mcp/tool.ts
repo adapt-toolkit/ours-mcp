@@ -63,6 +63,8 @@ export function textResult(text: string, isError = false): McpTextResult {
 // refused re-bind clears the memory rather than looping.
 let boundIdentity: string | null = null;
 export function rememberBinding(name: string): void { boundIdentity = name; }
+/** What runTool has learned. The inbox watch reads this rather than asking again. */
+export function getBoundIdentity(): string | null { return boundIdentity; }
 export function forgetBinding(): void { boundIdentity = null; }
 
 async function reassertBinding(client: OursClient): Promise<boolean> {
