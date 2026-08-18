@@ -6,7 +6,6 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { OursClient } from '@ours.network/sdk';
 
 import { createOursMcpServer } from './mcp/server.js';
-import { rememberBinding } from './mcp/tool.js';
 import { inboxResourceUri } from './mcp/resources/inbox.js';
 import { pushInboxNotifications } from './mcp/push.js';
 
@@ -120,9 +119,6 @@ export class InboxWatcher {
         this.bumped = false;
         try {
           this.bound = (await this.client.currentIdentity()).name;
-          // One place learns the bound name, and runTool reuses it to re-assert after a
-          // daemon restart. No table of which tools rebind.
-          rememberBinding(this.bound);
           log(`[${this.bound}] watching for arrivals`);
         } catch {
           // NOT_BOUND is the ordinary case on a fresh session, not an error. Wait

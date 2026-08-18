@@ -100,5 +100,13 @@ export async function runTool<T>(
     if (err instanceof OursError) return textResult(err.message, true);
     throw err; // a real bug or an outage — let the MCP layer surface it
   }
+  // LEARN THE BOUND NAME, ONCE, FROM THE ONLY SOURCE THAT CANNOT DRIFT: the daemon.
+  // Fire-and-forget and only while we do not know it, so a bound session pays
+  // nothing. This is what feeds reassertBinding above, and it is deliberately NOT a
+  // list of which tools rebind — that list would be a second vocabulary, and it
+  // would be wrong the first time an operation started or stopped binding.
+  if (boundIdentity === null) {
+    void client.currentIdentity().then((r) => { boundIdentity = r.name; }).catch(() => {});
+  }
   return render(value);
 }
