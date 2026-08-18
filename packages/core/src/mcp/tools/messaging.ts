@@ -23,21 +23,25 @@
 // already happened — the baseline passed that string straight to textResult
 // (index.ts:4625) and so does this file. Re-deriving those two sentences here is
 // exactly the drift the split exists to prevent.
+import { readFileSync } from 'node:fs';
+import { basename, resolve as resolvePath } from 'node:path';
+
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
+  errFileUnreadable,
   deferMessages,
   getMessages,
   listIncomingMessages,
   sendFile,
   sendMessage,
 } from '@ours.network/sdk';
-import type { SessionContext } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
 
 import { fmtMsg } from '../format.js';
 import { runTool, textResult } from '../tool.js';
 
-export function registerMessagingTools(server: McpServer, ctxFor: () => SessionContext): void {
+export function registerMessagingTools(server: McpServer, clientFor: () => OursClient): void {
   server.tool(
     'send_message',
     'Send an end-to-end-encrypted message to a known contact (by name or container id). ' +
@@ -65,8 +69,8 @@ export function registerMessagingTools(server: McpServer, ctxFor: () => SessionC
     },
     async ({ contact, text, reply_to_wire_id, reply_to_sentence }) =>
       runTool(
-        ctxFor(),
-        (ctx) => sendMessage(ctx, { contact, text, reply_to_wire_id, reply_to_sentence }),
+        clientFor(),
+        (c) => c.sendMessage({ contact, text, reply_to_wire_id, reply_to_sentence }),
         (v) => {
           switch (v.kind) {
             case 'refused':
@@ -109,22 +113,57 @@ export function registerMessagingTools(server: McpServer, ctxFor: () => SessionC
   server.tool(
     'send_file',
     'Send a file to a known contact (by name or container id). Provide EITHER `path` ' +
-      '(the server reads the file from disk) OR `data_base64` + `filename` (inline bytes). ' +
+      '(the connector reads it as your OS user) OR `data_base64` + `filename` (inline bytes). ' +
       'Files and text are distinct messages — to caption a file, also send_message. ' +
       'Requires a bound identity.',
     {
       contact: z.string().min(1).describe('Contact name or container id to send to.'),
-      path: z.string().min(1).optional().describe('Filesystem path to the file to send (preferred).'),
+      path: z.string().min(1).optional().describe('Filesystem path to the file to send (preferred). Read by the ours connector as YOUR OS user, then streamed to the daemon.'),
       data_base64: z.string().min(1).optional().describe('Inline file bytes, base64-encoded (alternative to path).'),
       filename: z.string().min(1).optional().describe('Filename to advertise (required with data_base64; defaults to basename of path).'),
       mime: z.string().optional().describe('MIME type (inferred from the path extension when omitted).'),
       reply_to_wire_id: z.string().optional().describe('wire_id (from get_messages/get_files) this file replies to.'),
       reply_to_sentence: z.number().int().positive().optional().describe('Optional 1-based sentence index in the replied-to item.'),
     },
+    // ⚠ `path` IS READ HERE, NOT BY THE DAEMON, AND THAT IS THE WHOLE POINT.
+    //
+    // `sendFile({path})` reads the file in the DAEMON's process as the DAEMON's OS
+    // user. That is correct only while the caller and the daemon are one process.
+    // This connector runs as the AGENT's user, so it reads the file itself and
+    // streams the bytes to the staging route; the send then names the upload.
+    //
+    // Passing `path` straight through typechecks perfectly and fails only at
+    // runtime, on someone else's machine, with a permissions error that has no
+    // workaround. A green compile on this handler is not evidence of correctness.
     async ({ contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }) =>
       runTool(
-        ctxFor(),
-        (ctx) => sendFile(ctx, { contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }),
+        clientFor(),
+        async (c) => {
+          if (!path) {
+            return c.sendFile({ contact, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence });
+          }
+          const abs = resolvePath(path);
+          let bytes: Buffer;
+          try {
+            bytes = readFileSync(abs);
+          } catch (e) {
+            // The SDK's own row for an unreadable file, raised on the side that
+            // actually tried to read it.
+            throw errFileUnreadable(String(e));
+          }
+          const staged = await c.uploadFile(new Uint8Array(bytes), {
+            filename: filename ?? basename(abs),
+            mime,
+          });
+          return c.sendFile({
+            contact,
+            upload_id: staged.upload_id,
+            filename,
+            mime,
+            reply_to_wire_id,
+            reply_to_sentence,
+          });
+        },
         (v) => {
           // The three facts the SDK carries for exactly this prefix (index.ts:4685):
           // `bytes` is the length of what was actually sent, so it is right for both
@@ -176,8 +215,8 @@ export function registerMessagingTools(server: McpServer, ctxFor: () => SessionC
     {},
     async () =>
       runTool(
-        ctxFor(),
-        (ctx) => listIncomingMessages(ctx),
+        clientFor(),
+        (c) => c.listIncomingMessages(),
         (inbox) => {
           if (inbox.length === 0) return textResult('Inbox is empty.');
           const unread = inbox.filter((m) => m.status === 'unread').length;
@@ -204,8 +243,8 @@ export function registerMessagingTools(server: McpServer, ctxFor: () => SessionC
     {},
     async () =>
       runTool(
-        ctxFor(),
-        (ctx) => getMessages(ctx),
+        clientFor(),
+        (c) => c.getMessages(),
         // The payload crosses the boundary as an OBJECT and is stringified HERE —
         // index.ts:4848's line, kept in ours-mcp (ours-sdk api/types.ts:320-327).
         (payload) => textResult(JSON.stringify(payload, null, 2)),
@@ -221,8 +260,8 @@ export function registerMessagingTools(server: McpServer, ctxFor: () => SessionC
     { msg_ids: z.array(z.number().int()).min(1).describe('Message ids (from get_messages) to defer back to unread.') },
     async ({ msg_ids }) =>
       runTool(
-        ctxFor(),
-        (ctx) => deferMessages(ctx, { msg_ids }),
+        clientFor(),
+        (c) => c.deferMessages({ msg_ids }),
         // `deferred` is the packet's own Visualize() string, interpolated unparsed
         // by the baseline (index.ts:4871) — not coerced to a number here either.
         (r) => textResult(`Deferred ${r.deferred} message(s) back to unread.`),

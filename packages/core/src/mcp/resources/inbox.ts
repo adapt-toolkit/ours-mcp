@@ -18,8 +18,8 @@
 // a protocol error exactly as runTool does.
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-import { OursError, listIncomingMessages, requireBound } from '@ours.network/sdk';
-import type { SessionContext } from '@ours.network/sdk';
+import { OursError } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
 
 import { fmtMsg } from '../format.js';
 
@@ -35,20 +35,24 @@ import { fmtMsg } from '../format.js';
  */
 export const inboxResourceUri = (name: string) => `ours://inbox/${encodeURIComponent(name)}`;
 
-export function registerInboxResource(server: McpServer, ctxFor: () => SessionContext): void {
+export function registerInboxResource(server: McpServer, clientFor: () => OursClient): void {
   server.resource(
     'inbox',
     'ours://inbox',
     { description: 'Decrypted incoming messages for the bound identity — auto-notifies on new arrivals.' },
     async () => {
-      const ctx = ctxFor();
+      const client = clientFor();
       // The baseline collapses ALL FOUR binding failures into one fixed sentence
       // and the generic 'ours://inbox' uri (index.ts:4100-4101) — it never renders
       // the specific error text the tools do. So the OursError is caught and
       // discarded on purpose here; only whether it threw is load-bearing.
+      //
+      // Costs a second round trip: the bound name is not a local fact any more.
+      // Caching it at bind time would be a local shadow of daemon-owned state that
+      // goes wrong exactly when a rebind happens elsewhere.
       let boundName: string;
       try {
-        boundName = requireBound(ctx).name;
+        boundName = (await client.currentIdentity()).name;
       } catch (err) {
         if (err instanceof OursError) {
           return {
@@ -64,7 +68,7 @@ export function registerInboxResource(server: McpServer, ctxFor: () => SessionCo
       // OursError ('list_incoming_messages failed: …') where the baseline
       // propagated the raw throw. Both surface as a protocol error from a
       // resource, which has no isError channel to report them on.
-      const inbox = await listIncomingMessages(ctx);
+      const inbox = await client.listIncomingMessages();
       const text = inbox.length === 0
         ? 'Inbox is empty.'
         : `Inbox (${inbox.length}):\n${inbox.map((m) => fmtMsg(m)).join('\n')}`;

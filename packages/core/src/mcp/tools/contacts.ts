@@ -35,7 +35,7 @@ import {
   revokeInvite,
   setLocalBookPolicy,
 } from '@ours.network/sdk';
-import type { ContactRoot, SessionContext } from '@ours.network/sdk';
+import type { ContactRoot, OursClient } from '@ours.network/sdk';
 
 import { buildContactLines } from '../../contacts.js';
 import { runTool, textResult } from '../tool.js';
@@ -51,7 +51,7 @@ function fmtContactRoot(r: ContactRoot | undefined): string {
   return r.role_id ? `  [role "${r.role_id}" of ${who}]` : `  [root identity of ${who}]`;
 }
 
-export function registerContactsTools(server: McpServer, ctxFor: () => SessionContext): void {
+export function registerContactsTools(server: McpServer, clientFor: () => OursClient): void {
   server.tool(
     'generate_invite',
     'Generate an invite to share out-of-band with another agent. The invite ' +
@@ -69,8 +69,8 @@ export function registerContactsTools(server: McpServer, ctxFor: () => SessionCo
     },
     async ({ name, mode }) =>
       runTool(
-        ctxFor(),
-        (ctx) => generateInvite(ctx, { name, mode }),
+        clientFor(),
+        (c) => c.generateInvite({ name, mode }),
         (r) => {
           // The heading needs the caller's own `name` argument as well as the result:
           // a one-time invite reads differently depending on whether a name was
@@ -97,8 +97,8 @@ export function registerContactsTools(server: McpServer, ctxFor: () => SessionCo
     {},
     async () =>
       runTool(
-        ctxFor(),
-        (ctx) => listInvites(ctx),
+        clientFor(),
+        (c) => c.listInvites(),
         (rows) => {
           if (rows.length === 0) return textResult('No outstanding invites.');
           // `assigned` / `created` are '' (never the packet's '%%NIL' sentinel) when
@@ -122,8 +122,8 @@ export function registerContactsTools(server: McpServer, ctxFor: () => SessionCo
     { invite_id: z.string().min(1).describe('The invite_id to revoke.') },
     async ({ invite_id }) =>
       runTool(
-        ctxFor(),
-        (ctx) => revokeInvite(ctx, { invite_id }),
+        clientFor(),
+        (c) => c.revokeInvite({ invite_id }),
         (r) => {
           // revoked: false is the idempotent no-op, and it is NOT an error result.
           if (!r.revoked) {
@@ -146,8 +146,8 @@ export function registerContactsTools(server: McpServer, ctxFor: () => SessionCo
     },
     async ({ invite, name }) =>
       runTool(
-        ctxFor(),
-        (ctx) => addContact(ctx, { invite, name }),
+        clientFor(),
+        (c) => c.addContact({ invite, name }),
         // `display` is the packet's own choice of label — pending name, else the
         // inviter's announced name, else the container id.
         (r) => textResult(`Added contact "${r.display}" (${r.cid}).`),
@@ -161,8 +161,8 @@ export function registerContactsTools(server: McpServer, ctxFor: () => SessionCo
     {},
     async () =>
       runTool(
-        ctxFor(),
-        (ctx) => listContacts(ctx),
+        clientFor(),
+        (c) => c.listContacts(),
         ({ contacts, pending, roots, degraded, renames }) => {
           const degradedByCid = new Map(degraded.map((d) => [d.cid, d]));
           const lines: string[] = [];
@@ -200,8 +200,8 @@ export function registerContactsTools(server: McpServer, ctxFor: () => SessionCo
     // one moment an agent most needs it. `isMine` is still session-scoped.
     async () =>
       runTool(
-        ctxFor(),
-        (ctx) => listLocalContactBook(ctx),
+        clientFor(),
+        (c) => c.listLocalContactBook(),
         (entries) => {
           if (entries.length === 0) return textResult('The local contact book is empty.');
           const lines = entries.map((e) => {
@@ -224,8 +224,8 @@ export function registerContactsTools(server: McpServer, ctxFor: () => SessionCo
     },
     async ({ expose, auto_accept }) =>
       runTool(
-        ctxFor(),
-        (ctx) => setLocalBookPolicy(ctx, { expose, auto_accept }),
+        clientFor(),
+        (c) => c.setLocalBookPolicy({ expose, auto_accept }),
         // `changes` arrives already worded and already ORDERED (policy before
         // exposure) because that wording and that order are baseline UX; this layer
         // adds only the frame.
@@ -244,8 +244,8 @@ export function registerContactsTools(server: McpServer, ctxFor: () => SessionCo
     },
     async ({ contact, action }) =>
       runTool(
-        ctxFor(),
-        (ctx) => respondToIntroduction(ctx, { contact, action }),
+        clientFor(),
+        (c) => c.respondToIntroduction({ contact, action }),
         // Discriminated on `action` because the two paths report different facts —
         // and have different side effects, which the SDK owns: approving flushes the
         // queued messages and schedules a capability reconcile, rejecting does neither.
@@ -278,8 +278,8 @@ export function registerContactsTools(server: McpServer, ctxFor: () => SessionCo
     { contact: z.string().min(1).describe('Contact name or container id to remove.') },
     async ({ contact }) =>
       runTool(
-        ctxFor(),
-        (ctx) => removeContact(ctx, { contact }),
+        clientFor(),
+        (c) => c.removeContact({ contact }),
         (r) => {
           // `notified` is TRI-STATE and the third state is load-bearing: undefined
           // means the packet said nothing (a pre-0.13 or degraded peer — nothing was
@@ -310,8 +310,8 @@ export function registerContactsTools(server: McpServer, ctxFor: () => SessionCo
     },
     async ({ contact, name }) =>
       runTool(
-        ctxFor(),
-        (ctx) => renameContact(ctx, { contact, name }),
+        clientFor(),
+        (c) => c.renameContact({ contact, name }),
         // `from` is the PREVIOUS display name; the new one is the caller's argument.
         (r) => textResult(`Renamed contact "${r.from}" to "${name}" (${r.cid}).`),
       ),

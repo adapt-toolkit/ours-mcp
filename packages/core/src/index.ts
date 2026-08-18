@@ -25,14 +25,14 @@
 // That is the same duplicated-module-state failure ours-sdk hit at Task 6, one
 // level up, so the cut is all-at-once by construction.
 //
-// The stdio branch stays here rather than in the SDK: `startDaemon` is the HTTP
-// daemon, and a single stdio session is ours-mcp's own front door.
+// The stdio branch is gone from here: the MCP front door is `ours-mcp proxy`
+// (./connector.ts), a separate process that talks to this daemon over its API.
 import * as fs from 'node:fs';
 
 import { startupProgress } from '@ours.network/sdk/daemon';
 
 import { loadConfig } from './config';
-import { serve, serveStdio } from './serve.js';
+import { serve } from './serve.js';
 
 // Injected at build time by build.mjs (esbuild `define`) from package.json.
 declare const __OURS_VERSION__: string;
@@ -59,9 +59,15 @@ async function main(): Promise<void> {
     throw new Error('forced startup failure (OURS_TEST_STARTUP_FAIL)');
   }
 
+  // Removed on purpose: it built an MCP server on the in-process engine and had no
+  // daemon lifecycle (no notify hook, no GC sweeps, no shutdown save; ours-sdk#18).
+  // The stdio server is now `ours-mcp proxy`, a separate process.
   if (TRANSPORT === 'stdio') {
-    await serveStdio(VERSION);
-    return;
+    throw new Error(
+      'OURS_TRANSPORT=stdio is no longer served by the daemon entry point. The stdio MCP server is a ' +
+      'separate process that talks to the daemon over its HTTP API: start the daemon (`ours-mcp start`) ' +
+      'and run `ours-mcp proxy` for the stdio surface.',
+    );
   }
 
   fs.mkdirSync(STATE_DIR, { recursive: true });

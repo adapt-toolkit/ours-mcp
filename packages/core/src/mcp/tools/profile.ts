@@ -20,11 +20,11 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import { advertiseMigrate, setBio, setPersona } from '@ours.network/sdk';
-import type { SessionContext } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
 
 import { runTool, textResult } from '../tool.js';
 
-export function registerProfileTools(server: McpServer, ctxFor: () => SessionContext): void {
+export function registerProfileTools(server: McpServer, clientFor: () => OursClient): void {
   server.tool(
     'set_bio',
     "Set the bound identity's profile bio (free text). For a role, the bio is " +
@@ -33,8 +33,8 @@ export function registerProfileTools(server: McpServer, ctxFor: () => SessionCon
     { bio: z.string().describe('The new bio text (empty string clears it).') },
     async ({ bio }) =>
       runTool(
-        ctxFor(),
-        (ctx) => setBio(ctx, { bio }),
+        clientFor(),
+        (c) => c.setBio({ bio }),
         (r) => {
           const suffix = r.rolesRefreshed > 0 ? ` Root profile refreshed in ${r.rolesRefreshed} role(s).` : '';
           return textResult(`Updated the bio of "${r.identity}".${suffix}`);
@@ -55,8 +55,8 @@ export function registerProfileTools(server: McpServer, ctxFor: () => SessionCon
     {},
     async () =>
       runTool(
-        ctxFor(),
-        (ctx) => advertiseMigrate(ctx),
+        clientFor(),
+        (c) => c.advertiseMigrate(),
         ({ wasAdvertising, advertising, offers }) => {
           const already = wasAdvertising ? ' (already advertising — cap unchanged)' : '';
           return textResult(
@@ -76,8 +76,8 @@ export function registerProfileTools(server: McpServer, ctxFor: () => SessionCon
     { persona: z.string().describe('The new persona text (empty string clears it).') },
     async ({ persona }) =>
       runTool(
-        ctxFor(),
-        (ctx) => setPersona(ctx, { persona }),
+        clientFor(),
+        (c) => c.setPersona({ persona }),
         // persona is local-only and never carried in invites: no root-profile refresh (unlike set_bio).
         (r) => textResult(`Updated the persona of "${r.identity}".`),
       ),

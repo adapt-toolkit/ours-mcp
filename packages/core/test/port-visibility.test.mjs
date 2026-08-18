@@ -72,10 +72,13 @@ console.log('port-visibility\n');
       const noAuth = await fetch(`http://127.0.0.1:${PORT}/identities`);
       ok(noAuth.status === 401, '(owner) GET /identities without token → 401');
 
-      const mcpNoAuth = await fetch(`http://127.0.0.1:${PORT}/mcp`, {
-        method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: INIT_BODY,
+      // Was POST /mcp. The daemon hosts no MCP server, so the surface this guards
+      // is the typed API — and it must 401 BEFORE it reveals whether an operation
+      // exists, which is why the assertion is 401 and not 404.
+      const apiNoAuth = await fetch(`http://127.0.0.1:${PORT}/api/v1/currentIdentity`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
       });
-      ok(mcpNoAuth.status === 401, '(owner) POST /mcp without token → 401');
+      ok(apiNoAuth.status === 401, '(owner) POST /api/v1 without token → 401');
 
       // With the token → allowed.
       const withAuth = await fetch(`http://127.0.0.1:${PORT}/identities`, { headers: { 'x-ours-api-token': token } });

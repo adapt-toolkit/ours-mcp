@@ -13,6 +13,16 @@ import type { IncomingFileMeta, InboxMsg, ReceivedFileMeta } from '@ours.network
 // access(2) resolves against the REAL uid/gid and needs +x on every parent, so a
 // daemon-owned 0700 state dir correctly reports unreadable here. No setuid in
 // play, so real == effective and this is exactly what the agent would hit.
+// proxy.ts:104-106, verbatim, and it lives HERE rather than at a call site so the
+// override has ONE home. It forces the readability probe to report unreadable —
+// for agents that must place received files explicitly (sandboxes, shared-uid
+// containers) rather than reach into the daemon's state dir, and it is the seam
+// test/file-save-stream.test.mjs uses to exercise the unreadable branch as a
+// single OS user.
+export const FILES_ALWAYS_PROMPT = ['1', 'true', 'yes', 'on'].includes(
+  (process.env.OURS_FILES_ALWAYS_PROMPT ?? '').trim().toLowerCase(),
+);
+
 export const canRead = (p: string): boolean => {
   try { accessSync(p, fsConstants.R_OK); return true; } catch { return false; }
 };
@@ -112,43 +122,10 @@ export function annotateGetFilesResult(result: unknown, readable: (p: string) =>
   return true;
 }
 
-/**
- * ============================================================================
- * THE FRAME CONTRACT — the reason this adapter exists at all
- * ============================================================================
- * `proxy.ts` used to unwrap the JSON-RPC envelope itself before annotating:
- *
- *     annotateGetFilesResult((msg as { result?: unknown }).result, …)   // proxy.ts:704
- *
- * The SDK connector deliberately does NOT, because it must not know what an MCP
- * result looks like. It hands the host the WHOLE RESPONSE FRAME:
- *
- *     opts.annotateResult?.(msg)          // sdk src/connector.ts:731
- *
- * Passing `annotateGetFilesResult` straight in as the hook therefore hands it
- * `{jsonrpc, id, result}`, where `structuredContent` is `undefined` — so it
- * returns false and DOES NOTHING, on every cross-user get_files, with no error
- * and no log line on either side of the seam. This adapter is the fix, and it is
- * the only correct way to install the annotator.
- *
- * Gated by `test/file-save-stream.test.mjs:206-227` here — it spawns a proxy with
- * `OURS_FILES_ALWAYS_PROMPT=1`, which forces the probe to report unreadable, and
- * asserts the prompt is PREPENDED to the daemon's own text — and by
- * `test/proxy-annotate-hook.test.mjs` in ours-sdk: the two halves of one
- * contract, one test each side. (This said `test/annotate-frame.test.mjs`, which
- * does not exist; the contract was gated all along, just somewhere else.)
- *
- * `readable` IS REQUIRED, DELIBERATELY. It defaulted to `canRead` and that cost
- * us the second silent drop in this same seam: `proxy.ts:706` passed the probe
- * EXPLICITLY as `FILES_ALWAYS_PROMPT ? () => false : canRead`, and a call site
- * that simply passed the function bare inherited the default and silently lost
- * the override. This annotator reports by NOT annotating, so losing its probe
- * looks exactly like "nothing needed annotating" — there is no failure to see.
- * A defaultable argument on a function of that shape is a trap; make every
- * caller say which probe it means.
- */
-export function annotateResultFrame(message: unknown, readable: (p: string) => boolean): boolean {
-  const frame = message as { result?: unknown } | undefined;
-  if (!frame || typeof frame !== 'object' || !('result' in frame)) return false;
-  return annotateGetFilesResult(frame.result, readable);
-}
+// `annotateResultFrame` USED TO BE HERE AND IS GONE WITH THE PROXY.
+//
+// It unwrapped a JSON-RPC frame's `.result` and handed it to the annotator above,
+// because the proxy only ever saw FRAMES. The tool handler sees the RESULT
+// OBJECT directly (src/mcp/tools/files.ts), so the wrapper has no caller and no
+// reason to exist. Its trap is worth remembering rather than the function:
+// passing the annotator a frame instead of a result annotates NOTHING, silently.

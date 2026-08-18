@@ -22,12 +22,13 @@ import { pkgSpec, resolveChannel } from './logic.mjs';
 // effects.installedVersion('@ours.network/mcp@nightly') return null forever,
 // which fails the cowork version floor CLOSED and blanks the version column —
 // a silent regression that looks like "cowork is too old".
-// `required` is not a stronger default — it is the absence of a choice. The MCP
-// package IS the daemon now (the daemon phase installs and starts it), so an
-// operator who declined it would have no daemon at all, which is not a decision
-// anyone means to make. Declining has to be impossible rather than discouraged.
+// `required` is not a stronger default — it is the absence of a choice. The
+// daemon is the ours-sdk CLI and this package is the MCP server every harness
+// speaks to it through, so an operator who declined it would have a daemon no
+// harness can reach — which is not a decision anyone means to make. Declining
+// has to be impossible rather than discouraged.
 export const COMPONENTS = [
-  { key: 'mcp', label: 'ours daemon + MCP server', pkg: '@ours.network/mcp', specKey: 'mcp', default: true, required: true },
+  { key: 'mcp', label: 'MCP server for your harness', pkg: '@ours.network/mcp', specKey: 'mcp', default: true, required: true },
   { key: 'tg', label: 'Telegram connector', pkg: '@ours.network/tg-connector', specKey: 'tg-connector', default: false },
   { key: 'cowork', label: 'cowork', pkg: '@ours.network/cowork', specKey: 'cowork', default: false },
 ];

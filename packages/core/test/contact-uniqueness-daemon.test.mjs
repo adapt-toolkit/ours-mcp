@@ -10,8 +10,7 @@
 //             the established channel survives a rename (send still delivers).
 //
 // Standalone run (from packages/core):  node test/contact-uniqueness-daemon.test.mjs
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { connectConnector } from './fixtures/connector-client.mjs';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
@@ -44,12 +43,11 @@ const daemon = spawn('node', [CLI, 'serve'], {
 const clients = [];
 // One MCP client per identity (each with its own lease token) — no rebinding.
 async function mkClient(tag) {
-  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), {
-    requestInit: { headers: { 'x-ours-lease-token': `uniq-${tag}-${PORT}`, 'x-ours-client-pid': String(process.pid) } },
-  });
-  const client = new Client({ name: `uniq-${tag}`, version: '0.0.0' });
-  await client.connect(transport);
-  clients.push({ client, transport });
+  // One connector per identity, each with its own lease token — so each is its own
+  // session and nothing rebinds.
+  const conn = await connectConnector({ port: PORT, stateDir: dir, leaseToken: `uniq-${tag}-${PORT}` });
+  const client = conn.client;
+  clients.push(conn);
   // Returns the full text; callers inspect r.isError via the second element.
   return async (name, args = {}) => {
     const r = await withTimeout(client.callTool({ name, arguments: args }), 30_000, `${tag}:${name}`);
@@ -194,7 +192,7 @@ try {
   fail += 1;
   console.error('  ✗ SUITE ERROR:', err);
 } finally {
-  for (const { client, transport } of clients) { try { await transport.terminateSession(); await client.close(); } catch {} }
+  for (const c of clients) { try { await c.close(); } catch { /* already gone */ } }
   daemon.kill('SIGTERM');
   broker.kill('SIGTERM');
   await sleep(500);

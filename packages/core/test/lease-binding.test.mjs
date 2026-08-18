@@ -1,9 +1,9 @@
 // packages/core/test/lease-binding.test.mjs
 // Drives the BUILT daemon over loopback HTTP as TWO synthetic connectors
 // (distinct tokens/pids) to exercise the lease table directly.
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { spawn } from 'node:child_process';
+import { connectConnector } from './fixtures/connector-client.mjs';
+import { OursClient } from '@ours.network/sdk';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,23 +18,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res, rej) => { const s = createServer(); s.listen(0, () => { const p = s.address().port; s.close(() => res(p)); }); s.on('error', rej); });
 
 // A connector = an MCP client with fixed token+pid headers.
-async function connector(url, token, pid) {
-  const transport = new StreamableHTTPClientTransport(new URL(url), {
-    requestInit: { headers: { 'x-ours-lease-token': token, 'x-ours-client-pid': String(pid) } },
-  });
-  const client = new Client({ name: `c-${token}`, version: '0.0.0' });
-  await client.connect(transport);
-  return {
-    client,
-    call: (name, args = {}) => client.callTool({ name, arguments: args }),
-    close: async () => { await transport.terminateSession(); await client.close(); },
-  };
+async function connector(_url, token, pid) {
+  // `_url` is ignored: the connector is spawned, not dialled, and takes its port
+  // and state dir from the env. The token and pid still select the session.
+  const c = await connectConnector({ port: PORT, stateDir: dir, leaseToken: token, clientPid: pid });
+  return { client: c.client, call: c.call, close: c.close };
 }
 const isErr = (r) => r.isError === true || (Array.isArray(r.content) && /failed|declined|reassigned|No identity/i.test(r.content.map((c) => c.text || '').join(' ')));
 
 const dir = mkdtempSync(join(tmpdir(), 'a2a-lease-'));
 const PORT = await freePort();
-const URL_ = `http://127.0.0.1:${PORT}/mcp`;
+const URL_ = `http://127.0.0.1:${PORT}`;
 // This suite drives /mcp directly as synthetic connectors (no proxy, no API
 // token), so run the daemon in `open` visibility — auth is covered separately by
 // port-visibility.test.mjs.
@@ -65,11 +59,17 @@ try {
   const D = await connector(URL_, 'tokD', process.pid);
   ok(!isErr(await D.call('choose_identity', { name: 'Bob' })), 'D auto-reclaims Bob from a dead pid (no force)');
 
-  // Clean release frees immediately: B releases (close → DELETE), E binds plainly.
+  // ⚠ CLOSING A CONNECTOR NO LONGER RELEASES ITS LEASE, and that is deliberate:
+  // stdin closing cannot be told apart from an idle teardown that will respawn, and
+  // releasing there loses the binding (test/lease-survives-respawn.test.mjs). The
+  // release is now EXPLICIT — the typed operation — so this drives that instead.
   await B.close();
   await sleep(300);
+  const bClient = new OursClient({ url: URL_, leaseToken: 'tokB', clientPid: process.pid });
+  await bClient.releaseLease();
+  await sleep(300);
   const E = await connector(URL_, 'tokE', process.pid);
-  ok(!isErr(await E.call('choose_identity', { name: 'Alice' })), 'E binds Alice after B released it');
+  ok(!isErr(await E.call('choose_identity', { name: 'Alice' })), 'E binds Alice after B explicitly released it');
 
   // Idle-protection: a holder whose CLIENT pid is alive is NOT reclaimable without force,
   // even after its connector has been torn down (simulating an idle Claude session).

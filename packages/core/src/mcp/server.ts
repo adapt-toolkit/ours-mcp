@@ -14,11 +14,10 @@
 // identity, contacts, profile, messaging, files — so a tool and the operation
 // behind it are one import apart.
 //
-// MONITORING IS NOT IN THAT LIST ANY MORE. bind_monitoring_proxy and
-// get_monitoring_status were removed with the daemon-side control plane
-// (ours-sdk 0b84122), so there are no operations behind them to adapt. The
-// surface remains in the PROTOCOL CORE, untouched, for whenever it is
-// reimplemented — this repo simply no longer exposes it as MCP tools.
+// No monitoring tools: they were removed with the daemon-side control plane
+// (ours-sdk 0b84122) and the owner has ruled they stay out. A DEFERRAL, not a
+// deletion of the capability — pairing a messenger to a machine has no route
+// after this, and re-adding it needs an authorization rule that does not exist.
 //
 // ----- WHY `ctx` IS PASSED AS A THUNK -------------------------------------
 // `startDaemon` hands us a `SessionContext` whose three members are GETTERS
@@ -30,7 +29,7 @@
 // table as it is NOW.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-import type { SessionContext } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
 
 import { registerInboxResource } from './resources/inbox.js';
 import { registerContactsTools } from './tools/contacts.js';
@@ -43,19 +42,19 @@ import { registerProfileTools } from './tools/profile.js';
  * Build the per-session MCP server. Handed to `startDaemon` as
  * `mcp.createServer`, and called once per MCP session.
  */
-export function createOursMcpServer(ctx: SessionContext, version: string): McpServer {
+export function createOursMcpServer(client: OursClient, version: string): McpServer {
   const server = new McpServer(
     { name: 'ours', version },
     { capabilities: { logging: {}, resources: {} } },
   );
 
-  const ctxFor = () => ctx;
+  const clientFor = () => client;
 
-  registerIdentityTools(server, ctxFor);
-  registerContactsTools(server, ctxFor);
-  registerProfileTools(server, ctxFor);
-  registerMessagingTools(server, ctxFor);
-  registerFilesTools(server, ctxFor);
+  registerIdentityTools(server, clientFor);
+  registerContactsTools(server, clientFor);
+  registerProfileTools(server, clientFor);
+  registerMessagingTools(server, clientFor);
+  registerFilesTools(server, clientFor);
 
   // The one registration that is not a tool: `ours://inbox` (was
   // index.ts:4094-4107). Both developers flagged it as belonging to no
@@ -63,7 +62,7 @@ export function createOursMcpServer(ctx: SessionContext, version: string): McpSe
   // directly. Left behind when index.ts was gutted it would have gone on reading
   // the OLD engine, a live seam in the one place that is not a tool. It is a
   // seventh registrar for exactly the same reason as the other six.
-  registerInboxResource(server, ctxFor);
+  registerInboxResource(server, clientFor);
 
   return server;
 }

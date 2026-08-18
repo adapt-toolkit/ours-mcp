@@ -31,17 +31,15 @@
 // message content on every failed transcription.
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import {
-  FILE_SELECTION_CAP,
-  OursError,
-  errSaveFileFallback,
-  getFiles,
-  listIncomingFiles,
-  saveFileFallbackNotice,
-} from '@ours.network/sdk';
-import type { SessionContext } from '@ours.network/sdk';
+import { createWriteStream, mkdirSync, statSync } from 'node:fs';
+import { dirname, resolve as resolvePath } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
-import { renderFiles } from '../format.js';
+import { FILE_SELECTION_CAP, OursError } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
+
+import { annotateGetFilesResult, canRead, FILES_ALWAYS_PROMPT, renderFiles } from '../format.js';
 import { runTool, textResult, type McpTextResult } from '../tool.js';
 
 // The four selection codes, and the `error_category` each one renders as. An
@@ -63,7 +61,7 @@ const SELECTION_CATEGORY: Record<string, string> = {
 // so the bare form is derived from the one source of truth rather than restated.
 const GET_FILES_PREFIX = 'get_files failed: ';
 
-export function registerFilesTools(server: McpServer, ctxFor: () => SessionContext): void {
+export function registerFilesTools(server: McpServer, clientFor: () => OursClient): void {
   server.tool(
     'list_incoming_files',
     'List received files as structured metadata only — authenticated sender CID in ' +
@@ -74,8 +72,8 @@ export function registerFilesTools(server: McpServer, ctxFor: () => SessionConte
     {},
     async () =>
       runTool(
-        ctxFor(),
-        (ctx) => listIncomingFiles(ctx),
+        clientFor(),
+        (c) => c.listIncomingFiles(),
         (files) => ({
           content: [{ type: 'text' as const, text: renderFiles(files) }],
           structuredContent: { count: files.length, files },
@@ -105,11 +103,10 @@ export function registerFilesTools(server: McpServer, ctxFor: () => SessionConte
     },
     async ({ wire_ids }): Promise<McpTextResult> => {
       try {
-        const out = await getFiles(ctxFor(), { wire_ids });
-        // structuredContent carries the same records the prose lists. The proxy
-        // reads it to probe readability as the agent's OS user (issue #34); no
+        const out = await clientFor().getFiles({ wire_ids });
+        // structuredContent carries the same records the prose lists. No
         // outputSchema is declared, so this stays additive for every other client.
-        return {
+        const result: McpTextResult = {
           content: [{ type: 'text' as const, text: out.text }],
           structuredContent: {
             files: out.files,
@@ -123,6 +120,13 @@ export function registerFilesTools(server: McpServer, ctxFor: () => SessionConte
           },
           isError: false,
         };
+        // The probe runs here because only this process knows its own uid. Same
+        // function the proxy used, on the RESULT rather than the frame — the frame
+        // wrapper existed only because the proxy saw frames, and passing it a frame
+        // annotates nothing, silently. PREPENDS, never substitutes: the daemon text
+        // can carry a voice transcript this side cannot reconstruct.
+        annotateGetFilesResult(result, FILES_ALWAYS_PROMPT ? () => false : canRead);
+        return result;
       } catch (e) {
         // ⚠ DO NOT "TIDY" THIS BACK THROUGH runTool. Source: index.ts:4924-4936.
         // runTool renders `.message` and nothing else, so routing the four
@@ -172,21 +176,31 @@ export function registerFilesTools(server: McpServer, ctxFor: () => SessionConte
       wire_id: z.string().min(1).describe('wire_id of the received file (from get_files).'),
       dest_path: z.string().min(1).describe('Destination path on your local filesystem to write the copy to.'),
     },
-    // Reaching THIS daemon-side handler means the ours proxy did not intercept and
-    // fulfil the transfer — i.e. the connector is too old to stream+write the bytes as
-    // your OS user. We deliberately do NOT write daemon-side: the daemon runs as its
-    // owner, so a cross-user dest would be wrong-owner or EACCES. Fail clearly and point
-    // at the fallback. A current proxy performs save_file locally and never forwards here.
-    //
-    // The sentence is built by the SDK's own `errSaveFileFallback` rather than
-    // re-typed: its trailing parenthetical depends on `existsOnDisk`, and that
-    // builder is what the error-parity gate holds to the baseline. The operation
-    // only reports whether the file is on disk — nothing is saved either way.
-    async ({ wire_id }) =>
-      runTool(
-        ctxFor(),
-        (ctx) => saveFileFallbackNotice(ctx, { wire_id }),
-        (notice) => textResult(errSaveFileFallback(wire_id, notice.existsOnDisk).message, true),
-      ),
+    // This handler DOES THE WRITE. It used to be a refusal because the daemon runs
+    // as its owner and a cross-user destination is EACCES; this process is the
+    // agent's user. STREAMED — `fetchFile` would make the whole file resident and
+    // break this tool's own promise. `saveFileFallbackNotice` is now unreachable
+    // from ours-mcp and stays in the SDK for clients with no connector.
+    async ({ wire_id, dest_path }): Promise<McpTextResult> => {
+      // proxy.ts:557, verbatim. A wire_id names a path segment on the daemon, so a
+      // charset check belongs before the request, not after it.
+      if (!/^[A-Za-z0-9]+$/.test(wire_id)) return textResult('save_file: invalid wire_id.', true);
+      try {
+        const body = await clientFor().openFile(wire_id);
+        const abs = resolvePath(dest_path);
+        mkdirSync(dirname(abs), { recursive: true });
+        await pipeline(Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(abs));
+        const size = statSync(abs).size;
+        return textResult(
+          `Saved file (wire_id ${wire_id}) to ${abs} (${size} bytes). ` +
+          'The bytes were streamed daemon→disk and never entered this result.',
+        );
+      } catch (e) {
+        // The daemon's own 404 text already says "run get_files first, or it
+        // belongs to another identity", so it is passed through rather than
+        // re-worded — re-wording it here would be a second copy that drifts.
+        return textResult(`save_file failed: ${e instanceof Error ? e.message : String(e)}`, true);
+      }
+    },
   );
 }

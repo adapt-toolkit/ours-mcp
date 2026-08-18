@@ -84,6 +84,16 @@ await build({
   outfile: resolve(dist, 'cli.js'),
 });
 
+// The stdio connector. Loaded by cli.js through a COMPUTED specifier, exactly as
+// dist/index.js is, so esbuild cannot bundle it into the CLI — it pulls the MCP
+// tool registrars and, through them, the SDK engine, whose module-load side
+// effects print to stdout and corrupt every parseable CLI output.
+await build({
+  ...shared,
+  entryPoints: [resolve(root, 'src/connector.ts')],
+  outfile: resolve(dist, 'connector.js'),
+});
+
 // Pure file helpers (mimeFromExt / sanitizeFilename). index.ts inlines these when
 // it imports './files.js', but emit them as a standalone module too so the
 // unit test (test/files-helpers.test.mjs) can import ../dist/files.js directly.
@@ -148,16 +158,6 @@ await build({
   ...shared,
   entryPoints: [resolve(root, 'src/startup-progress.ts')],
   outfile: resolve(dist, 'startup-progress.js'),
-});
-
-// SSE keepalive (the 300s inter-chunk-timeout fix). index.ts imports it via
-// './sse-keepalive.js'; emit a standalone module too so test/sse-keepalive.test.mjs
-// can drive the REAL shipped function against a real HTTP server + the real MCP
-// transport, rather than a copy of it living in the test.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/sse-keepalive.ts')],
-  outfile: resolve(dist, 'sse-keepalive.js'),
 });
 
 // Pure contact-list rendering (duplicate-name markers). Standalone for the unit

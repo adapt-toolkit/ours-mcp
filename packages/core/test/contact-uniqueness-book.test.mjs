@@ -13,8 +13,7 @@
 // The divergent book is arranged by editing book.json between daemon runs —
 // entries are host-local bookkeeping (the registrar signature is verified at
 // CONNECT time, not by unpublish), so this models the divergence directly.
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { connectConnector } from './fixtures/connector-client.mjs';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
@@ -42,17 +41,14 @@ async function withDaemon(fn) {
   });
   try {
     for (let i = 0; i < 120; i++) { try { if ((await fetch(`http://127.0.0.1:${PORT}/version`)).ok) break; } catch {} await sleep(250); }
-    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), {
-      requestInit: { headers: { 'x-ours-lease-token': `book-test-${PORT}`, 'x-ours-client-pid': String(process.pid) } },
-    });
-    const client = new Client({ name: 'book-test', version: '0.0.0' });
-    await client.connect(transport);
+        const conn = await connectConnector({ port: PORT, stateDir: dir });
+    const client = conn.client;
     const call = async (name, args = {}) => {
       const r = await client.callTool({ name, arguments: args });
       return { text: txt(r), isError: !!r.isError };
     };
     await fn(call);
-    try { await transport.terminateSession(); await client.close(); } catch {}
+    try { await conn.close(); } catch {}
   } finally {
     daemon.kill('SIGTERM');
     await sleep(1000);

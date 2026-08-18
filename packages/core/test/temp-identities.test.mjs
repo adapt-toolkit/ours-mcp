@@ -5,8 +5,7 @@
 // daemon-restart behaviors (live owner survives; stale owner + orphan dirs are
 // reclaimed by the boot sweep). Offline (invalid broker) — remove-me delivery
 // is covered by scripts/test-temp-remove-me-mufl.sh.
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { connectConnector } from './fixtures/connector-client.mjs';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
@@ -21,24 +20,17 @@ const ok = (c, m) => { c ? (pass++, console.log('  ✓', m)) : (fail++, console.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res, rej) => { const s = createServer(); s.listen(0, () => { const p = s.address().port; s.close(() => res(p)); }); s.on('error', rej); });
 
-async function connector(url, token, pid) {
-  const transport = new StreamableHTTPClientTransport(new URL(url), {
-    requestInit: { headers: { 'x-ours-lease-token': token, 'x-ours-client-pid': String(pid) } },
-  });
-  const client = new Client({ name: `c-${token}`, version: '0.0.0' });
-  await client.connect(transport);
-  return {
-    client,
-    call: (name, args = {}) => client.callTool({ name, arguments: args }),
-    close: async () => { await transport.terminateSession(); await client.close(); },
-  };
+async function connector(_url, token, pid) {
+  // `_url` is ignored: the connector is spawned, not dialled, and takes its port
+  // and state dir from the env. The token and pid still select the session.
+  const c = await connectConnector({ port: PORT, stateDir: dir, leaseToken: token, clientPid: pid });
+  return { client: c.client, call: c.call, close: c.close };
 }
 const text = (r) => (Array.isArray(r.content) ? r.content.map((c) => c.text || '').join(' ') : '');
 const isErr = (r) => r.isError === true;
 
 const dir = mkdtempSync(join(tmpdir(), 'a2a-temp-'));
 const PORT = await freePort();
-const URL_ = `http://127.0.0.1:${PORT}/mcp`;
 const env = { ...process.env, OURS_TRANSPORT: 'http', OURS_PORT: String(PORT), OURS_STATE_DIR: dir, OURS_BROKER_URL: 'wss://invalid.local/none', OURS_API_VISIBILITY: 'open' };
 const startDaemon = () => spawn('node', [CLI, 'serve'], { env, stdio: 'ignore' });
 const waitUp = async () => { for (let i = 0; i < 120; i++) { try { if ((await fetch(`http://127.0.0.1:${PORT}/version`)).ok) return; } catch {} await sleep(250); } throw new Error('daemon did not come up'); };
@@ -52,7 +44,7 @@ try {
   const deadPid = corpse.pid;
   await new Promise((r) => corpse.on('exit', r));
 
-  const A = await connector(URL_, 'tokA', process.pid);
+  const A = await connector(null, 'tokA', process.pid);
 
   // --- creation --------------------------------------------------------------
   const cr = await A.call('create_temporary_identity', { name: 'Scratch' });
@@ -69,7 +61,7 @@ try {
   const dup = await A.call('create_temporary_identity', { name: 'Scratch' });
   ok(isErr(dup) && /already exists/.test(text(dup)), 'explicit-name collision with an existing identity is refused');
 
-  const B = await connector(URL_, 'tokB', process.pid);
+  const B = await connector(null, 'tokB', process.pid);
   const rnd = await B.call('create_temporary_identity', {});
   const rndName = (text(rnd).match(/TEMPORARY identity "([^"]+)"/) || [])[1];
   ok(!isErr(rnd) && /^tmp-[0-9a-f]{10}$/.test(rndName || ''), `omitted name generates a public-safe random one (${rndName})`);
@@ -118,9 +110,9 @@ try {
 
   // --- restart: live owner survives, stale owner + orphan dir are reclaimed --
   const LIVE = spawn('node', ['-e', 'setInterval(()=>{},1e9)']); // a client that stays alive
-  const C = await connector(URL_, 'tokC', LIVE.pid);
+  const C = await connector(null, 'tokC', LIVE.pid);
   await C.call('create_temporary_identity', { name: 'Survivor' });
-  const D = await connector(URL_, 'tokD', deadPid);
+  const D = await connector(null, 'tokD', deadPid);
   await D.call('create_temporary_identity', { name: 'Doomed' });
   await A.call('choose_identity', { name: 'Perm' });
   // An orphaned dir: marker but no identity.key (simulates a crash mid-provision).
@@ -139,9 +131,9 @@ try {
   ok(!names.includes('orphan-tmp'), 'restart: orphaned temp dir (no key, dead owner) is swept');
   ok(names.includes('Perm'), 'restart: the permanent identity is untouched by every sweep');
 
-  const C2 = await connector(URL_, 'tokC', LIVE.pid);
+  const C2 = await connector(null, 'tokC', LIVE.pid);
   ok(!isErr(await C2.call('choose_identity', { name: 'Survivor' })), 'restart: the owner re-binds its surviving temp identity');
-  const E = await connector(URL_, 'tokE', process.pid);
+  const E = await connector(null, 'tokE', process.pid);
   const staleHttp = await fetch(`http://127.0.0.1:${PORT}/identities`).then((r) => r.json());
   ok(staleHttp.identities.some((i) => i.name === 'Survivor' && i.temporary === true), 'restart: GET /identities still marks Survivor temporary');
 

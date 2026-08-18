@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 //
-// ours-mcp — CLI / daemon manager for the ours MCP server.
+// ours-mcp — CLI / daemon manager for the ours daemon.
 //
-// The server is meant to run as ONE long-lived background daemon (HTTP transport)
-// that many Claude Code sessions connect to over http://localhost:<port>/mcp —
-// one shared ADAPT wrapper hosting N identities. This CLI starts/stops/inspects
-// that daemon. The Claude Code plugin only *connects*; it never spawns the
-// server unless `autoStart` is explicitly enabled (config.json / OURS_AUTOSTART).
+// The daemon runs as ONE long-lived background process — one shared ADAPT wrapper
+// hosting N identities — and serves an HTTP API on http://localhost:<port>. This
+// CLI starts/stops/inspects it, and is itself a CLIENT of that API.
+//
+// ⚠ IT NO LONGER SERVES /mcp, AND THIS CLI NO LONGER SPEAKS MCP TO ANYTHING.
+// A Claude Code session does not connect to the daemon's port; it spawns
+// `ours-mcp proxy`, which is the stdio MCP server (src/connector.ts) and reaches
+// the daemon over the same API this CLI uses. Three consumers — the MCP server,
+// this CLI, the SDK — one API, no special cases. Any code here that constructs an
+// MCP client is a regression, not a shortcut.
+//
+// The plugin only *connects*; it never spawns the daemon unless `autoStart` is
+// explicitly enabled (config.json / OURS_AUTOSTART).
 //
 //   ours-mcp start     start the daemon in the background (idempotent)
 //   ours-mcp stop      stop the running daemon
@@ -35,8 +43,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 import * as fs from 'node:fs';
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport as HttpClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+// ⚠ NO MCP CLIENT IMPORTS. The CLI is a client of the daemon's HTTP API, exactly
+// like the MCP server and the SDK — it does not speak MCP to anything. `Client`
+// and `StreamableHTTPClientTransport` were here for create-root, which is now one
+// typed call; re-adding either is a sign that something is reaching for /mcp again.
+// ⚠ THE ./client SUBPATH, NOT THE ROOT BARREL. The root entry boots the ADAPT
+// engine at module load and prints to STDOUT ("### Deleting 0 objects…", the
+// reserved-identity line). Every CLI command that emits parseable output — any
+// --json flag — is corrupted by that. ./client is the client-only entry and pulls
+// none of it. Caught by test/voice-status-cli.test.mjs, which JSON.parses stdout.
+import type { ConnectorOptions } from './connector.js';
+import { OursClient, OursError } from '@ours.network/sdk/client';
 import {
   loadConfig,
   configPath,
@@ -50,18 +67,8 @@ import {
   type OursConfig,
   type ApiVisibility,
 } from './config';
-import { runProxy } from '@ours.network/sdk/connector';
 
-import { connectorTransports } from './mcp/transports';
-import { annotateResultFrame, canRead } from './mcp/format';
 
-// proxy.ts:104-106, verbatim. The connector moved to the SDK; this flag did not
-// move with it, and passing `annotateResultFrame` bare would silently fall back
-// to the default probe and lose the override — which is exactly what
-// test/file-save-stream.test.mjs:206 spawns `OURS_FILES_ALWAYS_PROMPT=1` to catch.
-const FILES_ALWAYS_PROMPT = ['1', 'true', 'yes', 'on'].includes(
-  (process.env.OURS_FILES_ALWAYS_PROMPT ?? '').trim().toLowerCase(),
-);
 import { sttStatus } from './transcribe';
 import { linuxProcHasExited } from './process-state';
 import {
@@ -140,6 +147,27 @@ const err = (...p: unknown[]) => process.stderr.write(`${p.join(' ')}\n`);
 declare const __OURS_VERSION__: string;
 const CLI_VERSION =
   typeof __OURS_VERSION__ !== 'undefined' ? __OURS_VERSION__ : '0.0.0-dev';
+
+// ----- the connector's session identity (proxy.ts:229-237, verbatim rules) ----
+//
+// THE PID IS THE CLIENT'S, NOT OURS. The harness tears this process down when it
+// goes idle, so our own liveness says nothing about whether the session is still
+// wanted; the daemon's lease reclaim keys on the CLIENT. The launcher passes it
+// as OURS_CLIENT_PID (its own ppid); fall back to our ppid for a direct launch.
+//
+// ⚠ REJECT pids <= 1. macOS reparents orphans to launchd, and `pidAlive(1)` is
+// always true — a lease held under pid 1 can never be reclaimed by anyone, ever.
+const validPid = (n: number) => Number.isInteger(n) && n > 1;
+const envClientPid = Number(process.env.OURS_CLIENT_PID);
+const CLIENT_PID = validPid(envClientPid) ? envClientPid
+  : validPid(process.ppid) ? process.ppid
+  : process.pid;
+
+// The lease this session holds. MUST be respawn-stable: an idle harness wake-up
+// spawns a fresh connector, and a token derived from anything per-process would
+// orphan the lease it left behind — which, with force binding staying, means the
+// next session has to force past a lease that is nobody's.
+const LEASE_TOKEN = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim() || `client:${CLIENT_PID}`;
 
 type DaemonInfo = { version?: string; compat?: string; protocol?: number };
 
@@ -356,7 +384,7 @@ async function cmdStart(): Promise<void> {
   if (progressShown && interactive) process.stderr.write('\n');
 
   if (result.ok) {
-    out(`ours-mcp is up on http://localhost:${PORT}/mcp`);
+    out(`ours-mcp is up: API on http://localhost:${PORT} (MCP is the "ours-mcp proxy" connector, not this port)`);
     out(`  broker: ${BROKER_URL}`);
     out(`  state:  ${STATE_DIR}`);
     out(`  logs:   ${LOG_PATH}`);
@@ -429,7 +457,7 @@ async function cmdStatus(): Promise<void> {
     if (await portOpen(PORT)) {
       const info = await fetchDaemonInfo();
       out('ours-mcp: running (no pidfile — likely a stale process or external launcher)');
-      out(`  url:    http://localhost:${PORT}/mcp (reachable)`);
+      out(`  api:    http://localhost:${PORT} (reachable)`);
       reportVersions(info);
       return;
     }
@@ -442,7 +470,7 @@ async function cmdStatus(): Promise<void> {
   const info = up ? await fetchDaemonInfo() : null;
   out('ours-mcp: running');
   out(`  pid:    ${pid}`);
-  out(`  url:    http://localhost:${PORT}/mcp ${up ? '(reachable)' : '(port not answering!)'}`);
+  out(`  api:    http://localhost:${PORT} ${up ? '(reachable)' : '(port not answering!)'}`);
   out(`  broker: ${BROKER_URL}`);
   out(`  state:  ${STATE_DIR}`);
   out(`  logs:   ${LOG_PATH}`);
@@ -789,34 +817,61 @@ async function cmdCreateRoot(argv: string[]): Promise<void> {
     err(`create-root: the daemon is not running on port ${PORT} — start it with \`ours-mcp start\`.`);
     process.exit(1);
   }
-  const transport = new HttpClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), {
-    requestInit: { headers: apiHeaders() },
+  // Was the last /mcp caller in the product: it opened an MCP session and called
+  // the create_root_identity TOOL. The v3 and stable installers both run this, so
+  // it would have broken new installs at the identity step.
+  //
+  // The COMMAND is kept: the owner's "lose create-root as a CLI command" ruling is
+  // deferred, blocked on the stable installer call site.
+  const client = new OursClient({
+    url: `http://127.0.0.1:${PORT}`,
+    apiToken: resolveApiToken(CONFIG, { generate: false })?.token,
+    leaseToken: LEASE_TOKEN,
+    clientPid: CLIENT_PID,
   });
-  const client = new Client({ name: 'ours-mcp-cli', version: CLI_VERSION });
   try {
-    await client.connect(transport);
-    // skip_if_root_exists keeps re-runs idempotent: if a root already exists the tool
-    // fails with "a root identity already exists" (mapped to a quiet exit-0 no-op below)
-    // rather than adopting `name` as a role (the interactive-tool behaviour).
-    const r = await client.callTool({ name: 'create_root_identity', arguments: { name, skip_if_root_exists: true } });
-    const text = (Array.isArray(r.content) ? (r.content as Array<{ text?: unknown }>) : [])
-      .map((c) => (typeof c.text === 'string' ? c.text : ''))
-      .join(' ')
-      .split(/\n\nAsk the user\b/)[0] // the monitor hint is agent-directed; meaningless on a CLI
-      .replace(/^create_root_identity failed: /, '')
-      .trim();
-    if (r.isError) {
-      if (/a root identity already exists/i.test(text)) {
-        out(`create-root: ${text.split('—')[0].trim()} — nothing to do.`);
-        return;
-      }
-      err(`create-root failed: ${text}`);
+    // skip_if_root_exists keeps re-runs idempotent: if a root already exists the
+    // operation refuses with "a root identity already exists" (mapped to a quiet
+    // exit-0 no-op below) rather than adopting `name` as a role (the interactive
+    // behaviour).
+    const r = await client.createRootIdentity({
+      name,
+      bio: '',
+      exposeLocal: false,
+      localAutoAccept: true,
+      skipIfRootExists: true,
+    });
+    // Rendered from typed fields instead of scraped back out of MCP content. The
+    // adoption counts matter: create-root pulls loose identities under the new root
+    // and the installer output is where an operator learns that happened.
+    const adoption = r.adopted.length > 0
+      ? ` Adopted ${r.adopted.length} existing identit${r.adopted.length === 1 ? 'y' : 'ies'} as role(s): ${r.adopted.join(', ')}.`
+      : '';
+    const failures = r.failed.length > 0
+      ? ` FAILED to adopt: ${r.failed.join(', ')} (see daemon log).`
+      : '';
+    // Asserted, not assumed: printing "root created" for a role would be a lie in
+    // an installer.
+    if (r.hierarchy !== 'root') {
+      err(`create-root: expected a root, got ${r.hierarchy} under "${r.underRoot ?? '?'}" — refusing to report success.`);
       process.exit(1);
     }
-    out(text);
-  } finally {
-    try { await transport.terminateSession(); } catch { /* ignore */ }
-    try { await client.close(); } catch { /* ignore */ }
+    // ⚠ THE BASELINE SENTENCE, NOT A NEW ONE. The tool renders
+    // `Created root identity "X" (cid) and bound it to this session.` and the CLI
+    // printed it; porting the call is not licence to reword the output. The suffix
+    // differs only in dropping the agent-directed monitor hint, which never made
+    // sense on a CLI and was already stripped here by regex.
+    out(`Created root identity "${r.info.name}" (${r.info.cid}) and bound it to this session.${adoption}${failures}`);
+  } catch (e) {
+    const text = e instanceof OursError
+      ? e.message.split(/\n\nAsk the user\b/)[0].replace(/^create_root_identity failed: /, '').trim()
+      : String(e instanceof Error ? e.message : e);
+    if (e instanceof OursError && /a root identity already exists/i.test(text)) {
+      out(`create-root: ${text.split('—')[0].trim()} — nothing to do.`);
+      return;
+    }
+    err(`create-root failed: ${text}`);
+    process.exit(1);
   }
 }
 
@@ -1419,19 +1474,26 @@ async function main(): Promise<void> {
         err('(or enable auto-start: `ours-mcp setup` → autoStart, or OURS_AUTOSTART=1)');
         process.exit(1);
       }
-      await runProxy({
-        url: `http://127.0.0.1:${PORT}/mcp`,
+      // NAME KEPT ON PURPOSE. This is no longer a proxy — it is the stdio MCP
+      // server itself (./connector.js) — but `.mcp.json` and all three plugin
+      // manifests launch `dist/cli.js proxy`, and renaming the verb in the same
+      // change that rewrites what it does would fan this PR out across every
+      // manifest for no behavioural gain. A rename is its own change, later.
+      // ⚠ IMPORTED LAZILY. ./connector pulls the MCP tool registrars, which pull the
+      // SDK root barrel, which BOOTS THE ADAPT ENGINE AT MODULE LOAD and prints to
+      // STDOUT. A static import here corrupts every CLI command that emits parseable
+      // output — caught by test/voice-status-cli.test.mjs, which JSON.parses stdout.
+      // Only this one command needs the connector; nothing else may pay for it.
+      const { runConnector } = await import(pathToFileURL(join(dirname(SELF), 'connector.js')).href) as { runConnector: (o: ConnectorOptions) => Promise<void> };
+      await runConnector({
+        // The ORIGIN only. There is no `/mcp` to point at any more: the daemon
+        // does not mount it, because serve.ts no longer injects an MCP server.
+        url: `http://127.0.0.1:${PORT}`,
         ensureDaemon: CONFIG.autoStart ? ensureDaemonRunning : undefined,
-        stateDir: STATE_DIR,
         apiToken: resolveApiToken(CONFIG, { generate: false })?.token,
-        // The SDK owns the connector; ours-mcp owns what MCP looks like. These
-        // two options are the entire boundary between them.
-        transports: connectorTransports,
-        // NOT `annotateGetFilesResult` directly: the SDK hands this hook the whole
-        // JSON-RPC frame, where proxy.ts unwrapped `.result` before calling the
-        // annotator. Passing the annotator straight in silently annotates nothing.
-        // See THE FRAME CONTRACT in ./mcp/format.ts.
-        annotateResult: (msg) => annotateResultFrame(msg, FILES_ALWAYS_PROMPT ? () => false : canRead),
+        leaseToken: LEASE_TOKEN,
+        clientPid: CLIENT_PID,
+        version: CLI_VERSION,
       });
       break;
     case 'install-service':
