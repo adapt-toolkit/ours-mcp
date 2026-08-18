@@ -43,9 +43,9 @@ const daemon = spawn('node', [CLI, 'serve'], {
 try {
   for (let i = 0; i < 120; i++) { try { if ((await fetch(`http://127.0.0.1:${PORT}/version`)).ok) break; } catch {} await sleep(250); }
 
-  const A = await connector(URL_, 'tokAnchor', process.pid);
+  const A = await connector(null, 'tokAnchor', process.pid);
   await A.call('create_identity', { name: 'Anchor' }); // permanent, published in the local book
-  const B = await connector(URL_, 'tokTemp', process.pid);
+  const B = await connector(null, 'tokTemp', process.pid);
   const cr = await B.call('create_temporary_identity', {});
   const tmpName = (text(cr).match(/TEMPORARY identity "([^"]+)"/) || [])[1];
   ok(!!tmpName, `temporary identity created (${tmpName})`);
@@ -78,7 +78,7 @@ try {
   ok(dropped, 'anchor dropped the temp identity after its authenticated remove-me notice');
 
   // Broker outage: closing still deletes locally (remove-me is best effort).
-  const C = await connector(URL_, 'tokTemp2', process.pid);
+  const C = await connector(null, 'tokTemp2', process.pid);
   const cr2 = await C.call('create_temporary_identity', {});
   const tmp2 = (text(cr2).match(/TEMPORARY identity "([^"]+)"/) || [])[1];
   await C.call('send_message', { contact: 'Anchor', text: 'second temp' });
