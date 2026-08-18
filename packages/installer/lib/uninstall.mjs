@@ -168,37 +168,27 @@ export function planComponentDetach(key, existing) {
  * case the screen names the external launcher and the run CONTINUES — a daemon
  * someone else supervises is not a failure of this uninstall.
  */
-export function planDaemonRemoval({ stateDir, cliStartedIt, platform = 'linux' }) {
+export function planDaemonRemoval({ stateDir, cliStartedIt }) {
   const dir = resolve(stateDir);
   const unit = unitNameForStateDir(dir);
-  // THE MIRROR OF THE INSTALL SIDE, and half a fix here would be worse than none:
-  // a Mac user who installed successfully and then cannot UNINSTALL is stuck with
-  // something they were told worked.
+  // ours-mcp's own uninstall-service, for the same reason install-service is:
+  // the unit that exists was written by ours-mcp, and `ours daemon
+  // uninstall-service` refuses a unit it did not mark. It takes no flags and is
+  // selected by the environment, like every other ours-mcp lifecycle command.
   //
-  // `ours daemon uninstall-service` goes through the same
-  // createLinuxUserSystemdAdapter() that throws on the first line for any
-  // non-linux platform, so calling it on darwin fails the run rather than
-  // degrading it. There is also nothing there to remove: this package could never
-  // have installed a launchd agent in the first place.
-  const service = platform && platform !== 'linux'
-    ? {
-      id: 'service-unsupported',
-      unit: null,
-      command: null,
-      platform,
-      continues: true,
-      note: `no boot service was installed on ${platform === 'darwin' ? 'macOS' : platform} — the ours CLI can only manage a Linux user systemd service, so there is nothing of ours to remove here`,
-    }
-    : {
-      id: 'service',
-      unit: unit.ok ? unit.unit : null,
-      command: ['ours', 'daemon', 'uninstall-service', '--yes', '--state-dir', dir],
-      note: 'refuses a unit not marked as CLI-managed',
-    };
+  // The macOS skip that briefly lived here is gone with the daemon change:
+  // ours-mcp's uninstall-service handles launchd as well as systemd, so there is
+  // no platform on which this declines to try.
+  const service = {
+    id: 'service',
+    unit: unit.ok ? unit.unit : null,
+    command: ['ours-mcp', 'uninstall-service'],
+    note: 'removes the unit ours-mcp installed',
+  };
   return [
     service,
     cliStartedIt
-      ? { id: 'stop', command: ['ours', 'daemon', 'stop', '--config', join(dir, 'config.json')] }
+      ? { id: 'stop', command: ['ours-mcp', 'stop'] }
       : { id: 'stop-external', command: null, continues: true, note: 'this daemon was not started by the CLI; naming its launcher and continuing' },
   ];
 }
@@ -531,7 +521,7 @@ export function planUninstall({ home, env = {}, endpoint, stateDir, purge = fals
     action: 'uninstall',
     stateDir: dir,
     detach: pointing.map((p) => ({ key: p.key, service: [`ours-${p.key === 'tg' ? 'tg-connector' : 'cowork'}`, 'uninstall-service'] })),
-    daemon: planDaemonRemoval({ stateDir: dir, cliStartedIt, platform }),
+    daemon: planDaemonRemoval({ stateDir: dir, cliStartedIt }),
     state: planStatePurge({ stateDir: dir, purge, assumeYes, exists, typedConfirmation }),
     plugins,
     packages: planGlobalPackages({

@@ -333,10 +333,19 @@ export function planVoice({
     // The beat. Only owed when the config actually changed: an unchanged config
     // is not a reason to bounce a daemon somebody else may be using.
     restartOwed: Boolean(configChanged),
-    restart: configChanged && config ? ['ours', 'daemon', 'restart', '--config', config] : null,
+    // ours-mcp's restart, because ours-mcp is the daemon now. NOTE FOR WHOEVER
+    // TOUCHES THIS NEXT — the reason the installer owns this beat at all may have
+    // just evaporated: cmdVoiceSetup computes `managed = runningPid() !== null`
+    // from ours-mcp's OWN pid record, and an ours-mcp daemon HAS one. Under the
+    // SDK-CLI daemon it never did, which is why the restart had no owner and the
+    // installer took it. If voice-setup now classifies the daemon as managed it
+    // will run its own restart protocol, and this becomes a second restart rather
+    // than the only one. Not changed here: that is a behaviour question for
+    // packages/core, not a rename.
+    restart: configChanged && config ? ['ours-mcp', 'restart'] : null,
     // Never rolls the daemon back: voice-setup leaves the prior config intact on
     // its own failure path, so the recovery is a retry, not an undo.
-    retryHint: config ? `ours daemon restart --config ${config}` : null,
+    retryHint: config ? `OURS_CONFIG=${config} ours-mcp restart` : null,
     port: Number.isInteger(port) ? port : null,
   };
 }

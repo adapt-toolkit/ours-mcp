@@ -60,6 +60,12 @@ export function fx({
     run: async (cmd, cmdArgs, opts = {}) => {
       const invocation = [cmd, ...cmdArgs];
       recorder.ran.push(invocation);
+      // install-service WRITES the unit. `unitUnchanged` models the case where the
+      // bytes it writes are the bytes already there — which is what the run reads
+      // back to decide whether anything moved, now that no --json reports it.
+      if (cmdArgs.includes('install-service') && !unitUnchanged) {
+        for (const p of Object.keys(text)) if (p.includes('systemd')) text[p] = `${text[p] ?? ''}\n# rewritten`;
+      }
       // Recorded separately so deepEqual assertions on `ran` keep working; the
       // pair invariant is checked against this.
       recorder.ranEnv.push(opts.env ?? null);

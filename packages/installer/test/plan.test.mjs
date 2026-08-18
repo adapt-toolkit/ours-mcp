@@ -119,11 +119,15 @@ test('planServiceInstall NEVER passes --force: no plan can reach it without an a
   assert.ok(!serviceInstallCommand({ stateDir: OURS }).includes('--force'), '--force is never a default');
 });
 
-test('--force is reachable only through the explicit post-consent argument', () => {
-  const adopt = serviceInstallCommand({ stateDir: OURS, adoptLegacyUnit: true });
-  assert.ok(adopt.includes('--force'), 'after a yes, the installer adopts the unit itself');
-  assert.ok(adopt.includes('--state-dir') && adopt.includes(OURS));
-  assert.ok(!serviceInstallCommand({ stateDir: OURS, adoptLegacyUnit: false }).includes('--force'));
+test('the command carries NO flags — and --force is gone with the marker check it paired with', () => {
+  // ours-mcp's install-service takes no arguments: it is selected by OURS_CONFIG /
+  // OURS_PORT / OURS_STATE_DIR and bakes them into the unit. So adoptLegacyUnit no
+  // longer changes the command — and the SDK CLI's refusal to overwrite an
+  // unmarked unit, which used to sit behind classifyUnit, is gone with it.
+  // classifyUnit's `foreign` refusal is now the only thing between a stranger's
+  // unit and an overwrite.
+  assert.deepEqual(serviceInstallCommand({ stateDir: '/home/me/.ours' }), ['ours-mcp', 'install-service']);
+  assert.deepEqual(serviceInstallCommand({ stateDir: '/home/me/.ours', adoptLegacyUnit: true }), ['ours-mcp', 'install-service']);
 });
 
 test('a FOREIGN unit gets no confirmation prompt at all', () => {
@@ -162,14 +166,14 @@ test('planServiceInstall: a state dir with no usable name refuses instead of gue
   assert.equal(p.reason, 'unusable-state-dir');
 });
 
-test('serviceInstallCommand selects the daemon and lets the CLI name the unit', () => {
-  const cmd = serviceInstallCommand({ stateDir: TG });
-  assert.deepEqual(cmd, ['ours', 'daemon', 'install-service', '--yes', '--json', '--state-dir', TG, '--config', join(TG, 'config.json')]);
-  assert.ok(cmd.includes('--json'), 'so the caller can read back whether the unit actually changed');
-  assert.ok(!cmd.some((a) => /\.service$/.test(a)), 'no unit name is passed — one derivation, in the CLI');
+test('serviceInstallCommand names no unit — ours-mcp derives it, as the CLI did', () => {
+  // The unit NAME is still not passed: ours-mcp derives it from its own resolved
+  // service name exactly as the SDK CLI derived it from --state-dir. One
+  // derivation, still in one place — just a different place.
+  const cmd = serviceInstallCommand({ stateDir: '/home/me/.ours-work' });
+  assert.ok(!cmd.some((a) => a.endsWith('.service')), 'no unit name in the command');
+  assert.ok(!cmd.includes('--state-dir'), 'and no selection flags: the environment selects');
 });
-
-// ------------------------------------------------------------- config merge --
 
 test('planDaemonConfig merges and preserves every unrelated key', () => {
   const existing = { port: 3050, apiVisibility: 'shared', stt: { provider: 'x' }, gcIntervalMs: 42 };
@@ -222,21 +226,3 @@ test('planDaemonSteps: a version change restarts only a daemon the CLI started',
   assert.equal(step.command, null, 'the screen names the launcher; the installer runs nothing');
 });
 
-test('a non-linux platform yields an UNSUPPORTED service plan, with what to do instead', () => {
-  // Pure half of the macOS stopgap: the decision, without a terminal.
-  const p = planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null, platform: 'darwin' });
-  assert.equal(p.action, 'unsupported');
-  assert.equal(p.platform, 'darwin');
-  assert.match(p.message, /not available on macOS yet/);
-  assert.deepEqual(p.manual, ['ours', 'daemon', 'serve', '--config'], 'a gap, not a dead end');
-  assert.equal(p.unit, undefined, 'no unit is named for a platform that has none');
-});
-
-test('linux is the only platform that plans a unit, and the default stays linux', () => {
-  const onLinux = planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null, platform: 'linux' });
-  assert.equal(onLinux.action, 'install');
-  assert.equal(onLinux.unit, 'ours.service');
-  const defaulted = planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null });
-  assert.equal(defaulted.action, 'install', 'callers that pass no platform still plan a systemd unit');
-  assert.equal(planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null, platform: 'win32' }).action, 'unsupported');
-});

@@ -29,7 +29,7 @@ import { planDaemonConfig, planServiceInstall, serviceInstallCommand } from './p
 import {
   COMPONENTS,
   planComponentSelection, planMcpAttachment, planTgAttachment, planCoworkAttachment,
-  tgConfigPath, coworkConfigPath, summarizeComponentRun, componentSpec,
+  tgConfigPath, coworkConfigPath, summarizeComponentRun, componentSpec, componentByKey,
 } from './components.mjs';
 import { planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3, restartHints } from './extras.mjs';
 import { summarizeRun } from './rerun.mjs';
@@ -176,6 +176,7 @@ export async function runDaemonPhase(args, effects) {
     portExplicit: args.portExplicit,
     probe: effects.probe,
     readJson: effects.readJson,
+    readText: effects.readText,
     isTaken: effects.isTaken,
   });
 
@@ -216,8 +217,22 @@ export async function runDaemonPhase(args, effects) {
 
   const steps = [];
 
-  await perform(effects, args.dryRun, 'ours CLI installed (npm i -g @ours.network/cli)', () => effects.run('npm', ['i', '-g', '@ours.network/cli']));
-  steps.push({ id: 'cli', changed: true, packageRefresh: true });
+  // THE DAEMON IS ours-mcp, SO ITS PACKAGE COMES FIRST.
+  //
+  // This used to install @ours.network/cli, because the daemon used to be
+  // `ours daemon serve`. That daemon does not mount /mcp — the SDK serves that
+  // route only when a host supplies an `mcp` option, and @ours.network/cli calls
+  // startDaemon() with no arguments — so every MCP client, including every harness
+  // session through `ours-mcp proxy`, got the daemon's own 404. The one
+  // MCP-capable daemon in the stack is ours-mcp's, which supplies the server
+  // factory, the transport constructor and the notification sink
+  // (packages/core/src/serve.ts).
+  //
+  // The order therefore inverts: the MCP package was a COMPONENT installed after
+  // this phase, and it is now the thing this phase starts.
+  const daemonPkg = componentSpec(componentByKey('mcp'), args.channel);
+  await perform(effects, args.dryRun, `ours daemon installed (npm i -g ${daemonPkg})`, () => effects.run('npm', ['i', '-g', daemonPkg]));
+  steps.push({ id: 'daemon-package', changed: true, packageRefresh: true });
 
   // The config file — merged, never rewritten, and untouched when it already
   // matches. No provenance marker is written: the owner ruled that --purge works
@@ -239,7 +254,6 @@ export async function runDaemonPhase(args, effects) {
   // lookup exists to prevent; this is what stops the installer from setting up the
   // conditions for it.
   const journal = configJournal(effects, { dryRun: args.dryRun });
-  let serviceUnsupported = null;
   if (merged.changed) {
     journal.snapshot(configPath);
     await perform(effects, args.dryRun, `write ${configPath} (port ${target.port})`, () => effects.writeJson(configPath, merged.text));
@@ -250,12 +264,18 @@ export async function runDaemonPhase(args, effects) {
 
   try {
     if (creating) {
-      await perform(effects, args.dryRun, `start the daemon on port ${target.port}`, () => effects.run('ours', ['daemon', 'start', '--config', configPath]));
+      // `start`, not `serve`: start backgrounds the daemon and polls until the port
+      // is open, which is the same observable readiness the old path had. `serve`
+      // runs in the foreground and would never return.
+      //
+      // Selected by ENVIRONMENT rather than flags — ours-mcp reads OURS_CONFIG /
+      // OURS_PORT / OURS_STATE_DIR — and daemonEnv is the one place that pair is
+      // built, so the daemon this run created is the daemon that starts.
+      await perform(effects, args.dryRun, `start the daemon on port ${target.port}`, () => effects.run('ours-mcp', ['start'], { env: daemonEnv(dir, target.port) }));
       steps.push({ id: 'start', changed: true });
     }
 
-    const service = await runServicePhase(args, effects, dir);
-    if (service.unsupported) serviceUnsupported = service.unsupported;
+    const service = await runServicePhase(args, effects, dir, target.port);
     if (service.refused) {
       // A REFUSAL IS A FAILURE TO REACH THE STATE, not a special case. An unknown
       // unit file stops the run just as a failed start does, and it stops it with
@@ -276,7 +296,7 @@ export async function runDaemonPhase(args, effects) {
     // The nightly flow re-runs `start` and, crucially, tells the two outcomes
     // apart: "the service failed but the daemon is back" is a bad evening, and "the
     // service failed AND it will not come back" is the one that needs a human now.
-    const recovery = error?.servicePlan ? await recoverDaemon(args, effects, dir, configPath) : null;
+    const recovery = error?.servicePlan ? await recoverDaemon(args, effects, dir, configPath, target.port) : null;
     rollBack(effects, journal, args, 'the daemon did not reach the state its config describes — putting the config back', {
       replacedUnit: error?.servicePlan?.action === 'adopt' ? error.servicePlan.unitPath : null,
     });
@@ -284,12 +304,12 @@ export async function runDaemonPhase(args, effects) {
       effects.out(recovery.recovered
         ? ok('your daemon is running again — nothing was committed, and the service is unchanged')
         : warn('and the daemon did NOT come back up — start it yourself before anything else: '
-          + `ours daemon start --config ${configPath}`));
+          + `OURS_CONFIG=${configPath} ours-mcp start`));
     }
     throw error;
   }
 
-  return { target, steps, serviceUnsupported };
+  return { target, steps };
 }
 
 /**
@@ -304,10 +324,10 @@ export async function runDaemonPhase(args, effects) {
  * is REPORTED, never thrown: the caller is already carrying the real error, and
  * losing it to a second one would hide what actually went wrong.
  */
-async function recoverDaemon(args, effects, dir, configPath) {
+async function recoverDaemon(args, effects, dir, configPath, port) {
   if (args.dryRun) return null;
   try {
-    await effects.run('ours', ['daemon', 'start', '--config', configPath]);
+    await effects.run('ours-mcp', ['start'], { env: daemonEnv(dir, port) });
     return { recovered: true };
   } catch (recoveryError) {
     return { recovered: false, reason: reason(recoveryError) };
@@ -350,20 +370,8 @@ function rollBack(effects, journal, args, why, { packagesInstalled = true, repla
  * the file — the owner's decision. `--force` is passed ONLY here, only for a unit
  * positively identified as ours-mcp's, and never for one we cannot identify.
  */
-export async function runServicePhase(args, effects, dir) {
-  const plan = planServiceInstall({
-    stateDir: dir, home: effects.home, readText: effects.readText, platform: effects.platform?.platform,
-  });
-  // NOT a refusal and NOT a failure: the daemon is running and correct, and only
-  // the boot service could not be installed. So the run CONTINUES — but it says
-  // so, and the summary marks it, because the person this hurts is the one who
-  // reboots in a fortnight and finds nothing listening.
-  if (plan.action === 'unsupported') {
-    effects.out(warn(`ours: ${plan.message}`));
-    effects.out(info(`Your daemon is installed and running now. To start it after a reboot, run:  ${plan.manual.join(' ')} ${join(dir, 'config.json')}`));
-    effects.out(info('Nothing else in this run depends on the boot service.'));
-    return { step: { id: 'service', changed: false, reason: 'not available on this platform' }, plan, unsupported: plan };
-  }
+export async function runServicePhase(args, effects, dir, port) {
+  const plan = planServiceInstall({ stateDir: dir, home: effects.home, readText: effects.readText });
   if (plan.action === 'refuse') {
     effects.out(warn(`ours: refusing to continue — ${plan.message}`));
     return { refused: plan };
@@ -371,6 +379,14 @@ export async function runServicePhase(args, effects, dir) {
   const adopting = plan.action === 'adopt';
   if (adopting) effects.out(info(plan.notice));
   const command = serviceInstallCommand({ stateDir: dir, adoptLegacyUnit: adopting });
+  // The unit's bytes BEFORE, so "did it change?" survives the loss of --json.
+  // `ours daemon install-service --json` used to answer that itself; ours-mcp's
+  // takes no flags and reports nothing machine-readable. Assuming `changed: true`
+  // would make every re-run claim it rewrote the unit, which turns the honest
+  // "everything already correct" line into one that never appears — a screen that
+  // is wrong in the reassuring direction. So the installer does the comparison it
+  // used to delegate: it already reads this file to classify it.
+  const unitBefore = plan.unitPath ? effects.readText(plan.unitPath) : null;
   let outcome;
   try {
     outcome = await perform(effects, args.dryRun, `boot service ${plan.unit} installed and enabled`, () => effects.run(command[0], command.slice(1)));
@@ -382,11 +398,16 @@ export async function runServicePhase(args, effects, dir) {
     error.servicePlan = plan;
     throw error;
   }
-  // Whether the unit actually changed is the CLI's answer, not ours: it does the
-  // byte comparison and returns `changed` in its --json plan. Guessing here would
-  // let a run that rewrote a unit report "nothing changed". Unreadable output is
-  // treated as "changed", which is the safe direction for a summary line.
-  const changed = readChanged(outcome.stdout);
+  // Ours now, by the same byte comparison the CLI used to do. A dry run changed
+  // nothing by definition; an unreadable file either side is treated as "changed",
+  // which is the safe direction for a summary line.
+  const changed = args.dryRun
+    ? false
+    : (() => {
+      const after = plan.unitPath ? effects.readText(plan.unitPath) : null;
+      if (unitBefore === null || after === null) return true;
+      return unitBefore !== after;
+    })();
   return { step: { id: 'service', changed, reason: changed ? undefined : 'unit unchanged' }, plan };
 }
 
@@ -608,12 +629,6 @@ export function runPreflight(effects) {
     return { ok: false, platform: plat };
   }
   effects.out(ok(`Platform: ${plat.label} (supported)`));
-  // Supported is still true — the daemon runs here. What is NOT available is the
-  // boot service, and saying "supported" without that qualification is what let a
-  // Mac user walk into a run that could not finish.
-  if (effects.platform?.platform && effects.platform.platform !== 'linux') {
-    effects.out(info(`On ${plat.label} the daemon runs, but installing a BOOT SERVICE is not available yet — you will start it yourself after a reboot.`));
-  }
   const version = String(effects.nodeVersion ?? '0');
   if (Number.parseInt(version.split('.')[0], 10) < 20) {
     effects.out(warn(`Node.js ${version} — ours needs v20 or newer. Update Node and re-run.`));
@@ -651,6 +666,19 @@ export async function runIdentityPhase(args, effects, { target, mcpReady }) {
     effects.out(info(wouldPrefix(`ours-mcp create-root "${name}"`)));
     return { key: 'identity', label: 'Human identity', state: 'installed', note: name };
   }
+  // `ours-mcp create-root` — and it works BECAUSE the daemon is ours-mcp.
+  //
+  // It opens an MCP streamable-HTTP session to http://127.0.0.1:<port>/mcp. A
+  // daemon started by `ours daemon serve` does not mount that route (the SDK
+  // serves /mcp only when an `mcp` option is supplied, and @ours.network/cli calls
+  // startDaemon() with no arguments), which is why this exact command returned the
+  // daemon's own 404 body — "Not found" — on the first real install. An ours-mcp
+  // daemon supplies that option (packages/core/src/serve.ts), so the route exists
+  // and the command succeeds.
+  //
+  // Calling the SDK CLI's `ours identity create-root` instead would work too, over
+  // /api/v1/ — but it would mean installing and driving a second client purely to
+  // create an identity, on a daemon that already speaks the first one.
   try {
     const result = await effects.run('ours-mcp', ['create-root', name], { env });
     const existing = String(result?.stdout ?? '').match(/already exists \("([^"]+)"\)/);
@@ -668,11 +696,16 @@ export async function runIdentityPhase(args, effects, { target, mcpReady }) {
     }
     if (/not running|not reachable|ECONNREFUSED|connect/i.test(text)) {
       effects.out(warn("The daemon isn't reachable yet — couldn't create your human identity."));
-      effects.out(info(`Fix: run 'ours daemon start --config ${env.OURS_CONFIG}', then 'ours-mcp create-root "${name}"'.`));
+      // The hint NAMES THIS DAEMON, and it has to keep doing that through the
+      // mechanism change. `ours daemon start` took --config; ours-mcp is selected
+      // by environment instead, so the pair travels as an env prefix rather than a
+      // flag. A retry command that omits it would start the DEFAULT daemon — which
+      // is how someone ends up with an identity on a daemon they did not choose.
+      effects.out(info(`Fix: run 'OURS_CONFIG=${env.OURS_CONFIG} ours-mcp start', then 'OURS_CONFIG=${env.OURS_CONFIG} ours-mcp create-root "${name}"'.`));
       return { key: 'identity', label: 'Human identity', state: 'failed', note: 'daemon not reachable' };
     }
     effects.out(warn(`Couldn't create your human identity: ${text.split('\n')[0]}`));
-    effects.out(info(`Retry any time: 'ours-mcp create-root "${name}"'.`));
+    effects.out(info(`Retry any time: 'OURS_CONFIG=${env.OURS_CONFIG} ours-mcp create-root "${name}"'.`));
     return { key: 'identity', label: 'Human identity', state: 'failed', note: 'create-root failed' };
   }
 }
@@ -1023,19 +1056,6 @@ export async function runInstall(argv, effects) {
     state: target.action === 'create' ? 'installed' : 'current',
     note: `port ${target.port}`,
   }];
-  // THE SKIP MUST NOT READ AS SUCCESS. A line that scrolls past is not a warning
-  // — the summary is where someone looks, so an uninstallable boot service gets
-  // the same "needs attention" mark a failed component gets. If this screen read
-  // clean on macOS we would have replaced a failed install with a quieter lie.
-  if (daemon.serviceUnsupported) {
-    summary.push({
-      key: 'service',
-      label: 'Boot service',
-      state: 'failed',
-      note: `not available on ${daemon.serviceUnsupported.platform === 'darwin' ? 'macOS' : daemon.serviceUnsupported.platform} yet — start the daemon yourself after a reboot`,
-    });
-  }
-
   const components = await runComponentPhase(args, effects, target);
   for (const component of COMPONENTS) {
     const state = components.installed.includes(component.key) ? 'installed'

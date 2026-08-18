@@ -198,9 +198,9 @@ test('the INSTALLER owns the restart beat, because a v3 daemon is external to ou
   const row = await runVoicePhase(ARGS, e, { target: AT_TG, mcpReady: true });
   const ran = ranAsText(base);
   assert.deepEqual(base.recorder.interactive, [['ours-mcp', 'voice-setup']], 'voice-setup keeps the terminal it needs');
-  assert.ok(ran.includes('ours daemon restart --config ' + join(TG, 'config.json')),
+  assert.ok(ran.includes('ours-mcp restart'),
     'the installer performs the restart the CLI-managed daemon needs');
-  assert.ok(ran.lastIndexOf('ours-mcp voice-status --json') > ran.indexOf('ours daemon restart --config ' + join(TG, 'config.json')),
+  assert.ok(ran.lastIndexOf('ours-mcp voice-status --json') > ran.indexOf('ours-mcp restart'),
     'and re-checks readiness AFTER the restart, not before');
   base.recorder.ranEnv.forEach((env, i) => assert.ok(isWholeDaemonEnv(env), `half a pair handed to: ${ran[i]}`));
   assert.equal(row.state, 'installed');
@@ -270,7 +270,11 @@ test('an unreachable daemon gives the exact retry command, naming THIS daemon', 
   const failing = { ...e, run: async () => { throw new Error('ours-mcp create-root: daemon not running'); } };
   const row = await runIdentityPhase({ ...ARGS, assumeYes: true }, failing, { target: AT_TG, mcpReady: true });
   assert.equal(row.state, 'failed');
-  assert.match(said(e), new RegExp(`ours daemon start --config ${join(TG, 'config.json')}`));
+  // The command changed with the daemon; what it must still do has not. The hint
+  // NAMES THIS DAEMON — ours-mcp is selected by environment, so the pair travels
+  // as an env prefix where the SDK CLI took a --config flag. A retry command
+  // without it starts the DEFAULT daemon.
+  assert.match(said(e), new RegExp(`OURS_CONFIG=${join(TG, 'config.json')} ours-mcp start`));
 });
 
 // -------------------------------------------------- the summary + hand-off ---
@@ -354,7 +358,9 @@ test('no harness at all no longer abandons the daemon', async () => {
   // several, and a machine without one still gets a working daemon.
   const e = fx({ env: { OURS_ASSUME_YES: '1' }, harnesses: [] });
   assert.equal(await runInstall([], e), EXIT_OK);
-  assert.ok(ranAsText(e).some((s) => s.includes('@ours.network/cli')), 'the daemon is still installed');
+  // The daemon's package is @ours.network/mcp now: it is the only MCP-capable
+  // daemon in the stack, and the SDK CLI's daemon does not mount /mcp at all.
+  assert.ok(ranAsText(e).some((s) => s.includes('@ours.network/mcp')), 'the daemon is still installed');
   assert.match(said(e), /No Claude Code, Codex or Hermes found/);
 });
 
@@ -374,7 +380,7 @@ test('a second daemon alongside the first says whose daemon holds the default po
   assert.equal(await runInstall(['--state-dir', TG], e), EXIT_OK);
   assert.match(said(e), /creating a daemon here/);
   assert.match(said(e), /port 3050 is held by another ours daemon \(state directory .*\.ours\); this one uses/);
-  assert.ok(ranAsText(e).some((s) => s.includes('daemon start')), 'and it really is created');
+  assert.ok(ranAsText(e).some((s) => s === 'ours-mcp start'), 'and it really is created');
 });
 
 test('runPreflight names what it checked, so a supported machine is not silent', () => {

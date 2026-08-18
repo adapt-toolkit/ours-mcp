@@ -105,10 +105,17 @@ test('a daemon the CLI did not start is named, not signalled', async () => {
   assert.match(said(e), /not started by the CLI/);
 });
 
-test('a daemon the CLI DID start is stopped through the CLI', async () => {
-  const e = fx({ json: { [join(OURS, 'config.json')]: CFG, [join(OURS, 'ours-cli-daemon.json')]: { pid: 1, port: 3050 } } });
-  await runUninstall(['--state-dir', OURS], e);
-  assert.ok(e.recorder.ran.some((c) => c.join(' ').includes('daemon stop')));
+test('a managed daemon is stopped, whichever daemon wrote the record', async () => {
+  // EITHER record proves it: ours-cli-daemon.json is what `ours daemon start`
+  // wrote yesterday, daemon.pid is what `ours-mcp start` writes today. Reading
+  // only one would decline to stop a daemon we could have stopped.
+  const byCli = fx({ json: { [join(OURS, 'config.json')]: CFG, [join(OURS, 'ours-cli-daemon.json')]: { pid: 1, port: 3050 } } });
+  await runUninstall(['--state-dir', OURS], byCli);
+  assert.ok(byCli.recorder.ran.some((c) => c.join(' ') === 'ours-mcp stop'), 'the CLI-written record still counts');
+
+  const byMcp = fx({ json: { [join(OURS, 'config.json')]: CFG }, text: { [join(OURS, 'daemon.pid')]: '4242' } });
+  await runUninstall(['--state-dir', OURS], byMcp);
+  assert.ok(byMcp.recorder.ran.some((c) => c.join(' ') === 'ours-mcp stop'), 'and so does the pid file');
 });
 
 test('--dry-run removes, stops and deletes nothing', async () => {
@@ -282,9 +289,9 @@ test('a daemon that will not go away leaves its connectors attached, not detache
       [TG_CFG]: { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: OURS, botToken: 'secret' },
     },
     answers: [true],
-    runFails: ['daemon uninstall-service'],
+    runFails: ['ours-mcp uninstall-service'],
   });
-  await assert.rejects(() => runUninstall(['--state-dir', OURS], e), /ours exited 1/,
+  await assert.rejects(() => runUninstall(['--state-dir', OURS], e), /ours-mcp exited 1/,
     'the original failure is what propagates, never the recovery');
   const [path, snapshot] = e.recorder.restored[0];
   assert.equal(path, TG_CFG);
@@ -304,9 +311,9 @@ test('a re-apply that itself fails is reported and does not replace the real fau
       [COWORK_CFG]: { stateDir: '/home/me/.ours-cowork', daemon: { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir: OURS } },
     },
     answers: [true],
-    runFails: ['daemon uninstall-service', 'ours-cowork install-service'],
+    runFails: ['ours-mcp uninstall-service', 'ours-cowork install-service'],
   });
-  await assert.rejects(() => runUninstall(['--state-dir', OURS], e), /ours exited 1/);
+  await assert.rejects(() => runUninstall(['--state-dir', OURS], e), /ours-mcp exited 1/);
   assert.deepEqual(e.recorder.restored.map(([p]) => p), [COWORK_CFG], 'the bytes still went back');
   assert.match(said(e), /could NOT re-apply cowork's service/);
   assert.match(said(e), /run 'ours-cowork install-service' yourself/);
@@ -327,7 +334,7 @@ test('a dry-run detach journals nothing, because it wrote nothing', async () => 
   const e = fx({
     json: { [join(OURS, 'config.json')]: CFG, [TG_CFG]: { daemonStateDir: OURS } },
     answers: [true],
-    runFails: ['daemon uninstall-service'],
+    runFails: ['ours-mcp uninstall-service'],
   });
   assert.equal(await runUninstall(['--state-dir', OURS, '--dry-run'], e), EXIT_OK);
   assert.deepEqual(e.recorder.restored, []);
@@ -437,7 +444,7 @@ test('OURS_UNINSTALL_DAEMON=yes removes the daemon and, unset, no harness plugin
   });
   assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
   const ran = e.recorder.ran.map((c) => c.join(' '));
-  assert.ok(ran.some((c) => c.includes('daemon uninstall-service')));
+  assert.ok(ran.some((c) => c === 'ours-mcp uninstall-service'));
   assert.deepEqual(e.recorder.wroteText, [], 'no plugin config touched');
   assert.deepEqual(e.recorder.removed, [], 'no plugin directory deleted');
   assert.ok(!ran.includes('npm rm -g @ours.network/hermes'));
@@ -524,36 +531,16 @@ test('a connector confirmed while ANOTHER daemon survives keeps its package thro
   assert.deepEqual(e.recorder.ran.filter((c) => c[0] === 'npm'), [], 'nothing global removed at all');
 });
 
-// ------------------------------------- macOS: nothing of ours to remove ------
+// --------------------------- macOS removes its service like anywhere else ----
+//
+// The skip that lived here is gone with the daemon change: ours-mcp's
+// uninstall-service handles launchd as well as systemd.
 
-test('on macOS the uninstall does NOT call uninstall-service, and does not die trying', async () => {
-  // The mirror of the install side, and half a fix would be worse than none: a Mac
-  // user who installed successfully and then cannot UNINSTALL is stuck with
-  // something they were told worked. `uninstall-service` goes through the same
-  // adapter that throws on the first line for any non-linux platform.
+test('every platform removes the boot service through ours-mcp', async () => {
   const e = fx({ json: { [join(OURS, 'config.json')]: CFG } });
   const onMac = { ...e, platform: { platform: 'darwin', release: '23.0.0' } };
   assert.equal(await runUninstall(['--state-dir', OURS], onMac), EXIT_OK);
-  assert.ok(!e.recorder.ran.some((c) => c.join(' ').includes('uninstall-service')), 'never attempted');
-  assert.match(said(e), /nothing of ours to remove here/);
+  assert.ok(e.recorder.ran.some((c) => c.join(' ') === 'ours-mcp uninstall-service'), 'attempted, not skipped');
+  assert.doesNotMatch(said(e), /nothing of ours to remove here/);
 });
 
-test('the macOS uninstall says at the END what it did not remove', async () => {
-  // Not only in a line that scrolled past during the run: "nothing of ours was
-  // there" is only reassuring if it is stated where a closing screen is read.
-  const e = fx({ json: { [join(OURS, 'config.json')]: CFG } });
-  const onMac = { ...e, platform: { platform: 'darwin', release: '23.0.0' } };
-  await runUninstall(['--state-dir', OURS], onMac);
-  const screen = said(e);
-  assert.match(screen, /Boot service: NOT removed/);
-  assert.match(screen, /remove that arrangement by hand/);
-  assert.ok(screen.lastIndexOf('Boot service: NOT removed') > screen.indexOf('nothing of ours to remove here'),
-    'stated again at the end, after the run');
-});
-
-test('Linux still removes the boot service exactly as before', async () => {
-  const e = fx({ json: { [join(OURS, 'config.json')]: CFG } });
-  await runUninstall(['--state-dir', OURS], e);
-  assert.ok(e.recorder.ran.some((c) => c.join(' ') === `ours daemon uninstall-service --yes --state-dir ${OURS}`));
-  assert.doesNotMatch(said(e), /Boot service: NOT removed/);
-});

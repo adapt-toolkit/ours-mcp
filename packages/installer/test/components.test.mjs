@@ -24,9 +24,11 @@ test('defaults: MCP server yes, connector no, cowork no', () => {
 
 test('declining an already-installed component never uninstalls it', () => {
   // "No" means "do not add", never "take it away". Removal is ours-uninstall.
-  const chosen = planComponentSelection({ answers: { mcp: false, tg: false }, installed: { mcp: true, tg: true } });
-  assert.equal(chosen.find((c) => c.key === 'mcp').action, 'leave-alone');
+  // The MCP server is excluded now: it is the daemon, so it has no "no" — that is
+  // covered by its own test rather than weakened here.
+  const chosen = planComponentSelection({ answers: { tg: false, cowork: false }, installed: { tg: true, cowork: true } });
   assert.equal(chosen.find((c) => c.key === 'tg').action, 'leave-alone');
+  assert.equal(chosen.find((c) => c.key === 'cowork').action, 'leave-alone');
   assert.ok(!chosen.some((c) => /uninstall|remove/.test(c.action)));
 });
 
@@ -286,4 +288,27 @@ test('an already-complete cowork config is still not rewritten', () => {
   });
   assert.equal(p.action, 'unchanged');
   assert.equal(p.changed, false);
+});
+
+// --------------------------------- the MCP server is not optional any more ---
+
+test('the MCP server cannot be declined, because it IS the daemon', () => {
+  // The daemon phase installs and starts @ours.network/mcp: it is the only
+  // MCP-capable daemon in the stack. An operator who declined it would have no
+  // daemon at all, which is not a decision anyone means to make — so declining is
+  // impossible rather than merely discouraged.
+  for (const answers of [{ mcp: false }, {}, { mcp: true }]) {
+    const chosen = planComponentSelection({ answers });
+    assert.equal(chosen.find((c) => c.key === 'mcp').action, 'install', `answers=${JSON.stringify(answers)}`);
+  }
+  const kept = planComponentSelection({ answers: { mcp: false }, installed: { mcp: true } });
+  assert.equal(kept.find((c) => c.key === 'mcp').action, 'keep', 'and an installed one is never left alone');
+});
+
+test('the optional components are still genuinely optional', () => {
+  // The change is scoped to the one component that became the daemon.
+  const chosen = planComponentSelection({ answers: { tg: false, cowork: false } });
+  assert.equal(chosen.find((c) => c.key === 'tg').action, 'skip');
+  assert.equal(chosen.find((c) => c.key === 'cowork').action, 'skip');
+  assert.deepEqual(COMPONENTS.filter((c) => c.required).map((c) => c.key), ['mcp']);
 });
