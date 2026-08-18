@@ -649,3 +649,46 @@ test('a dry run recovers nothing, because it stopped nothing', async () => {
   await runInstall(['--dry-run'], e);
   assert.deepEqual(e.recorder.ran, [], 'a dry run performs nothing at all');
 });
+
+// ------------------------------------------- macOS: a gap, not a failed run --
+
+test('on macOS the run does NOT call install-service, and does not die trying', async () => {
+  // @ours.network/cli's install-service builds createLinuxUserSystemdAdapter() with
+  // no platform branch, and that factory throws on the first line for any
+  // non-linux platform. So calling it on darwin does not degrade — it throws, the
+  // config is rolled back, and the run exits 1 after preflight said "supported".
+  const e = fx({ platform: 'darwin', env: { OURS_ASSUME_YES: '1' } });
+  const code = await runInstall([], e);
+  assert.equal(code, EXIT_OK, 'the run completes: the daemon is fine, only the boot service is not');
+  assert.ok(!e.recorder.ran.some((c) => c.join(' ').includes('install-service')), 'never attempted');
+  assert.deepEqual(e.recorder.restored, [], 'and nothing was rolled back — there was no failure to undo');
+  assert.match(said(e), /not available on macOS yet/);
+  assert.match(said(e), /To start it after a reboot, run:  ours daemon serve --config/);
+});
+
+test('the macOS skip is marked NEEDS ATTENTION in the summary, not buried in a line', async () => {
+  // The person this hurts reboots in a fortnight and finds nothing listening. A
+  // clean-looking summary would be a quieter lie than the failed install it
+  // replaces.
+  const e = fx({ platform: 'darwin', env: { OURS_ASSUME_YES: '1' } });
+  await runInstall([], e);
+  const screen = said(e);
+  assert.match(screen, /Boot service/, 'it has its own summary row');
+  assert.match(screen, /needs attention/, 'with the same mark a failed component gets');
+  assert.match(screen, /Some pieces need a hand/, 'and the screen does not claim everything is clean');
+  assert.doesNotMatch(screen, /Everything installed cleanly/);
+});
+
+test('preflight stops implying full support on a non-linux platform', async () => {
+  const e = fx({ platform: 'darwin', env: { OURS_ASSUME_YES: '1' } });
+  await runInstall([], e);
+  assert.match(said(e), /installing a BOOT SERVICE is not available yet/);
+});
+
+test('Linux is completely unaffected — same walk, same service install', async () => {
+  const e = fx({ env: { OURS_ASSUME_YES: '1' } });
+  await runInstall([], e);
+  assert.ok(e.recorder.ran.some((c) => c.join(' ').includes('daemon install-service')));
+  assert.doesNotMatch(said(e), /not available on/);
+  assert.doesNotMatch(said(e), /Boot service/);
+});

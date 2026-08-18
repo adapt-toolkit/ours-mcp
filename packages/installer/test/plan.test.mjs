@@ -221,3 +221,22 @@ test('planDaemonSteps: a version change restarts only a daemon the CLI started',
   assert.ok(step, '`ours daemon stop` refuses to signal a daemon it did not start');
   assert.equal(step.command, null, 'the screen names the launcher; the installer runs nothing');
 });
+
+test('a non-linux platform yields an UNSUPPORTED service plan, with what to do instead', () => {
+  // Pure half of the macOS stopgap: the decision, without a terminal.
+  const p = planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null, platform: 'darwin' });
+  assert.equal(p.action, 'unsupported');
+  assert.equal(p.platform, 'darwin');
+  assert.match(p.message, /not available on macOS yet/);
+  assert.deepEqual(p.manual, ['ours', 'daemon', 'serve', '--config'], 'a gap, not a dead end');
+  assert.equal(p.unit, undefined, 'no unit is named for a platform that has none');
+});
+
+test('linux is the only platform that plans a unit, and the default stays linux', () => {
+  const onLinux = planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null, platform: 'linux' });
+  assert.equal(onLinux.action, 'install');
+  assert.equal(onLinux.unit, 'ours.service');
+  const defaulted = planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null });
+  assert.equal(defaulted.action, 'install', 'callers that pass no platform still plan a systemd unit');
+  assert.equal(planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null, platform: 'win32' }).action, 'unsupported');
+});

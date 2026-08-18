@@ -239,6 +239,7 @@ export async function runDaemonPhase(args, effects) {
   // lookup exists to prevent; this is what stops the installer from setting up the
   // conditions for it.
   const journal = configJournal(effects, { dryRun: args.dryRun });
+  let serviceUnsupported = null;
   if (merged.changed) {
     journal.snapshot(configPath);
     await perform(effects, args.dryRun, `write ${configPath} (port ${target.port})`, () => effects.writeJson(configPath, merged.text));
@@ -254,6 +255,7 @@ export async function runDaemonPhase(args, effects) {
     }
 
     const service = await runServicePhase(args, effects, dir);
+    if (service.unsupported) serviceUnsupported = service.unsupported;
     if (service.refused) {
       // A REFUSAL IS A FAILURE TO REACH THE STATE, not a special case. An unknown
       // unit file stops the run just as a failed start does, and it stops it with
@@ -287,7 +289,7 @@ export async function runDaemonPhase(args, effects) {
     throw error;
   }
 
-  return { target, steps };
+  return { target, steps, serviceUnsupported };
 }
 
 /**
@@ -349,7 +351,19 @@ function rollBack(effects, journal, args, why, { packagesInstalled = true, repla
  * positively identified as ours-mcp's, and never for one we cannot identify.
  */
 export async function runServicePhase(args, effects, dir) {
-  const plan = planServiceInstall({ stateDir: dir, home: effects.home, readText: effects.readText });
+  const plan = planServiceInstall({
+    stateDir: dir, home: effects.home, readText: effects.readText, platform: effects.platform?.platform,
+  });
+  // NOT a refusal and NOT a failure: the daemon is running and correct, and only
+  // the boot service could not be installed. So the run CONTINUES — but it says
+  // so, and the summary marks it, because the person this hurts is the one who
+  // reboots in a fortnight and finds nothing listening.
+  if (plan.action === 'unsupported') {
+    effects.out(warn(`ours: ${plan.message}`));
+    effects.out(info(`Your daemon is installed and running now. To start it after a reboot, run:  ${plan.manual.join(' ')} ${join(dir, 'config.json')}`));
+    effects.out(info('Nothing else in this run depends on the boot service.'));
+    return { step: { id: 'service', changed: false, reason: 'not available on this platform' }, plan, unsupported: plan };
+  }
   if (plan.action === 'refuse') {
     effects.out(warn(`ours: refusing to continue — ${plan.message}`));
     return { refused: plan };
@@ -594,6 +608,12 @@ export function runPreflight(effects) {
     return { ok: false, platform: plat };
   }
   effects.out(ok(`Platform: ${plat.label} (supported)`));
+  // Supported is still true — the daemon runs here. What is NOT available is the
+  // boot service, and saying "supported" without that qualification is what let a
+  // Mac user walk into a run that could not finish.
+  if (effects.platform?.platform && effects.platform.platform !== 'linux') {
+    effects.out(info(`On ${plat.label} the daemon runs, but installing a BOOT SERVICE is not available yet — you will start it yourself after a reboot.`));
+  }
   const version = String(effects.nodeVersion ?? '0');
   if (Number.parseInt(version.split('.')[0], 10) < 20) {
     effects.out(warn(`Node.js ${version} — ours needs v20 or newer. Update Node and re-run.`));
@@ -1003,6 +1023,18 @@ export async function runInstall(argv, effects) {
     state: target.action === 'create' ? 'installed' : 'current',
     note: `port ${target.port}`,
   }];
+  // THE SKIP MUST NOT READ AS SUCCESS. A line that scrolls past is not a warning
+  // — the summary is where someone looks, so an uninstallable boot service gets
+  // the same "needs attention" mark a failed component gets. If this screen read
+  // clean on macOS we would have replaced a failed install with a quieter lie.
+  if (daemon.serviceUnsupported) {
+    summary.push({
+      key: 'service',
+      label: 'Boot service',
+      state: 'failed',
+      note: `not available on ${daemon.serviceUnsupported.platform === 'darwin' ? 'macOS' : daemon.serviceUnsupported.platform} yet — start the daemon yourself after a reboot`,
+    });
+  }
 
   const components = await runComponentPhase(args, effects, target);
   for (const component of COMPONENTS) {
