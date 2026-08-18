@@ -10,8 +10,7 @@
 //             the established channel survives a rename (send still delivers).
 //
 // Standalone run (from packages/core):  node test/contact-uniqueness-daemon.test.mjs
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { connectConnector } from './fixtures/connector-client.mjs';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
@@ -194,7 +193,7 @@ try {
   fail += 1;
   console.error('  ✗ SUITE ERROR:', err);
 } finally {
-  for (const { client, transport } of clients) { try { await transport.terminateSession(); await client.close(); } catch {} }
+  for (const { client, transport } of clients) { try { await conn.close(); } catch {} }
   daemon.kill('SIGTERM');
   broker.kill('SIGTERM');
   await sleep(500);

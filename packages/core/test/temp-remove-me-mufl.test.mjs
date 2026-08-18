@@ -5,8 +5,7 @@
 // contact book, then closes. Proves the core 0.13 bilateral removal actually
 // lands (the anchor drops the closed temp identity) and that a broker outage
 // never blocks local cleanup.
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { connectConnector } from './fixtures/connector-client.mjs';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
@@ -25,17 +24,11 @@ const ok = (c, m) => { c ? (pass++, console.log('  ✓', m)) : (fail++, console.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res, rej) => { const s = createServer(); s.listen(0, () => { const p = s.address().port; s.close(() => res(p)); }); s.on('error', rej); });
 
-async function connector(url, token, pid) {
-  const transport = new StreamableHTTPClientTransport(new URL(url), {
-    requestInit: { headers: { 'x-ours-lease-token': token, 'x-ours-client-pid': String(pid) } },
-  });
-  const client = new Client({ name: `c-${token}`, version: '0.0.0' });
-  await client.connect(transport);
-  return {
-    client,
-    call: (name, args = {}) => client.callTool({ name, arguments: args }),
-    close: async () => { await transport.terminateSession(); await client.close(); },
-  };
+async function connector(_url, token, pid) {
+  // `_url` is ignored: the connector is spawned, not dialled, and takes its port
+  // and state dir from the env. The token and pid still select the session.
+  const c = await connectConnector({ port: PORT, stateDir: dir, leaseToken: token, clientPid: pid });
+  return { client: c.client, call: c.call, close: c.close };
 }
 const text = (r) => (Array.isArray(r.content) ? r.content.map((c) => c.text || '').join(' ') : '');
 const isErr = (r) => r.isError === true;
@@ -43,7 +36,6 @@ const until = async (fn, ms, step = 1000) => { const end = Date.now() + ms; for 
 
 const dir = mkdtempSync(join(tmpdir(), 'a2a-tempcrm-'));
 const PORT = await freePort();
-const URL_ = `http://127.0.0.1:${PORT}/mcp`;
 const daemon = spawn('node', [CLI, 'serve'], {
   env: { ...process.env, OURS_TRANSPORT: 'http', OURS_PORT: String(PORT), OURS_STATE_DIR: dir, OURS_BROKER_URL: BROKER_URL, OURS_API_VISIBILITY: 'open' },
   stdio: 'ignore',

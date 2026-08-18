@@ -10,8 +10,7 @@
 //   4. INVARIANT: exactly one root; all others roles.
 // (The installer CLI's idempotent skip path — skip_if_root_exists=true — is covered by
 //  create-root-cli.test.mjs.)
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { connectConnector } from './fixtures/connector-client.mjs';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -29,13 +28,11 @@ const txt = (r) => (Array.isArray(r.content) ? r.content : []).map((c) => (typeo
 
 const dir = mkdtempSync(join(tmpdir(), 'a2a-1root-'));
 const PORT = await freePort();
-const URL_ = `http://127.0.0.1:${PORT}/mcp`;
 const daemon = spawn('node', [CLI, 'serve'], { env: { ...process.env, OURS_TRANSPORT: 'http', OURS_PORT: String(PORT), OURS_STATE_DIR: dir, OURS_BROKER_URL: 'wss://invalid.local/none', OURS_API_VISIBILITY: 'open' }, stdio: 'ignore' });
 try {
   for (let i = 0; i < 80; i++) { try { if ((await fetch(`http://127.0.0.1:${PORT}/version`)).ok) break; } catch {} await sleep(250); }
-  const transport = new StreamableHTTPClientTransport(new URL(URL_));
-  const client = new Client({ name: '1root-test', version: '0.0.0' });
-  await client.connect(transport);
+    const conn = await connectConnector({ port: PORT, stateDir: dir });
+  const client = conn.client;
   const call = (name, args = {}) => client.callTool({ name, arguments: args });
 
   // 1. create_identity with NO root → becomes the host root.
@@ -61,7 +58,7 @@ try {
   ok((idAll.match(/\(role\)/g) || []).length === 2, '4. Bob and Carol are both roles under the one root');
   ok(!/flat/i.test(idAll), '4. no flat identity anywhere');
 
-  await transport.terminateSession(); await client.close();
+  await conn.close();
 } finally {
   daemon.kill('SIGTERM');
   rmSync(dir, { recursive: true, force: true });

@@ -16,8 +16,7 @@
 //
 // Not part of the npm chain: it needs the released artifact on disk. Run via
 // scripts/test-invite-compat.sh.
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { connectConnector } from './fixtures/connector-client.mjs';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync, readdirSync } from 'node:fs';

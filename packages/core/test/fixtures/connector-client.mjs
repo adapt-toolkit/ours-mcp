@@ -69,7 +69,7 @@ export function spawnDaemon(port, stateDir, extraEnv = {}) {
  * (StdioServerTransport registers just 'data' and 'error' on stdin), which is the
  * whole reason src/connector.ts listens on `process.stdin` directly.
  */
-export async function connectConnector({ port, stateDir, leaseToken, env = {} }) {
+export async function connectConnector({ port, stateDir, leaseToken, clientPid, env = {} }) {
   const transport = new StdioClientTransport({
     command: 'node',
     args: [CLI, 'proxy'],
@@ -80,6 +80,9 @@ export async function connectConnector({ port, stateDir, leaseToken, env = {} })
       OURS_BROKER_URL: 'wss://invalid.local/none',
       OURS_API_VISIBILITY: 'open',
       ...(leaseToken ? { CLAUDE_CODE_SESSION_ID: leaseToken } : {}),
+      // The connector reads this as the CLIENT's pid (the harness, not itself).
+      // Tests that exercise the dead-pid lease reclaim need to choose it.
+      ...(clientPid !== undefined ? { OURS_CLIENT_PID: String(clientPid) } : {}),
       ...env,
     },
     // The connector's diagnostics are on stderr; surface them so a failing test
