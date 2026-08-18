@@ -168,16 +168,35 @@ export function planComponentDetach(key, existing) {
  * case the screen names the external launcher and the run CONTINUES — a daemon
  * someone else supervises is not a failure of this uninstall.
  */
-export function planDaemonRemoval({ stateDir, cliStartedIt }) {
+export function planDaemonRemoval({ stateDir, cliStartedIt, platform = 'linux' }) {
   const dir = resolve(stateDir);
   const unit = unitNameForStateDir(dir);
-  return [
-    {
+  // THE MIRROR OF THE INSTALL SIDE, and half a fix here would be worse than none:
+  // a Mac user who installed successfully and then cannot UNINSTALL is stuck with
+  // something they were told worked.
+  //
+  // `ours daemon uninstall-service` goes through the same
+  // createLinuxUserSystemdAdapter() that throws on the first line for any
+  // non-linux platform, so calling it on darwin fails the run rather than
+  // degrading it. There is also nothing there to remove: this package could never
+  // have installed a launchd agent in the first place.
+  const service = platform && platform !== 'linux'
+    ? {
+      id: 'service-unsupported',
+      unit: null,
+      command: null,
+      platform,
+      continues: true,
+      note: `no boot service was installed on ${platform === 'darwin' ? 'macOS' : platform} — the ours CLI can only manage a Linux user systemd service, so there is nothing of ours to remove here`,
+    }
+    : {
       id: 'service',
       unit: unit.ok ? unit.unit : null,
       command: ['ours', 'daemon', 'uninstall-service', '--yes', '--state-dir', dir],
       note: 'refuses a unit not marked as CLI-managed',
-    },
+    };
+  return [
+    service,
     cliStartedIt
       ? { id: 'stop', command: ['ours', 'daemon', 'stop', '--config', join(dir, 'config.json')] }
       : { id: 'stop-external', command: null, continues: true, note: 'this daemon was not started by the CLI; naming its launcher and continuing' },
@@ -474,7 +493,7 @@ export function selectHarnesses(plugins, chosen) {
  * The whole §8 order, refusing at step 1 rather than starting and stopping
  * half-way.
  */
-export function planUninstall({ home, env = {}, endpoint, stateDir, purge = false, assumeYes = false, confirmedComponents = [], readJson, readText, exists = () => true, cliStartedIt = true, otherStateDirsWithConfig = [], typedConfirmation = null, explicitHarnessSelection = false }) {
+export function planUninstall({ home, env = {}, endpoint, stateDir, purge = false, assumeYes = false, confirmedComponents = [], readJson, readText, exists = () => true, cliStartedIt = true, otherStateDirsWithConfig = [], typedConfirmation = null, explicitHarnessSelection = false, platform = 'linux' }) {
   const dir = resolve(stateDir);
   const lastDaemon = otherStateDirsWithConfig.map((d) => resolve(d)).filter((d) => d !== dir).length === 0;
   const plugins = planPluginRemoval({ home, env, exists, lastDaemon, explicitSelection: explicitHarnessSelection });
@@ -512,7 +531,7 @@ export function planUninstall({ home, env = {}, endpoint, stateDir, purge = fals
     action: 'uninstall',
     stateDir: dir,
     detach: pointing.map((p) => ({ key: p.key, service: [`ours-${p.key === 'tg' ? 'tg-connector' : 'cowork'}`, 'uninstall-service'] })),
-    daemon: planDaemonRemoval({ stateDir: dir, cliStartedIt }),
+    daemon: planDaemonRemoval({ stateDir: dir, cliStartedIt, platform }),
     state: planStatePurge({ stateDir: dir, purge, assumeYes, exists, typedConfirmation }),
     plugins,
     packages: planGlobalPackages({

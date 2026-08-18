@@ -141,6 +141,7 @@ export async function runUninstall(argv, effects) {
     exists: effects.exists,
     cliStartedIt: effects.readJson(join(dir, 'ours-cli-daemon.json')) !== null,
     otherStateDirsWithConfig: effects.knownStateDirs(),
+    platform: effects.platform?.platform,
     typedConfirmation: null,
     explicitHarnessSelection: contract.engaged,
   });
@@ -159,6 +160,7 @@ export async function runUninstall(argv, effects) {
   // removal makes that true. If step 3 or 4 fails, the operator is left with a
   // stopped, detached connector NEXT TO A DAEMON THAT IS STILL THERE — a world the
   // bytes no longer describe.
+  let unsupportedService = null;
   const journal = configJournal(effects, { dryRun: args.dryRun });
   const detached = [];
   for (const component of plan.detach) {
@@ -178,6 +180,13 @@ export async function runUninstall(argv, effects) {
   // 3-4. The boot service, then the daemon. Both delegate their refusals.
   try {
     for (const step of plan.daemon) {
+      if (step.id === 'service-unsupported') {
+        // Said, not skipped silently: the operator is entitled to know that the
+        // thing they may have expected to be removed was never installed.
+        effects.out(warn(`ours: ${step.note}`));
+        unsupportedService = step;
+        continue;
+      }
       if (step.command === null) {
         effects.out(info(`${step.note} — nothing signalled`));
         continue;
@@ -204,6 +213,7 @@ export async function runUninstall(argv, effects) {
   const packages = planGlobalPackages({
     stateDir: dir,
     otherStateDirsWithConfig: effects.knownStateDirs(),
+    platform: effects.platform?.platform,
     pluginPackages: pluginOutcome.packages,
     // The plugin packages are recomputed; the CONNECTOR packages are not. They
     // are decided by what the operator confirmed detaching, which the plugin
@@ -218,6 +228,15 @@ export async function runUninstall(argv, effects) {
     for (const pkg of packages.packages) {
       await perform(effects, args.dryRun, `npm rm -g ${pkg}`, () => effects.run('npm', ['rm', '-g', pkg]));
     }
+  }
+  // SAID AT THE END, where a closing screen is actually read, and not only in the
+  // line it scrolled past during the run. The same rule as the install side: an
+  // uninstall that quietly did less than the operator believes is the thing to
+  // avoid, and "nothing of ours was there to remove" is only reassuring if it is
+  // stated.
+  if (unsupportedService) {
+    effects.out(warn(`Boot service: NOT removed — ${unsupportedService.note}.`));
+    effects.out(info('If you start the daemon yourself at login, remove that arrangement by hand.'));
   }
   return EXIT_OK;
 }

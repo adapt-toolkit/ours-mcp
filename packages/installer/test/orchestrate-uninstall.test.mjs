@@ -523,3 +523,37 @@ test('a connector confirmed while ANOTHER daemon survives keeps its package thro
   assert.equal(await runUninstall(['--state-dir', OURS], e), EXIT_OK);
   assert.deepEqual(e.recorder.ran.filter((c) => c[0] === 'npm'), [], 'nothing global removed at all');
 });
+
+// ------------------------------------- macOS: nothing of ours to remove ------
+
+test('on macOS the uninstall does NOT call uninstall-service, and does not die trying', async () => {
+  // The mirror of the install side, and half a fix would be worse than none: a Mac
+  // user who installed successfully and then cannot UNINSTALL is stuck with
+  // something they were told worked. `uninstall-service` goes through the same
+  // adapter that throws on the first line for any non-linux platform.
+  const e = fx({ json: { [join(OURS, 'config.json')]: CFG } });
+  const onMac = { ...e, platform: { platform: 'darwin', release: '23.0.0' } };
+  assert.equal(await runUninstall(['--state-dir', OURS], onMac), EXIT_OK);
+  assert.ok(!e.recorder.ran.some((c) => c.join(' ').includes('uninstall-service')), 'never attempted');
+  assert.match(said(e), /nothing of ours to remove here/);
+});
+
+test('the macOS uninstall says at the END what it did not remove', async () => {
+  // Not only in a line that scrolled past during the run: "nothing of ours was
+  // there" is only reassuring if it is stated where a closing screen is read.
+  const e = fx({ json: { [join(OURS, 'config.json')]: CFG } });
+  const onMac = { ...e, platform: { platform: 'darwin', release: '23.0.0' } };
+  await runUninstall(['--state-dir', OURS], onMac);
+  const screen = said(e);
+  assert.match(screen, /Boot service: NOT removed/);
+  assert.match(screen, /remove that arrangement by hand/);
+  assert.ok(screen.lastIndexOf('Boot service: NOT removed') > screen.indexOf('nothing of ours to remove here'),
+    'stated again at the end, after the run');
+});
+
+test('Linux still removes the boot service exactly as before', async () => {
+  const e = fx({ json: { [join(OURS, 'config.json')]: CFG } });
+  await runUninstall(['--state-dir', OURS], e);
+  assert.ok(e.recorder.ran.some((c) => c.join(' ') === `ours daemon uninstall-service --yes --state-dir ${OURS}`));
+  assert.doesNotMatch(said(e), /Boot service: NOT removed/);
+});
