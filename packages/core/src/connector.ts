@@ -129,9 +129,17 @@ export class InboxWatcher {
       }
       const name = this.bound;
       try {
-        for await (const _ of this.client.watchNotifications(name, { kinds: ['inbound'], signal: this.ac.signal })) {
+        for await (const ev of this.client.watchNotifications(name, { kinds: ['inbound'], signal: this.ac.signal })) {
           if (this.stopped) return;
-          pushInboxNotifications(this.server, inboxResourceUri(name), 'new mail', (what, err) =>
+          // Rendered here from the event's fields. The daemon used to render this
+          // because it pushed the notification itself; the endpoint returns
+          // content-free events, so formatting is the consumer's — the same split as
+          // the kinds predicate, which is classification and stays daemon-side.
+          const e = ev as unknown as { event?: string; from?: string; filename?: string };
+          const summary = e.event === 'file_received'
+            ? `new file ${e.filename ?? '?'} from ${e.from ?? '?'}`
+            : `new message from ${e.from ?? '?'}`;
+          pushInboxNotifications(this.server, inboxResourceUri(name), summary, (what, err) =>
             log(`[${name}] ${what} failed: ${String(err)}`));
           // Re-resolve after each delivered batch: a rebind between arrivals must
           // not leave us announcing the previous identity's inbox.

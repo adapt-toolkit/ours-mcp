@@ -30,7 +30,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { connectConnector } from './fixtures/connector-client.mjs';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -54,13 +54,15 @@ const daemon = spawn(process.execPath, [CLI, 'serve'], {
   stdio: 'ignore', detached: true,
 });
 
-const url = new URL(`http://127.0.0.1:${port}/mcp`);
 let token;
 const proxies = [];
-// Direct daemon MCP client (used for setup + the daemon-side save_file check).
+// A setup session. Was a direct MCP client on the daemon's /mcp; the daemon hosts
+// no MCP server, so it is a connector with its own lease token — which is all the
+// setup path ever needed it to be.
 async function mkDirect(lease) {
-  const t = new StreamableHTTPClientTransport(url, { requestInit: { headers: { 'x-ours-api-token': token, 'x-ours-lease-token': lease } } });
-  const c = new Client({ name: 'direct', version: '0' }); await c.connect(t); return c;
+  const conn = await connectConnector({ port, stateDir, leaseToken: lease });
+  proxies.push(conn.client);
+  return conn.client;
 }
 // Agent client fronted by the REAL ours proxy (spawned as the agent's OS user).
 // `extraEnv` lets a case flip OURS_FILES_ALWAYS_PROMPT — the seam that exercises
@@ -241,18 +243,16 @@ try {
   ok(existsSync(carolDest) && readFileSync(carolDest).equals(SECRET),
     'the file lands byte-exact at the path the agent chose (dirs created as needed)');
 
-  // ── the DAEMON does not write dest directly (old-proxy / direct-call path) ─
-  // Calling save_file straight at the daemon (no proxy) must NOT create dest — it
-  // errors clearly and defers to the proxy. This proves the daemon never performs
-  // the cross-user write; only the proxy does.
-  const bobDirect = await mkDirect('bob-direct');
-  await call(bobDirect, 'choose_identity', { name: 'Bob', force: true });
-  const destDaemon = join(stateDir, 'agent-home', 'daemon_should_not_write');
-  const sfDaemon = await call(bobDirect, 'save_file', { wire_id: wire, dest_path: destDaemon });
-  ok(sfDaemon.isError, 'daemon-side save_file (no proxy) errors clearly instead of writing');
-  ok(!existsSync(destDaemon), 'daemon-side save_file did NOT write the destination file');
-  // re-bind Bob to the proxy session for any later use
-  await call(bob, 'choose_identity', { name: 'Bob', force: true });
+  // ── DELETED: "the daemon does not write dest directly" ────────────────────
+  // It asserted that calling save_file straight at the daemon errors instead of
+  // writing, proving only the proxy performed the cross-user write. There is no
+  // daemon-side save_file path any more: the daemon hosts no tools at all, and the
+  // connector — which runs as the agent's OS user — does the write itself. The case
+  // exercised a component that no longer exists.
+  //
+  // What it was really protecting still is: the daemon never writes a caller-chosen
+  // path. That is now true by construction rather than by assertion, because the
+  // daemon has no handler that could.
 
   // ── SCOPING: identity A cannot save identity B's file ─────────────────────
   const alice = await mkProxy('sess-alice');

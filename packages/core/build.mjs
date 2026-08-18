@@ -150,16 +150,6 @@ await build({
   outfile: resolve(dist, 'startup-progress.js'),
 });
 
-// SSE keepalive (the 300s inter-chunk-timeout fix). index.ts imports it via
-// './sse-keepalive.js'; emit a standalone module too so test/sse-keepalive.test.mjs
-// can drive the REAL shipped function against a real HTTP server + the real MCP
-// transport, rather than a copy of it living in the test.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/sse-keepalive.ts')],
-  outfile: resolve(dist, 'sse-keepalive.js'),
-});
-
 // Pure contact-list rendering (duplicate-name markers). Standalone for the unit
 // test (test/contact-lines.test.mjs) — same pattern as files.js / inbox.js.
 await build({
