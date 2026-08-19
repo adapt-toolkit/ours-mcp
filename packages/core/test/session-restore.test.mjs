@@ -57,6 +57,10 @@ let PORT;
 
 const baseEnv = () => ({
   ...process.env,
+  // Never inherit a supervisor's OURS_BIND_IDENTITY: an ours-fleet-managed host
+  // exports it, and it would seed a bind on top of the record this suite is
+  // testing (that input has its own suite — env-bind-identity.test.mjs).
+  OURS_BIND_IDENTITY: undefined,
   OURS_PORT: String(PORT),
   OURS_STATE_DIR: STATE,
   OURS_BROKER_URL: BROKER,

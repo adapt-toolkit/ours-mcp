@@ -217,6 +217,28 @@ const AUTORESTORE_OPT_OUT = ['1', 'true', 'yes', 'on'].includes(
   (process.env.OURS_NO_AUTORESTORE ?? '').trim().toLowerCase(),
 );
 
+// The identity a SUPERVISOR says this session belongs to. Read beside the other
+// session-scoped env inputs rather than through config: this is per-session, the
+// daemon has no opinion about it, and it must never enter config.json's
+// env > config > default precedence. Empty and unset are the same thing.
+//
+// Without it the binding is the MODEL's job: the agent has to call
+// choose_identity from its own instructions, which costs a round trip, can get
+// the name wrong, and has nothing to work from at all on a wake-up where those
+// instructions have fallen out of context. A supervisor already knows the name.
+//
+// ⚠ It only SEEDS `boundIdentity`; the bind itself is assertRestoreBinding()'s
+// existing PLAIN (force:false) choose_identity, so it can never evict a live
+// session. See that function.
+//
+// NOT COVERED, and cannot be: a temporary identity created by
+// create_temporary_identity. This seeds an EXISTING identity by name, and a
+// temporary one does not exist until the session that owns it creates it on
+// first boot — and it is deleted when that session ends, so there is never a
+// name here for a later boot to bind. Those roles still bind by calling the
+// creation tool themselves.
+const BIND_IDENTITY_SEED = (process.env.OURS_BIND_IDENTITY ?? '').trim() || null;
+
 export async function runProxy(opts: ProxyOptions): Promise<void> {
   const url = new URL(opts.url);
 
@@ -298,6 +320,10 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   const restoreFile = safeSessionId ? join(restoreDir, `${safeSessionId}.json`) : null;
   let restoreAsserted = false; // we re-assert a disk-seeded identity at most once per process
   let restoreRid: string | null = null; // id of the in-flight self-recovery bind, so a refusal can clear boundIdentity
+  // Where a pre-daemon `boundIdentity` came from, for honest logging: the two
+  // sources share one bind, but "your record" and "your supervisor said so" are
+  // different things to read in stderr at 3am.
+  let seedSource: 'session-restore' | 'OURS_BIND_IDENTITY' = 'session-restore';
 
   // Persist the just-confirmed identity for this Claude session. Name only — no
   // secret material — consistent with the content-free persistence philosophy
@@ -536,10 +562,11 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
       forwardUp(out);
     }
     // After Claude's first `initialized` flows upstream (so the daemon session
-    // exists and accepts tool calls), self-recover a disk-seeded identity. This
+    // exists and accepts tool calls), bind the pre-boot-seeded identity. This
     // covers the INITIAL boot — reconnect() handles later genuine drops. Once-per
-    // process; only fires when boundIdentity was seeded from a session-restore
-    // record (a true first-ever boot has none → first bind stays hook-gated).
+    // process; only fires when boundIdentity was seeded, either from a
+    // session-restore record or from $OURS_BIND_IDENTITY (a boot with neither has
+    // none → the first bind stays the agent's own choose_identity call).
     if (sawInitialized) assertRestoreBinding();
   };
   down.onclose = () => void shutdown(0);
@@ -574,18 +601,30 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
   process.stdin.once('end', () => clientGone('reached EOF'));
   process.stdin.once('close', () => clientGone('closed'));
 
-  // Inject a synthetic, swallowed choose_identity to re-bind the disk-seeded
-  // identity on a fresh boot. PLAIN bind (never force): if a genuinely live other
+  // Inject a synthetic, swallowed choose_identity to bind the identity seeded
+  // before boot — from this session's restore record, or from
+  // $OURS_BIND_IDENTITY. PLAIN bind (never force): if a genuinely live other
   // session holds it, the daemon refuses and we stay unbound (fail-closed — the
   // proxy must never auto-evict). Routed through forwardUp so it buffers until
   // upstream is ready. The response is swallowed (Claude never sees it).
+  //
+  // ⚠ force:false, AND NOTHING HERE MAY EVER CHANGE THAT. It is what makes a
+  // supervisor-supplied env var safe: a `force` would turn one environment
+  // variable into a remote-eviction primitive usable by anything that can set
+  // the environment of a spawned process, with nobody to ask for the
+  // confirmation choose_identity's own description demands.
+  //
+  // NEVER FATAL, either. Every refusal — no such identity, held by a live
+  // session, a daemon that will not answer — leaves the session UNBOUND and
+  // running, so a role whose identity does not exist yet still boots and can
+  // reach the step in its own instructions that creates it.
   function assertRestoreBinding(): void {
     if (restoreAsserted || !boundIdentity) return;
     restoreAsserted = true;
     const rid = `__ours_proxy_restore_${++rebindSeq}__`;
     swallowIds.add(rid);
     restoreRid = rid;
-    log('session-restore: self-recovering bound identity', `"${boundIdentity}"`);
+    log(`${seedSource}: binding seeded identity`, `"${boundIdentity}"`);
     forwardUp({
       jsonrpc: '2.0',
       id: rid,
@@ -757,12 +796,17 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
           }
           if (swallowIds.has(id)) {
             swallowIds.delete(id);
-            // A refused self-recovery bind (identity genuinely live in another
-            // session) must clear boundIdentity so the proxy matches daemon truth
-            // immediately — fail-closed, no auto-evict.
+            // A refused seeded bind (identity genuinely live in another session,
+            // or no such identity at all) must clear boundIdentity so the proxy
+            // matches daemon truth immediately — fail-closed, no auto-evict, and
+            // no reconnect() re-assertion of a name the daemon rejected.
             if (id === restoreRid) {
               restoreRid = null;
-              if (isError(msg)) { boundIdentity = null; log('session-restore: re-bind refused (identity live elsewhere) — staying unbound'); }
+              if (isError(msg)) {
+                boundIdentity = null;
+                log(`${seedSource}: bind refused (identity live elsewhere, or no such identity) — this session starts UNBOUND;`,
+                  'create the identity, or bind one with choose_identity');
+              }
             }
             continue;
           } // our synthetic frame
@@ -1053,6 +1097,24 @@ export async function runProxy(opts: ProxyOptions): Promise<void> {
     }
   } else if (AUTORESTORE_OPT_OUT) {
     log('session-restore: disabled via OURS_NO_AUTORESTORE — pure in-memory binding');
+  }
+
+  // $OURS_BIND_IDENTITY seeds the SAME field, through the SAME plain bind, and is
+  // deliberately the WEAKER of the two: the record above is written only after an
+  // OBSERVED successful bind by this exact session, so it is the more current
+  // fact. An agent that deliberately switched identity mid-session would
+  // otherwise be dragged back to its launcher's name on every wake-up while
+  // still believing it was the identity it chose. The supervisor's value is what
+  // a session with nothing on disk starts from — which, since the supervisor
+  // sets it on every launch, is every first boot.
+  //
+  // Unlike the restore record this needs no CLAUDE_CODE_SESSION_ID and survives
+  // OURS_NO_AUTORESTORE: that opt-out is about persisting a record, and there is
+  // nothing to persist here.
+  if (!boundIdentity && BIND_IDENTITY_SEED) {
+    boundIdentity = BIND_IDENTITY_SEED;
+    seedSource = 'OURS_BIND_IDENTITY';
+    log('OURS_BIND_IDENTITY: supervisor named this session\'s identity — will bind', `"${BIND_IDENTITY_SEED}"`);
   }
 
   await down.start();

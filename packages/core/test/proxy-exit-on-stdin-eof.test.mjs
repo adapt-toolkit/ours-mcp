@@ -89,6 +89,10 @@ function startProxy(port, dir) {
   const p = spawn('node', [CLI, 'proxy'], {
     env: {
       ...process.env,
+      // Never inherit a supervisor's OURS_BIND_IDENTITY: an ours-fleet-managed host
+      // exports it, and it would seed a startup bind these cases never asked for
+      // (that input has its own suite — env-bind-identity.test.mjs).
+      OURS_BIND_IDENTITY: undefined,
       OURS_PORT: String(port), OURS_STATE_DIR: dir,
       OURS_API_VISIBILITY: 'open', OURS_AUTOSTART: 'false',
       OURS_NO_AUTORESTORE: '1',
