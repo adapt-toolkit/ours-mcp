@@ -169,6 +169,14 @@ const CLIENT_PID = validPid(envClientPid) ? envClientPid
 // next session has to force past a lease that is nobody's.
 const LEASE_TOKEN = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim() || `client:${CLIENT_PID}`;
 
+// The identity a SUPERVISOR says this session belongs to. Read here beside the
+// other two session-scoped inputs rather than through CONFIG: this is not daemon
+// configuration (it is per-session, and the daemon has no opinion about it), so
+// it never belongs in config.json or in the env > config > default precedence.
+// Empty and unset are the same thing — nothing is seeded. See connector.ts's
+// `seedBinding` for why the bind it performs is plain and can never evict.
+const BIND_IDENTITY = (process.env.OURS_BIND_IDENTITY ?? '').trim() || undefined;
+
 type DaemonInfo = { version?: string; compat?: string; protocol?: number };
 
 // Ask the running daemon what it actually is (GET /version, falling back to the
@@ -1494,6 +1502,7 @@ async function main(): Promise<void> {
         leaseToken: LEASE_TOKEN,
         clientPid: CLIENT_PID,
         version: CLI_VERSION,
+        bindIdentity: BIND_IDENTITY,
       });
       break;
     case 'install-service':
