@@ -37,7 +37,9 @@ const BROKER = 'ws://127.0.0.1:59997/nobroker'; // unreachable on purpose — in
 // Initializes (→ onsessioninitialized adds it to serversBySession), then disconnects abruptly.
 function churnOnce(port, clientPid) {
   return new Promise((resolve) => {
-    const env = { ...process.env, OURS_PORT: String(port), OURS_STATE_DIR: STATE, OURS_BROKER_URL: BROKER, OURS_CLIENT_PID: String(clientPid), CLAUDE_CODE_SESSION_ID: 'reaper-test-' + clientPid };
+    // OURS_BIND_IDENTITY: undefined — never inherit a supervisor's seed (see
+    // env-bind-identity.test.mjs); this suite binds explicitly.
+    const env = { ...process.env, OURS_BIND_IDENTITY: undefined, OURS_PORT: String(port), OURS_STATE_DIR: STATE, OURS_BROKER_URL: BROKER, OURS_CLIENT_PID: String(clientPid), CLAUDE_CODE_SESSION_ID: 'reaper-test-' + clientPid };
     const p = spawn('node', [CLI, 'proxy'], { env, stdio: ['pipe', 'pipe', 'ignore'] });
     let buf = '', id = 1; const pend = new Map();
     const send = (method, params) => new Promise((r) => { const i = id++; pend.set(i, r); p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: i, method, params }) + '\n'); });

@@ -68,7 +68,9 @@ async function mkDirect(lease) {
 async function mkProxy(sessionId, extraEnv = {}) {
   const t = new StdioClientTransport({
     command: process.execPath, args: [CLI, 'proxy'],
-    env: { ...process.env, OURS_PORT: String(port), OURS_STATE_DIR: stateDir, OURS_TRANSPORT: 'http', CLAUDE_CODE_SESSION_ID: sessionId, OURS_BROKER_URL: 'ws://127.0.0.1:59997/nobroker', ...extraEnv },
+    // OURS_BIND_IDENTITY: undefined — never inherit a supervisor's seed (see
+    // env-bind-identity.test.mjs); these cases bind explicitly.
+    env: { ...process.env, OURS_BIND_IDENTITY: undefined, OURS_PORT: String(port), OURS_STATE_DIR: stateDir, OURS_TRANSPORT: 'http', CLAUDE_CODE_SESSION_ID: sessionId, OURS_BROKER_URL: 'ws://127.0.0.1:59997/nobroker', ...extraEnv },
     stderr: 'ignore',
   });
   const c = new Client({ name: 'agent', version: '0' }); await c.connect(t); proxies.push(c); return c;
