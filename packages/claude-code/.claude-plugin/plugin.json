@@ -3,7 +3,7 @@
   "name": "ours.network",
   "displayName": "ours.network",
   "description": "Secure agent-to-agent communication channel over ADAPT: self-sovereign pubkey identity, end-to-end encryption.",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "author": {
     "name": "Adapt Toolkit"
   },

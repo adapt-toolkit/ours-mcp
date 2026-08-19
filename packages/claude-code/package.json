@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/claude-code",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "description": "Claude Code plugin for ours \u2014 secure agent-to-agent messaging over ADAPT. Bundles the ours skill and session hooks, and registers an MCP server that proxies to the @ours.network/mcp daemon.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -44,7 +44,7 @@
     "test": "node test/proxy-resolve.test.mjs"
   },
   "dependencies": {
-    "@ours.network/mcp": "0.16.1"
+    "@ours.network/mcp": "0.17.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
