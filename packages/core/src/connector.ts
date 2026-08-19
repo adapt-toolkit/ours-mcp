@@ -6,7 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { OursClient } from '@ours.network/sdk';
 
 import { createOursMcpServer } from './mcp/server.js';
-import { getBoundIdentity } from './mcp/tool.js';
+import { getBoundIdentity, rememberBinding } from './mcp/tool.js';
 import { inboxResourceUri } from './mcp/resources/inbox.js';
 import { pushInboxNotifications } from './mcp/push.js';
 
@@ -21,6 +21,18 @@ export interface ConnectorOptions {
   clientPid: number;
   /** ours-mcp's version, for the MCP server identity and the startup line. */
   version: string;
+  /**
+   * The identity this session should start bound to — `$OURS_BIND_IDENTITY`.
+   *
+   * For a SUPERVISOR that already knows which identity it launched a session
+   * for. Without it the binding is the model's job: an agent has to call
+   * `choose_identity` from its own instructions, which costs a round trip, can
+   * get the name wrong, and has nothing to work from at all on a wake-up where
+   * those instructions have fallen out of context.
+   *
+   * ⚠ THE BIND IS PLAIN AND STAYS PLAIN. See `seedBinding`.
+   */
+  bindIdentity?: string;
   /** Best-effort daemon start, when autoStart is on. */
   ensureDaemon?: () => Promise<void>;
 }
@@ -155,6 +167,46 @@ export class InboxWatcher {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Bind `$OURS_BIND_IDENTITY` before the session serves its first tool call.
+ *
+ * ⚠ force: false, AND NOTHING HERE MAY EVER CHANGE THAT.
+ *
+ * This is the same call `choose_identity` makes, so it inherits that path's
+ * refusal unchanged: a lease held by a LIVE session is declined, and only a
+ * holder whose client pid is dead is reclaimed (and that reclaim is not a force
+ * — ours-sdk src/api/identity.ts:397-403). A `force` here would turn an
+ * environment variable into a remote-eviction primitive, usable by anything that
+ * can set the environment of a spawned process. The tool's own description says
+ * never to pass force without asking the user; a supervisor's seed has nobody to
+ * ask, which is precisely why it must not be able to.
+ *
+ * FAIL-CLOSED, AND NEVER FATAL. Every refusal — no such identity, held by a live
+ * session, a daemon that will not answer — leaves the session UNBOUND and
+ * running. A role whose identity has not been created yet has to reach the step
+ * in its own instructions that creates it; a connector that refused to start
+ * would take the role down over a name.
+ *
+ * `rememberBinding` is what the rest of the connector reads: it arms the inbox
+ * watch (InboxWatcher.run) and is the name `reassertBinding` re-asserts after a
+ * daemon restart. Without it a seeded session would be bound daemon-side and
+ * deaf locally until its first successful tool call resolved the name anyway.
+ */
+async function seedBinding(client: OursClient, name: string): Promise<void> {
+  try {
+    const bound = await client.chooseIdentity({ name, force: false });
+    rememberBinding(bound.name);
+    log(`[${bound.name}] bound from OURS_BIND_IDENTITY`);
+  } catch (e) {
+    // The reason is the useful half: "held by a live session" and "no such
+    // identity" call for completely different next steps from the agent.
+    log(
+      `OURS_BIND_IDENTITY="${name}": not bound (${e instanceof Error ? e.message : String(e)}) — ` +
+      'this session starts UNBOUND. Create the identity, or bind one with choose_identity.',
+    );
+  }
+}
+
+/**
  * Run the connector until stdin closes.
  *
  * The lease is NOT released on exit — see the note at the shutdown site. That was
@@ -180,6 +232,12 @@ export async function runConnector(opts: ConnectorOptions): Promise<void> {
     await refuseOverStdio(probe.reason, opts.version);
     return;
   }
+
+  // Before the transport, not after: the probe above already proved the daemon
+  // answers, so this is one localhost round trip, and doing it first means no
+  // window exists in which the session is servable but not yet bound.
+  const seed = (opts.bindIdentity ?? '').trim();
+  if (seed) await seedBinding(client, seed);
 
   const server = createOursMcpServer(client, opts.version);
   const watcher = new InboxWatcher(client, server);
