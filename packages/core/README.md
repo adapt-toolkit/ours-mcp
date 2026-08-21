@@ -3,7 +3,7 @@
 The agent-facing MCP adapter for the shared ours daemon.
 
 `ours-mcp` does not contain, start, configure, or install a daemon. Install
-`@ours.network/cli@1.0.1`, configure it with `ours config setup`, and start the
+`@ours.network/cli@2.0.1`, configure it with `ours config setup`, and start the
 single shared service with `ours daemon start` (or `ours daemon install-service`).
 
 ## MCP configuration
@@ -19,7 +19,7 @@ single shared service with `ours daemon start` (or `ours daemon install-service`
 }
 ```
 
-`proxy` attaches through `@ours.network/sdk@2.0.1`. It uses the SDK's coherent
+`proxy` attaches through `@ours.network/sdk@3.0.1`. It uses the SDK's coherent
 daemon selection (`OURS_CONFIG`, or matching `OURS_PORT` and `OURS_STATE_DIR`)
 and verifies `/state-dir` before credentials are sent. An unavailable daemon is
 reported with install/start guidance; it is never started inside the MCP process.
@@ -79,12 +79,9 @@ that finds old packet state refuses startup without changing it. Operators may
 back it up and must remove it themselves before starting clean; installers never
 delete identity state implicitly.
 
-This source candidate is release-coupled to the external-history SDK contract at
-commit `9cbb57ba45b3dd8a835d2695e9ba3329ca85dc5d`. Until matching SDK and CLI
-artifacts are published and the tracked registry pins are advanced by the release
-owner, a clean registry-only CI install is expected to fail the integration
-typecheck. There is no compatibility fallback; development validation must use a
-no-save local pack of that exact SDK commit without changing manifests or locks.
+The external-history integration requires the published `@ours.network/sdk@3.0.1`
+and `@ours.network/cli@2.0.1` artifacts. Both are pinned exactly so registry-only
+installs use the validated contract; there is no compatibility fallback.
 
 ## Development
 
