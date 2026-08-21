@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the native ours.network plugin into the OpenAI Codex CLI:
-#   1. ensure the ours daemon (@ours.network/mcp) is installed + running
+#   1. ensure the ours operator CLI and MCP adapter are installed; start the shared daemon
 #   2. add/upgrade adapt-toolkit/ours-codex-marketplace
 #   3. install the native `ours` plugin (skills, MCP servers, and hooks)
 #   4. back up and remove installer-owned legacy config only after verification
@@ -27,18 +27,18 @@ say(){ printf 'ours-install: %s\n' "$1"; }
 ensure_daemon_latest(){
   if [ "${OURS_INSTALL_SKIP_DAEMON:-}" = "1" ]; then say "skipping daemon step (OURS_INSTALL_SKIP_DAEMON=1)"; return 0; fi
   local before after
-  before="$(ours-mcp --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-  say "ensuring @ours.network/mcp@latest…"
-  npm i -g @ours.network/mcp@latest
-  after="$(ours-mcp --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-  if ! ours-mcp status >/dev/null 2>&1; then
-    say "starting the ours daemon…"; ours-mcp start || say "could not auto-start; run 'ours-mcp start' if the tools error."
+  before="$(ours version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  say "ensuring @ours.network/cli@latest and @ours.network/mcp@latest…"
+  npm i -g @ours.network/cli@latest @ours.network/mcp@latest
+  after="$(ours version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  if ! ours daemon status >/dev/null 2>&1; then
+    say "starting the ours daemon…"; ours daemon start || say "could not start; run 'ours daemon start' if the tools error."
   elif [ -n "$before" ] && [ "$before" != "$after" ]; then
-    say "daemon upgraded (v${before} → v${after}) — restarting…"; ours-mcp restart || ours-mcp start || true
+    say "operator CLI upgraded (v${before} → v${after}) — restarting its daemon…"; ours daemon restart || ours daemon start || true
   else
     say "daemon already current (v${after:-unknown})."
   fi
-  say "daemon: $(command -v ours-mcp) (v${after:-unknown})"
+  say "operator CLI: $(command -v ours) (v${after:-unknown}); MCP adapter: $(command -v ours-mcp)"
 }
 
 # --- 1) daemon (ensure @latest + restart on change) ---
@@ -91,7 +91,7 @@ say "done. The ours MCP server + skill are live for the next Codex session."
 # --- version echo: show the user they are on latest ---
 if [ "${OURS_INSTALL_SKIP_DAEMON:-}" != "1" ]; then
   say "versions:"
-  say "  daemon: $(ours-mcp --version 2>/dev/null | head -1 || echo 'unknown')"
+  say "  MCP adapter: $(ours-mcp --version 2>/dev/null | head -1 || echo 'unknown')"
   say "  plugin: $(npm ls -g @ours.network/codex 2>/dev/null | grep -oE '@ours\.network/codex@[0-9][0-9.]*' | head -1 || echo '@ours.network/codex (not a global install)')"
 fi
 say "next: bind (or create) an identity, then the ours skill tails ours-mcp watch (or polls"

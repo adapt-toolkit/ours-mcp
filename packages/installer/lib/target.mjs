@@ -32,7 +32,7 @@ export const INSTALL_RESERVED_PORTS = [3051, 3052];
 // even when nothing is recorded in its config (spec §1).
 export const CLI_PID_RECORD = 'ours-cli-daemon.json';
 // The SAME record, written by a different daemon. `ours daemon start` writes
-// ours-cli-daemon.json; `ours-mcp start` writes daemon.pid (packages/core
+// ours-cli-daemon.json; prerelease ours-mcp wrote daemon.pid (packages/core
 // cli.ts PID_PATH). BOTH are read, and neither replaces the other: a machine
 // installed yesterday has the first and a machine installed today has the
 // second, and detection that goes blind on either one concludes "no daemon

@@ -23,9 +23,9 @@ const foregroundOffer = (identity) =>
 export function foregroundWatchProcess(identity) {
   try {
     const cliPath = require.resolve('@ours.network/mcp/dist/cli.js');
-    return { command: process.execPath, args: [cliPath, 'watch', '--application', 'codex', identity] };
+    return { command: process.execPath, args: [cliPath, 'watch', identity] };
   } catch {
-    return { command: 'ours-mcp', args: ['watch', '--application', 'codex', identity] };
+    return { command: 'ours-mcp', args: ['watch', identity] };
   }
 }
 

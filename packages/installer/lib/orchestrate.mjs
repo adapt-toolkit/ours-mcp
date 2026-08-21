@@ -31,10 +31,10 @@ import {
   planComponentSelection, planMcpAttachment, planTgAttachment, planCoworkAttachment,
   tgConfigPath, coworkConfigPath, summarizeComponentRun, componentSpec, componentByKey,
 } from './components.mjs';
-import { planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3, restartHints } from './extras.mjs';
+import { planHarnessPlugins, planFleet, buildHandoffPromptV3, restartHints } from './extras.mjs';
 import { summarizeRun } from './rerun.mjs';
 import { configJournal, reportRollback } from './journal.mjs';
-import { detectDaemons, planDaemonSelection, resolveSelection, legacyRegistryPath } from './detect.mjs';
+import { detectDaemons, planDaemonSelection, resolveSelection } from './detect.mjs';
 import { detectPlatform, resolveChannel, validateBroker } from './logic.mjs';
 import { daemonEnv } from './effects.mjs';
 import { USAGE } from './usage.mjs';
@@ -111,14 +111,6 @@ function pairFor(plan, target) {
  * not know a screen happened, which is what keeps the flags path byte-identical.
  */
 export async function runSelectionPhase(args, effects) {
-  // Said once, and only when the file is actually there: a file that looks live is
-  // worse than a file that says it is not. Never deleted — quietly removing
-  // something that describes an operator's daemons is not this installer's
-  // business.
-  const legacy = legacyRegistryPath(effects.home);
-  if (effects.exists(legacy)) {
-    effects.out(info(`${legacy} is left over from the older nightly installer and is no longer read — this run detects daemons directly. It is left alone; you can delete it.`));
-  }
   const detected = detectDaemons({
     candidates: effects.knownStateDirs(),
     exists: effects.exists,
@@ -217,22 +209,9 @@ export async function runDaemonPhase(args, effects) {
 
   const steps = [];
 
-  // The daemon is the ours-sdk CLI; ours-mcp is the per-session MCP server the
-  // harness spawns, and it reaches the daemon over the HTTP API. Both are
-  // installed here and both are required: an install without ours-mcp leaves a
-  // machine with a daemon and no MCP at all.
-  //
-  // This used to install @ours.network/cli, because the daemon used to be
-  // `ours daemon serve`. That daemon does not mount /mcp — the SDK serves that
-  // route only when a host supplies an `mcp` option, and @ours.network/cli calls
-  // startDaemon() with no arguments — so every MCP client, including every harness
-  // session through `ours-mcp proxy`, got the daemon's own 404. The one
-  // MCP-capable daemon in the stack is ours-mcp's, which supplies the server
-  // factory, the transport constructor and the notification sink
-  // (packages/core/src/serve.ts).
-  //
-  // The order therefore inverts: the MCP package was a COMPONENT installed after
-  // this phase, and it is now the thing this phase starts.
+  // The operator CLI owns the shared daemon; ours-mcp is the per-session stdio
+  // adapter each harness spawns. Both are required, but only `ours daemon`
+  // participates in lifecycle or service management.
   const mcpPkg = componentSpec(componentByKey('mcp'), args.channel);
   await perform(effects, args.dryRun, `MCP server installed (npm i -g ${mcpPkg})`, () => effects.run('npm', ['i', '-g', mcpPkg]));
   steps.push({ id: 'mcp-package', changed: true, packageRefresh: true });
@@ -697,11 +676,9 @@ export function runPreflight(effects) {
 }
 
 /**
- * The human identity: `ours-mcp create-root`.
+ * The human identity: `ours identity create-root`.
  *
- * It needs `ours-mcp` on PATH and a reachable daemon, so under v3 it lands here
- * — after the component phase installed the MCP server, not back in the daemon
- * phase where v2 had it. Already-exists is a friendly keep, never an error, and
+ * It needs the operator CLI and a reachable daemon. Already-exists is a friendly keep, never an error, and
  * an unreachable daemon gets the exact retry command rather than "ask your agent
  * later"; the hand-off's identity step is the fallback for both failures.
  */
@@ -721,29 +698,11 @@ export async function runIdentityPhase(args, effects, { target, mcpReady }) {
 
   const env = daemonEnv(target.stateDir, target.port);
   if (args.dryRun) {
-    effects.out(info(wouldPrefix(`ours-mcp create-root "${name}"`)));
+    effects.out(info(wouldPrefix(`ours identity create-root --name "${name}"`)));
     return { key: 'identity', label: 'Human identity', state: 'installed', note: name };
   }
-  // `ours-mcp create-root` — and it works BECAUSE the daemon is ours-mcp.
-  //
-  // It opens an MCP streamable-HTTP session to http://127.0.0.1:<port>/mcp. A
-  // daemon started by `ours daemon serve` does not mount that route (the SDK
-  // serves /mcp only when an `mcp` option is supplied, and @ours.network/cli calls
-  // startDaemon() with no arguments), which is why this exact command returned the
-  // daemon's own 404 body — "Not found" — on the first real install. An ours-mcp
-  // daemon supplies that option (packages/core/src/serve.ts), so the route exists
-  // and the command succeeds.
-  //
-  // Calling the SDK CLI's `ours identity create-root` instead would work too, over
-  // /api/v1/ — but it would mean installing and driving a second client purely to
-  // create an identity, on a daemon that already speaks the first one.
   try {
-    const result = await effects.run('ours-mcp', ['create-root', name], { env });
-    const existing = String(result?.stdout ?? '').match(/already exists \("([^"]+)"\)/);
-    if (existing) {
-      effects.out(ok(`You already have a human identity ("${existing[1]}") — keeping it.`));
-      return { key: 'identity', label: 'Human identity', state: 'current', note: existing[1] };
-    }
+    await effects.run('ours', ['identity', 'create-root', '--name', name, '--json'], { env });
     effects.out(ok(`Your human identity "${name}" is created.`));
     return { key: 'identity', label: 'Human identity', state: 'installed', note: name };
   } catch (error) {
@@ -754,16 +713,11 @@ export async function runIdentityPhase(args, effects, { target, mcpReady }) {
     }
     if (/not running|not reachable|ECONNREFUSED|connect/i.test(text)) {
       effects.out(warn("The daemon isn't reachable yet — couldn't create your human identity."));
-      // The hint NAMES THIS DAEMON, and it has to keep doing that through the
-      // mechanism change. `ours daemon start` took --config; ours-mcp is selected
-      // by environment instead, so the pair travels as an env prefix rather than a
-      // flag. A retry command that omits it would start the DEFAULT daemon — which
-      // is how someone ends up with an identity on a daemon they did not choose.
-      effects.out(info(`Fix: run 'ours daemon start --config ${env.OURS_CONFIG}', then 'OURS_CONFIG=${env.OURS_CONFIG} ours-mcp create-root "${name}"'.`));
+      effects.out(info(`Fix: run 'ours daemon start --config ${env.OURS_CONFIG}', then 'ours identity create-root --config ${env.OURS_CONFIG} --name "${name}"'.`));
       return { key: 'identity', label: 'Human identity', state: 'failed', note: 'daemon not reachable' };
     }
     effects.out(warn(`Couldn't create your human identity: ${text.split('\n')[0]}`));
-    effects.out(info(`Retry any time: 'OURS_CONFIG=${env.OURS_CONFIG} ours-mcp create-root "${name}"'.`));
+    effects.out(info(`Retry any time: 'ours identity create-root --config ${env.OURS_CONFIG} --name "${name}"'.`));
     return { key: 'identity', label: 'Human identity', state: 'failed', note: 'create-root failed' };
   }
 }
@@ -909,81 +863,11 @@ export async function runFleetPhase(args, effects, { target, isDefaultStateDir }
   return { key: 'fleet', label: plan.label, state: 'installed', note: 'CLI + core-plugin discovery' };
 }
 
-/**
- * Voice transcription — and the restart beat the installer now owns.
- *
- * Under v3 `ours-mcp voice-setup` classifies every daemon as `external`, because
- * a v3 daemon is started by `ours daemon start` and leaves no ours-mcp pid
- * record. So voice-setup writes the config and returns, correctly declining to
- * restart a daemon it does not manage — and the restart nobody now owns is
- * this phase's, because the installer is the only process that knows the daemon
- * is CLI-managed. Failure never rolls the daemon back: voice-setup leaves the
- * prior config intact on its own failure path, so the recovery is a retry.
- */
+/** Voice configuration belongs to the shared daemon, not the MCP adapter. */
 export async function runVoicePhase(args, effects, { target, mcpReady }) {
   effects.out(heading('Voice messages'));
-  const env = daemonEnv(target.stateDir, target.port);
-  const ready = mcpReady && !args.dryRun ? await voiceReady(effects, env) : false;
-
-  const offer = planVoice({
-    mcpInstalled: mcpReady, ready, assumeYes: args.assumeYes, stateDir: target.stateDir, port: target.port,
-  });
-  if (offer.action === 'skip') {
-    effects.out(offer.reason === 'already-configured' ? ok(offer.message) : info(offer.message));
-    return {
-      key: 'voice',
-      label: 'Voice transcription',
-      state: offer.reason === 'already-configured' ? 'current' : 'skipped',
-      note: offer.reason === 'already-configured' ? 'configured' : offer.reason,
-    };
-  }
-
-  effects.out(info('Voice notes can be transcribed by a provider you choose. Audio is sent to that'));
-  effects.out(info('provider; use a self-hosted endpoint if it must stay local. The API key is hidden.'));
-  if (!(await effects.ask('Set up voice transcription now?', true))) {
-    const declined = planVoice({ mcpInstalled: mcpReady, ready, accepted: false, stateDir: target.stateDir, port: target.port });
-    effects.out(info(declined.message));
-    return { key: 'voice', label: 'Voice transcription', state: 'skipped', note: 'declined; offered again on re-run' };
-  }
-
-  if (args.dryRun) {
-    effects.out(info(wouldPrefix(offer.setup.join(' '))));
-    return { key: 'voice', label: 'Voice transcription', state: 'skipped', note: 'dry run' };
-  }
-  // Interactive on purpose: voice-setup owns the provider choice and the masked
-  // key prompt, and the installer keeps no second implementation of either.
-  const setup = await effects.runInteractive(offer.setup[0], offer.setup.slice(1), { env });
-  if (!setup.ok) {
-    effects.out(warn('Voice setup did not complete; no installer-side credential fallback was used.'));
-    effects.out(info(`Run '${offer.setup.join(' ')}' directly to try again.`));
-    return { key: 'voice', label: 'Voice transcription', state: 'failed', note: 'voice-setup did not complete' };
-  }
-
-  const applied = planVoice({
-    mcpInstalled: mcpReady, ready, accepted: true, configChanged: true, stateDir: target.stateDir, port: target.port,
-  });
-  const restart = await attempt(effects, args.dryRun, applied.restart.join(' '), () => effects.run(applied.restart[0], applied.restart.slice(1)));
-  if (!restart.ok) {
-    effects.out(info(`the configuration is saved; apply it with: ${applied.retryHint}`));
-    return { key: 'voice', label: 'Voice transcription', state: 'failed', note: 'saved, but the daemon did not restart' };
-  }
-  if (await voiceReady(effects, env)) {
-    effects.out(ok('Voice transcription is ready; the API key remains hidden.'));
-    return { key: 'voice', label: 'Voice transcription', state: 'installed', note: 'ready' };
-  }
-  effects.out(warn(`Voice configuration was saved, but readiness was not confirmed — check '${offer.statusCheck.join(' ')}'.`));
-  return { key: 'voice', label: 'Voice transcription', state: 'failed', note: 'readiness not confirmed' };
-}
-
-// Read-only, and deliberately lenient: an unreadable answer is "not ready",
-// which offers voice setup again rather than skipping it on a bad parse.
-async function voiceReady(effects, env) {
-  try {
-    const result = await effects.run('ours-mcp', ['voice-status', '--json'], { env });
-    return JSON.parse(String(result?.stdout ?? '').trim())?.ready === true;
-  } catch {
-    return false;
-  }
+  effects.out(info('Voice transcription setup is not managed by ours-mcp. Existing daemon configuration is left unchanged.'));
+  return { key: 'voice', label: 'Voice transcription', state: 'skipped', note: 'configure on the shared daemon' };
 }
 
 /**

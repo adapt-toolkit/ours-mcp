@@ -109,16 +109,6 @@ export function deriveNewStateDir(home, taken = [], { limit = 64 } = {}) {
 
 export const SELECT_CREATE = '__create__';
 
-// The nightly flow kept a registry of daemon profiles here. v3 does not read it —
-// detection replaced it — so anyone who used that flow has a file describing
-// daemons that nothing consults any more.
-//
-// It is NOT deleted. Quietly removing a file that describes someone's daemons is
-// not an installer's business, and the file is harmless. But leaving it looking
-// live is worse than saying it is not, so the run says so once.
-export const LEGACY_PROFILE_REGISTRY = 'installer-profiles.json';
-export const legacyRegistryPath = (home) => join(resolve(home), '.ours', LEGACY_PROFILE_REGISTRY);
-
 /**
  * What this run should do about choosing a daemon (C1's five rules, in one place
  * so they can be read together and tested without a terminal):

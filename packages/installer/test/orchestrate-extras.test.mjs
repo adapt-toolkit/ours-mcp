@@ -169,72 +169,12 @@ test('a failed ours-fleet init is reported with its retry and does not end the r
 
 // ------------------------------------------------------------------ voice ---
 
-test('voice is skipped without the MCP server, and says how to get it', async () => {
+test('voice configuration is left to the shared daemon', async () => {
   const e = fx();
-  const row = await runVoicePhase(ARGS, e, { target: AT_DEFAULT, mcpReady: false });
-  assert.deepEqual(ranAsText(e), [], 'nothing is invoked when the command does not exist');
+  const row = await runVoicePhase(ARGS, e, { target: AT_DEFAULT, mcpReady: true });
+  assert.deepEqual(ranAsText(e), []);
   assert.equal(row.state, 'skipped');
-  assert.match(said(e), /re-run ours-install to add both/);
-});
-
-test('the INSTALLER owns the restart beat, because a v3 daemon is external to ours-mcp', async () => {
-  // v2 let `ours-mcp voice-setup` own apply+restart+readiness. Under v3 it
-  // classifies every daemon as `external` and returns after writing the config,
-  // so that beat has no owner unless this phase takes it.
-  const base = fx({ answers: [true] });
-  let configured = false;
-  const e = {
-    ...base,
-    runInteractive: async (cmd, args, opts) => { configured = true; return base.runInteractive(cmd, args, opts); },
-    run: async (cmd, args, opts = {}) => {
-      if (args.includes('voice-status')) {
-        base.recorder.ran.push([cmd, ...args]);
-        base.recorder.ranEnv.push(opts.env ?? null);
-        return { ok: true, code: 0, stdout: JSON.stringify({ ready: configured, provider: 'deepgram' }) };
-      }
-      return base.run(cmd, args, opts);
-    },
-  };
-  const row = await runVoicePhase(ARGS, e, { target: AT_TG, mcpReady: true });
-  const ran = ranAsText(base);
-  assert.deepEqual(base.recorder.interactive, [['ours-mcp', 'voice-setup']], 'voice-setup keeps the terminal it needs');
-  assert.ok(ran.includes('ours-mcp restart'),
-    'the installer performs the restart the CLI-managed daemon needs');
-  assert.ok(ran.lastIndexOf('ours-mcp voice-status --json') > ran.indexOf('ours-mcp restart'),
-    'and re-checks readiness AFTER the restart, not before');
-  base.recorder.ranEnv.forEach((env, i) => assert.ok(isWholeDaemonEnv(env), `half a pair handed to: ${ran[i]}`));
-  assert.equal(row.state, 'installed');
-});
-
-test('an already-configured daemon is left entirely alone', async () => {
-  const e = fx({ voiceReady: true });
-  const row = await runVoicePhase(ARGS, e, { target: AT_DEFAULT, mcpReady: true });
-  assert.deepEqual(ranAsText(e), ['ours-mcp voice-status --json'], 'it reads, and does nothing else');
-  assert.deepEqual(e.recorder.asked, [], 'and asks nothing');
-  assert.equal(row.state, 'current');
-});
-
-test('declining voice writes nothing and is offered again on the next run', async () => {
-  const e = fx({ answers: [false] });
-  const row = await runVoicePhase(ARGS, e, { target: AT_DEFAULT, mcpReady: true });
-  assert.deepEqual(e.recorder.interactive, [], 'voice-setup is never launched');
-  assert.equal(row.state, 'skipped');
-  assert.match(said(e), /re-run ours-install any time to configure voice/);
-});
-
-test('a non-interactive run never launches the interactive voice command', async () => {
-  const e = fx();
-  const row = await runVoicePhase({ ...ARGS, assumeYes: true }, e, { target: AT_DEFAULT, mcpReady: true });
-  assert.deepEqual(e.recorder.interactive, []);
-  assert.equal(row.note, 'non-interactive');
-});
-
-test('a voice-setup that fails leaves the daemon alone and prints the retry', async () => {
-  const e = fx({ answers: [true], interactiveOk: false });
-  const row = await runVoicePhase(ARGS, e, { target: AT_DEFAULT, mcpReady: true });
-  assert.ok(!ranAsText(e).some((s) => s.includes('daemon restart')), 'a daemon is never bounced for a config that was not written');
-  assert.equal(row.state, 'failed');
-  assert.match(said(e), /Run 'ours-mcp voice-setup' directly to try again/);
+  assert.match(said(e), /not managed by ours-mcp/);
 });
 
 // --------------------------------------------------------------- identity ---
@@ -242,7 +182,7 @@ test('a voice-setup that fails leaves the daemon alone and prints the retry', as
 test('the human identity is created with the daemon pair, after the MCP server exists', async () => {
   const e = fx({ lines: ['Vitalii'] });
   const row = await runIdentityPhase(ARGS, e, { target: AT_TG, mcpReady: true });
-  assert.deepEqual(ranAsText(e), ['ours-mcp create-root Vitalii']);
+  assert.deepEqual(ranAsText(e), ['ours identity create-root --name Vitalii --json']);
   assert.ok(isWholeDaemonEnv(e.recorder.ranEnv[0]));
   assert.equal(e.recorder.ranEnv[0].OURS_CONFIG, join(TG, 'config.json'));
   assert.equal(row.state, 'installed');
@@ -255,19 +195,19 @@ test('an identity that already exists is a keep, not a failure', async () => {
     run: async (cmd, args) => {
       base.recorder.ran.push([cmd, ...args]);
       base.recorder.ranEnv.push(null);
-      return { ok: true, code: 0, stdout: 'create-root: a root identity already exists ("Vitalii") — nothing to do.' };
+      throw new Error('ours identity create-root: a root identity already exists ("Vitalii")');
     },
   };
   const row = await runIdentityPhase({ ...ARGS, assumeYes: true }, e, { target: AT_DEFAULT, mcpReady: true });
   assert.equal(row.state, 'current');
-  assert.equal(row.note, 'Vitalii');
+  assert.equal(row.note, 'existing identity kept');
   assert.match(said(base), /keeping it/);
   assert.doesNotMatch(said(base), /needs attention/);
 });
 
 test('an unreachable daemon gives the exact retry command, naming THIS daemon', async () => {
   const e = fx({ runFails: ['create-root'], lines: ['me'] });
-  const failing = { ...e, run: async () => { throw new Error('ours-mcp create-root: daemon not running'); } };
+  const failing = { ...e, run: async () => { throw new Error('ours identity create-root: daemon not running'); } };
   const row = await runIdentityPhase({ ...ARGS, assumeYes: true }, failing, { target: AT_TG, mcpReady: true });
   assert.equal(row.state, 'failed');
   // The hint NAMES THIS DAEMON. A retry command without the config path starts the

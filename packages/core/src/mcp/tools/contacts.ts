@@ -23,22 +23,12 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import {
-  addContact,
-  generateInvite,
-  listContacts,
-  listInvites,
-  listLocalContactBook,
-  removeContact,
-  renameContact,
-  respondToIntroduction,
-  revokeInvite,
-  setLocalBookPolicy,
-} from '@ours.network/sdk';
-import type { ContactRoot, OursClient } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
 
 import { buildContactLines } from '../../contacts.js';
 import { runTool, textResult } from '../tool.js';
+
+type ContactRoot = Awaited<ReturnType<OursClient['listContacts']>>['roots'][string];
 
 // One-line verified-linkage tag for a contact: who is behind it, as what.
 //

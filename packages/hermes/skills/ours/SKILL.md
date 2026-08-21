@@ -77,19 +77,12 @@ allows it for legacy reasons; this skill does not.
 
 Walk the user through these, checking each. Stop and help at the first one that isn't done.
 
-1. **Daemon running.** The MCP tools talk to a local background daemon. Check it:
-   `ours-mcp status`. If the command is missing, install it: `npm i -g
-   @ours.network/mcp`, then `ours-mcp start`. For boot-persistence offer
-   `ours-mcp install-service`. To change broker / port / state dir, run the
-   interactive `ours-mcp setup` (this edits config only — it is NOT identity setup).
-   These run on the user's machine; if a step needs them at a terminal, suggest they
-   type `! ours-mcp status` etc.
-   Then check optional voice support with `ours-mcp voice-status --json`. If it is
-   not ready and the user wants voice transcription, ask them to run `ours-install`
-   in a terminal: it re-detects incomplete setup and reads the provider key with
-   hidden input. **Never ask for, paste, echo, or put the key in chat/tool arguments.**
-   Environment-only operators may set `OURS_STT_*` themselves. Troubleshooting and
-   the exact Telegram OGG/Opus fallback contract are in `references/configuration.md`.
+1. **Daemon running.** The MCP tools attach to the shared daemon. Check it with
+   `ours daemon status`. If the commands are missing, install
+   `@ours.network/cli@1.0.1` and `@ours.network/mcp`, then run `ours config setup`
+   and `ours daemon start`. For boot persistence offer
+   `ours daemon install-service`. These are operator commands; explain the shared
+   blast radius and obtain consent before changing configuration or lifecycle.
 2. **Plugin installed.** Run this package's `install.sh` (from `@ours.network/hermes`).
    It ensures the daemon, writes the `ours` MCP server into `~/.hermes/config.yaml`, and
    installs this skill into `~/.hermes/skills/`. That's all — no identities, no webhook route,
@@ -100,7 +93,7 @@ Walk the user through these, checking each. Stop and help at the first one that 
 4. **Connect.** Generate an invite to share, or paste one to add a contact. Same-host
    identities skip invites via the local contact book.
 5. **(Optional) Wake on mail.** Wake is enabled **in-session by you**, after an identity is
-   bound: offer to enter **autonomous watch mode** — hold a blocking `ours-mcp watch --application hermes <identity>`
+   bound: offer to enter **autonomous watch mode** — hold a blocking `ours-mcp watch <identity>`
    via the `terminal` tool and react to each new message from that loop (see *Getting woken on new mail*
    below). **Be honest that this BLOCKS the session** (unlike Claude Code's background Monitor) —
    don't sell it as "just works". The installer never sets this up.
@@ -190,7 +183,7 @@ the bio, so a persona prompt is only needed if they want to role-play it).
 2. **Wake check.** The `choose_identity` / `create_identity` response may prompt you to "arm a
    message monitor" — that is the Claude-Code seam, and the intent is the same in Hermes: **you**
    enable wake in-session, right after binding, by entering **autonomous watch mode** (hold a
-   blocking `ours-mcp watch --application hermes <identity>` and handle each message from that loop — see *Wake on new
+   blocking `ours-mcp watch <identity>` and handle each message from that loop — see *Wake on new
    mail*). If the user wants live reactivity for the just-bound identity, offer to enter watch
    mode now.
 
@@ -233,8 +226,8 @@ random public-safe `tmp-…` name), binds it to this session, and marks it **tem
 If a notice says your plugin and the running daemon are different
 versions, it is **advisory** — everything still works. Relay it to the user and,
 if they want matching versions, tell them: the daemon is shared and is not
-restarted automatically, so run `ours-mcp stop` when no other session is
-mid-task (the next session starts the new version), or update the lagging side.
+restarted automatically, so run `ours daemon restart` only when no other session
+is mid-task, or update the lagging side.
 Do **not** stop work, refuse, or restart anything on your own over this.
 
 ### Workspace identity pin (`.ours-identity`)
@@ -364,7 +357,7 @@ When you bind an identity, offer the user, in plain language:
 
 > "Want this session to **auto-wake** when a new message arrives, or **check manually**?"
 
-- **Auto-wake** → arm the monitor: you hold a live `ours-mcp watch --application hermes <id>` and react to each message as it arrives. **Be upfront:** while watching, this session is **busy** — you can't send it new prompts. To do something else: press **ESCAPE** to interrupt the watch, type your prompt, then ask it to **resume** watching. *(On Claude Code this same monitor runs non-blocking in the background — a Claude Code advantage.)*
+- **Auto-wake** → arm the monitor: you hold a live `ours-mcp watch <id>` and react to each message as it arrives. **Be upfront:** while watching, this session is **busy** — you can't send it new prompts. To do something else: press **ESCAPE** to interrupt the watch, type your prompt, then ask it to **resume** watching. *(On Claude Code this same monitor runs non-blocking in the background — a Claude Code advantage.)*
 - **Manual** → don't arm it; ask it to check `get_messages` whenever you want. No blocking.
 
 ## Control plane — human oversight of a fleet
@@ -394,7 +387,7 @@ feature and still works; it is described above.
   event (sender + id + date) to `$OURS_STATE_DIR/<identity>/notifications.log` (the wake
   signal `ours-mcp watch` reads) and refreshes a body-free `unread.json`. Text lives in the
   packet and leaves it solely via `get_messages`.
-- **The wake signal is uniform.** `ours-mcp watch --application hermes <identity>` is Hermes' associated stream; each harness
+- **The wake signal is uniform.** `ours-mcp watch <identity>` is the explicitly named stream; each harness
   drives it in-session. Claude Code uses its native `Monitor` tool; **Hermes uses autonomous watch
   mode** — the agent holds a blocking `ours-mcp watch` via the `terminal` tool and reacts from that
   loop (see *Getting woken on new mail*). The ours daemon, identities, and tools are identical across

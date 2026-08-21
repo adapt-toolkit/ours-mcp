@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import {
-  planHarnessPlugins, planFleet, planVoice, buildHandoffPromptV3,
+  planHarnessPlugins, planFleet, buildHandoffPromptV3,
   HARNESS_ENV_SUPPORT, CLAUDE_MARKET, CODEX_MARKET,
 } from '../lib/extras.mjs';
 import { buildHandoffPrompt } from '../lib/logic.mjs';
@@ -140,61 +140,6 @@ test('ours-fleet FOLLOWS the channel, so a nightly stack does not get stable fle
     ['npm', 'i', '-g', '@ours.network/fleet@nightly']);
   assert.deepEqual(planFleet({ stateDir: OURS, isDefaultStateDir: true, channel: 'latest' }).install,
     ['npm', 'i', '-g', '@ours.network/fleet@latest'], 'and a stable stack still gets stable fleet');
-});
-
-// -------------------------------------------------------------------- voice --
-
-test('voice setup is skipped when there is no ours-mcp to run it', () => {
-  // voice-setup is an ours-mcp subcommand and v3 installs the MCP server as a
-  // COMPONENT, so a run that declined it has nothing to call.
-  const p = planVoice({ mcpInstalled: false, stateDir: OURS, port: 3050 });
-  assert.equal(p.action, 'skip');
-  assert.equal(p.reason, 'no-mcp');
-  assert.equal(p.offerOnRerun, true);
-  assert.equal(p.restartOwed, false);
-});
-
-test('the restart beat is still planned, and now names ours-mcp because ours-mcp is the daemon', () => {
-  // THE REASON THIS BEAT EXISTS MAY HAVE JUST EVAPORATED, and that is recorded
-  // rather than acted on. It was taken by the installer because cmdVoiceSetup
-  // computes `managed = runningPid() !== null` from ours-mcp's OWN pid record,
-  // and an SDK-CLI daemon never wrote one — so voice-setup always classified it
-  // `external`, wrote the config and applied nothing. An ours-mcp daemon DOES
-  // write that record, so voice-setup may now do its own restart and this becomes
-  // a second one. That is a packages/core behaviour question, not a rename, and it
-  // is flagged in lib/extras.mjs rather than guessed at here.
-  const p = planVoice({ mcpInstalled: true, ready: false, accepted: true, configChanged: true, stateDir: TG, port: 3061 });
-  assert.equal(p.action, 'setup');
-  assert.equal(p.restartOwed, true);
-  assert.deepEqual(p.restart, ['ours-mcp', 'restart']);
-  assert.deepEqual(p.env, { OURS_CONFIG: TG_CFG });
-  assert.deepEqual(p.setup, ['ours-mcp', 'voice-setup']);
-  assert.deepEqual(p.statusCheck, ['ours-mcp', 'voice-status', '--json']);
-  assert.ok(!JSON.stringify(p).includes('ours daemon restart'), "the SDK CLI's restart is dead: it would restart a daemon we no longer run");
-});
-
-test('an unchanged voice config owes no restart', () => {
-  // Bouncing a daemon nobody asked to bounce is a real cost: it is shared.
-  const p = planVoice({ mcpInstalled: true, accepted: true, configChanged: false, stateDir: TG, port: 3061 });
-  assert.equal(p.action, 'setup');
-  assert.equal(p.restartOwed, false);
-  assert.equal(p.restart, null);
-});
-
-test('voice is not offered when already configured, and never offered non-interactively', () => {
-  const ready = planVoice({ mcpInstalled: true, ready: true, stateDir: OURS, port: 3050 });
-  assert.equal(ready.action, 'skip');
-  assert.equal(ready.reason, 'already-configured');
-  assert.equal(ready.offerOnRerun, false, 'nothing left to offer');
-
-  const auto = planVoice({ mcpInstalled: true, assumeYes: true, stateDir: OURS, port: 3050 });
-  assert.equal(auto.action, 'skip');
-  assert.equal(auto.reason, 'non-interactive');
-  assert.equal(auto.offerOnRerun, true, "v2's contract: offered again on re-run");
-
-  const no = planVoice({ mcpInstalled: true, accepted: false, stateDir: OURS, port: 3050 });
-  assert.equal(no.reason, 'declined');
-  assert.equal(no.offerOnRerun, true);
 });
 
 // ---------------------------------------------------------------- hand-off --

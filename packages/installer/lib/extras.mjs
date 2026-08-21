@@ -3,11 +3,8 @@
 // The v3 installer keeps harness plugins, ours-fleet, voice setup and the
 // copy-paste hand-off prompt; spec v3's silence about them was an oversight.
 //
-// They are not four more screens carried across, because v2 and v3 disagree
-// about which package IS the daemon. In v2 @ours.network/mcp is the daemon and
-// gets the unit; in v3 the daemon is the ours-sdk CLI and ours-mcp is a
-// per-session stdio proxy with no unit. Each of the four had assumed the v2
-// arrangement somewhere, and this module is where the new assumption lives.
+// The shared daemon belongs to the operator CLI. ours-mcp is only a per-session
+// stdio adapter with no unit, and these extra phases preserve that boundary.
 //
 // Pure, like target.mjs / plan.mjs / components.mjs: no I/O, no subprocess, no
 // terminal. Every function takes what was observed and returns a plan; the
@@ -262,91 +259,6 @@ export function planFleet({ stateDir, isDefaultStateDir, wanted = true, channel 
       : `fleet roles that should use this daemon need one line in fleet.yaml:\n    env: { OURS_CONFIG: ${config} }`,
   };
   return wanted ? { ...plan, action: 'install' } : { ...plan, action: 'skip', offerOnRerun: true };
-}
-
-// -----------------------------------------------------------------------------
-// voice setup — the installer takes the restart beat
-// -----------------------------------------------------------------------------
-
-/**
- * WHY THE INSTALLER OWNS THE RESTART.
- *
- * cmdVoiceSetup computes `managed = runningPid() !== null` from ours-mcp's OWN
- * pid record. A v3 daemon is started by `ours daemon start`, which writes
- * <state-dir>/ours-cli-daemon.json — not that record. So runningPid() is null
- * and EVERY v3 daemon classifies as `external`. transactVoiceConfig then returns
- * at its `if (daemonState !== 'managed') return { ok: true, stage: 'write' }`:
- * config written, no apply, no restart, no readiness check, exit 0.
- *
- * Nothing goes wrong — voice-setup will not run `ours-mcp restart` against a
- * CLI-started daemon, which is right. But v2's entire restart protocol
- * (restartHandled, the exit-2 branch, "voice setup performed the required
- * restart") can only fire for a `managed` daemon, so carrying it across would
- * ship a branch that can never be taken. Nothing else owns that beat, and the
- * installer is the only process that knows the daemon is CLI-managed.
- *
- * One phase, AFTER the component phase — voice-setup is an `ours-mcp`
- * subcommand and v3 installs @ours.network/mcp as a COMPONENT, so it is not on
- * PATH any earlier. The create path needs no special case: in v3 the first
- * `ours daemon start` already happened back in the daemon phase.
- *
- * FILED, NOT FIXED HERE: voice-setup's own hints still say `ours-mcp start` and
- * "restart its external launcher" (packages/core/src/cli.ts:542,547). Under v3
- * the answer is `ours daemon restart --config <cfg>`. That is a packages/core
- * change with its own blast radius and does not belong in an installer PR.
- */
-export function planVoice({
-  mcpInstalled = false,
-  ready = false,
-  assumeYes = false,
-  accepted = null,
-  configChanged = false,
-  stateDir,
-  port,
-} = {}) {
-  const config = stateDir ? cfgPath(stateDir) : null;
-  const skip = (reason, message, extra = {}) => ({
-    key: 'voice', action: 'skip', reason, message, offerOnRerun: true, restartOwed: false, ...extra,
-  });
-
-  if (!mcpInstalled) {
-    return skip('no-mcp', 'voice setup needs the MCP server, which this run did not install — re-run ours-install to add both.');
-  }
-  if (ready) {
-    return { key: 'voice', action: 'skip', reason: 'already-configured', message: 'voice transcription is already configured', offerOnRerun: false, restartOwed: false };
-  }
-  if (assumeYes) {
-    return skip('non-interactive', 'voice setup is interactive and this run is not — re-run ours-install to configure it.');
-  }
-  if (accepted === false) {
-    return skip('declined', 'skipped cleanly — re-run ours-install any time to configure voice.');
-  }
-
-  const env = config ? { OURS_CONFIG: config } : {};
-  return {
-    key: 'voice',
-    action: 'setup',
-    env,
-    setup: ['ours-mcp', 'voice-setup'],
-    statusCheck: ['ours-mcp', 'voice-status', '--json'],
-    // The beat. Only owed when the config actually changed: an unchanged config
-    // is not a reason to bounce a daemon somebody else may be using.
-    restartOwed: Boolean(configChanged),
-    // ours-mcp's restart, because ours-mcp is the daemon now. NOTE FOR WHOEVER
-    // TOUCHES THIS NEXT — the reason the installer owns this beat at all may have
-    // just evaporated: cmdVoiceSetup computes `managed = runningPid() !== null`
-    // from ours-mcp's OWN pid record, and an ours-mcp daemon HAS one. Under the
-    // SDK-CLI daemon it never did, which is why the installer took the restart.
-    // If voice-setup now classifies the daemon as managed it
-    // will run its own restart protocol, and this becomes a second restart rather
-    // than the only one. Not changed here: that is a behaviour question for
-    // packages/core, not a rename.
-    restart: configChanged && config ? ['ours-mcp', 'restart'] : null,
-    // Never rolls the daemon back: voice-setup leaves the prior config intact on
-    // its own failure path, so the recovery is a retry, not an undo.
-    retryHint: config ? `OURS_CONFIG=${config} ours-mcp restart` : null,
-    port: Number.isInteger(port) ? port : null,
-  };
 }
 
 // -----------------------------------------------------------------------------

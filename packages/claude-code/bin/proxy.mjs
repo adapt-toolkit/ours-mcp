@@ -73,7 +73,7 @@ const env = { ...process.env };
 if (process.ppid > 1) env.OURS_CLIENT_PID = String(process.ppid);
 const child = spawn(
   process.execPath,
-  [cliPath, 'proxy', '--application', 'claude-code', ...process.argv.slice(2)],
+  [cliPath, 'proxy', ...process.argv.slice(2)],
   { stdio: 'inherit', env },
 );
 

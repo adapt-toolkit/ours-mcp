@@ -89,11 +89,14 @@ test('detaching cowork is a BEHAVIOUR CHANGE and says so before it happens', () 
 test('the boot service and the daemon delegate their refusals rather than reimplementing them', () => {
   const [service, stop] = planDaemonRemoval({ stateDir: TG, cliStartedIt: true });
   assert.equal(service.unit, 'ours-tg.service', 'this daemon\'s unit, not the default one');
-  // Selected by ENVIRONMENT now: ours-mcp's lifecycle commands take no flags, so
-  // the plan names the command and the caller supplies the pair. The unit is still
-  // derived rather than passed.
-  assert.deepEqual(service.command, ['ours-mcp', 'uninstall-service']);
-  assert.deepEqual(stop.command, ['ours-mcp', 'stop']);
+  assert.deepEqual(service.command, [
+    'ours', 'daemon', 'uninstall-service', '--yes', '--state-dir', TG,
+    '--config', join(TG, 'config.json'),
+  ]);
+  assert.deepEqual(stop.command, [
+    'ours', 'daemon', 'stop', '--state-dir', TG,
+    '--config', join(TG, 'config.json'),
+  ]);
 });
 
 test('a daemon the CLI did not start is named, not signalled, and the run continues', () => {

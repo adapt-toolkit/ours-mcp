@@ -19,7 +19,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import { advertiseMigrate, setBio, setPersona } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 
 import { runTool, textResult } from '../tool.js';

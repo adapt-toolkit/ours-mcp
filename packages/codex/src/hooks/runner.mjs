@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sendControlCommand } from '../control-server.mjs';
@@ -29,6 +30,14 @@ const safeUnread = (value) => (Array.isArray(value?.identities) ? value.identiti
   )) : [];
   return [{ name: entry.name, count, files, recent }];
 });
+
+async function applicationIdentityNames(env, stateDir) {
+  const path = env.OURS_MCP_CONFIG || join(homedir(), '.ours-mcp', 'config.json');
+  const value = JSON.parse(await readFile(path, 'utf8'));
+  if (value?.version !== 1 || !value.daemons || typeof value.daemons !== 'object') return new Set();
+  const identities = value.daemons[resolve(stateDir)]?.identities;
+  return new Set(Array.isArray(identities) ? identities.filter((name) => typeof name === 'string') : []);
+}
 
 function renderContext(unread, pin) {
   const lines = [];
@@ -64,22 +73,25 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
       await send(socket, capability, { command: 'register_session', sessionId: payload.session_id, threadId: payload.session_id, cwd: payload.cwd });
     }
     let port = env.OURS_PORT || '3050';
+    let selectedStateDir = resolve(env.OURS_STATE_DIR || join(homedir(), '.ours'));
     let selectedToken = env.OURS_API_TOKEN || '';
     // Standard Codex does not pass through ours-codex's resolved environment.
-    // Resolve its registry association here too so SessionStart/UserPromptSubmit
-    // inspect the same daemon as the stdio proxy. Hook failures remain benign.
-    if (!env.OURS_PORT && !env.OURS_CONFIG && !env.OURS_STATE_DIR) {
-      try {
-        const selected = await resolveDaemonProfile({ env, fetch: fetchImpl });
-        port = String(selected.port);
-        selectedToken = selected.token || '';
-      } catch { /* proxy/launcher owns diagnostics; hooks emit a benign no-op */ }
-    }
+    // Resolve the same coherent SDK selection here so SessionStart and
+    // UserPromptSubmit inspect the same daemon as the stdio proxy.
+    try {
+      const selected = await resolveDaemonProfile({ env, fetch: fetchImpl });
+      port = String(selected.port);
+      selectedToken = selected.token || '';
+      selectedStateDir = resolve(selected.stateDir);
+    } catch { /* proxy/launcher owns diagnostics; hooks emit a benign no-op */ }
     const headers = selectedToken ? { 'x-ours-api-token': selectedToken } : {};
     let unread = [];
     try {
       const response = await fetchImpl(`http://127.0.0.1:${port}/unread`, { headers, signal: AbortSignal.timeout(1500) });
-      if (response.ok) unread = safeUnread(await response.json());
+      if (response.ok) {
+        const visible = await applicationIdentityNames(env, selectedStateDir);
+        unread = safeUnread(await response.json()).filter((entry) => visible.has(entry.name));
+      }
     } catch { /* daemon diagnostics belong to launcher/proxy */ }
     const pin = await findPin(payload.cwd || process.cwd());
     const context = renderContext(unread, pin);

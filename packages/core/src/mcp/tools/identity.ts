@@ -22,19 +22,14 @@ import { z } from 'zod';
 
 import {
   OursError,
-  chooseIdentity,
-  closeTemporaryIdentityOp,
-  createIdentity,
-  createRootIdentity,
-  createTemporaryIdentity,
-  currentIdentity,
-  defineLocalIdentityFile,
-  listIdentities,
-  removeIdentity,
 } from '@ours.network/sdk';
-import type { IdentityTreeRow, OursClient } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
 
+import { filterApplicationIdentities } from '../../application-identities.js';
+import type { ApplicationIdentityStore } from '../../application-identities.js';
 import { runTool, textResult } from '../tool.js';
+
+type IdentityTreeRow = Awaited<ReturnType<OursClient['listIdentities']>>[number];
 
 // The consent sentence create_identity, create_root_identity and choose_identity
 // all append after binding. Baseline text (index.ts:3617, 3793, 3948) — one
@@ -69,6 +64,40 @@ const removeNotice = (r: { attempted: number; notified: number; failed: number }
     ? ''
     : ` Remove-me notices: ${r.notified}/${r.attempted} queued, ${r.failed} not sent (best effort).`;
 
+// Keep daemon mutations and the application visibility list in lockstep on all
+// synchronous success/failure paths. Adoption is written first so a config
+// failure cannot mutate the daemon; daemon failures roll that provisional write
+// back. Removal is the mirror image.
+async function adoptBeforeMutation<T>(
+  identities: ApplicationIdentityStore,
+  name: string,
+  mutate: () => Promise<T>,
+): Promise<T> {
+  const wasVisible = await identities.has(name);
+  if (!wasVisible) await identities.add(name);
+  try {
+    return await mutate();
+  } catch (error) {
+    if (!wasVisible) await identities.remove(name);
+    throw error;
+  }
+}
+
+async function dropBeforeMutation<T>(
+  identities: ApplicationIdentityStore,
+  name: string,
+  mutate: () => Promise<T>,
+): Promise<T> {
+  const wasVisible = await identities.has(name);
+  if (wasVisible) await identities.remove(name);
+  try {
+    return await mutate();
+  } catch (error) {
+    if (wasVisible) await identities.add(name);
+    throw error;
+  }
+}
+
 // list_identities' two tag columns, from IdentityTreeRow's typed facts.
 // `session: null` covers BOTH "no lease" and "lease held by a dead pid" — the SDK
 // already collapsed them, because the baseline renders a dead holder as free.
@@ -92,7 +121,11 @@ const tempTag = (row: IdentityTreeRow): string => {
   }
 };
 
-export function registerIdentityTools(server: McpServer, clientFor: () => OursClient): void {
+export function registerIdentityTools(
+  server: McpServer,
+  clientFor: () => OursClient,
+  applicationIdentities: ApplicationIdentityStore,
+): void {
   server.tool(
     'create_identity',
     'Create a new self-sovereign identity (an ADAPT node) with the given display ' +
@@ -111,8 +144,12 @@ export function registerIdentityTools(server: McpServer, clientFor: () => OursCl
     async ({ name, bio, expose_local, local_auto_accept }) =>
       runTool(
         clientFor(),
-        (c) => c.createIdentity({ name, bio, exposeLocal: expose_local, localAutoAccept: local_auto_accept }),
-        (r) => {
+        (c) => adoptBeforeMutation(
+          applicationIdentities,
+          name,
+          () => c.createIdentity({ name, bio, exposeLocal: expose_local, localAutoAccept: local_auto_accept }),
+        ),
+        async (r) => {
           // `underRoot` rather than r.info.rootName: the baseline names the root from
           // the in-memory Identity (index.ts:3596), which cannot degrade to '' when
           // the describe_identity read-back fails.
@@ -155,8 +192,36 @@ export function registerIdentityTools(server: McpServer, clientFor: () => OursCl
     async ({ name, bio, expose_local, local_auto_accept }) =>
       runTool(
         clientFor(),
-        (c) => c.createTemporaryIdentity({ name, bio, exposeLocal: expose_local, localAutoAccept: local_auto_accept }),
-        (r) => {
+        async (c) => {
+          if (name) {
+            return adoptBeforeMutation(
+              applicationIdentities,
+              name,
+              () => c.createTemporaryIdentity({ name, bio, exposeLocal: expose_local, localAutoAccept: local_auto_accept }),
+            );
+          }
+          const result = await c.createTemporaryIdentity({
+            name,
+            bio,
+            exposeLocal: expose_local,
+            localAutoAccept: local_auto_accept,
+          });
+          try {
+            await applicationIdentities.add(result.info.name);
+          } catch (configError) {
+            try {
+              await c.closeTemporaryIdentityOp({ name: result.info.name });
+            } catch (cleanupError) {
+              throw new AggregateError(
+                [configError, cleanupError],
+                `Failed to adopt generated temporary identity ${JSON.stringify(result.info.name)} and failed to close it.`,
+              );
+            }
+            throw configError;
+          }
+          return result;
+        },
+        async (r) => {
           // r.info.name, not the `name` argument: when it was omitted the SDK minted
           // the random `tmp-…` one and that is what must be reported back.
           const exposure = exposureClause(r.exposedLocal, r.localAutoAccept, '');
@@ -187,14 +252,22 @@ export function registerIdentityTools(server: McpServer, clientFor: () => OursCl
     async ({ name }) =>
       runTool(
         clientFor(),
-        (c) => c.closeTemporaryIdentityOp({ name }),
-        (r) =>
+        async (c) => {
+          const target = name ?? (await c.currentIdentity()).name;
+          return dropBeforeMutation(
+            applicationIdentities,
+            target,
+            () => c.closeTemporaryIdentityOp({ name: target }),
+          );
+        },
+        (r) => (
           // `result: null` is the idempotent no-op — a name that no longer exists.
           // The baseline answers it with a NON-error result (index.ts:3720), which is
           // why the SDK returns it instead of throwing.
           r.result === null
             ? textResult(`close_temporary_identity: no identity named "${r.name}" — nothing to close (already cleaned up?).`)
-            : textResult(`Temporary identity "${r.name}" closed and all local state deleted. ${closeNotice(r.result)}`),
+            : textResult(`Temporary identity "${r.name}" closed and all local state deleted. ${closeNotice(r.result)}`)
+        ),
       ),
   );
 
@@ -212,20 +285,23 @@ export function registerIdentityTools(server: McpServer, clientFor: () => OursCl
       bio: z.string().default('').describe('Free-text bio describing the person (carried in role invites).'),
       expose_local: z.boolean().default(true).describe('Publish the root in the host-local contact book.'),
       local_auto_accept: z.boolean().default(true).describe('Auto-accept local contact-book introductions (false = they queue for approval).'),
-      skip_if_root_exists: z.boolean().default(false).describe('Installer seam: if a root already exists, do NOTHING (fail with "a root identity already exists") instead of adopting the name as a role. The ours-mcp create-root CLI sets this so re-runs stay idempotent; leave false for the interactive tool.'),
+      skip_if_root_exists: z.boolean().default(false).describe('Installer seam: if a root already exists, do NOTHING (fail with "a root identity already exists") instead of adopting the name as a role. The ours installer sets this so re-runs stay idempotent; leave false for the interactive tool.'),
     },
     async ({ name, bio, expose_local, local_auto_accept, skip_if_root_exists }) =>
       runTool(
         clientFor(),
-        (c) =>
-          c.createRootIdentity({
+        (c) => adoptBeforeMutation(
+          applicationIdentities,
+          name,
+          () => c.createRootIdentity({
             name,
             bio,
             exposeLocal: expose_local,
             localAutoAccept: local_auto_accept,
             skipIfRootExists: skip_if_root_exists,
           }),
-        (r) => {
+        ),
+        async (r) => {
           const monitorHint = monitorHintFor(r.info.name);
           if (r.hierarchy === 'role') {
             // Single-root policy: a host root already existed, so this became a role
@@ -279,7 +355,7 @@ export function registerIdentityTools(server: McpServer, clientFor: () => OursCl
         // The one operation in this slice that is not session-scoped: it writes a
         // file, so the SDK takes no SessionContext.
         () =>
-          defineLocalIdentityFile({
+          clientFor().defineLocalIdentityFile({
             name,
             path,
             force,
@@ -306,8 +382,12 @@ export function registerIdentityTools(server: McpServer, clientFor: () => OursCl
     async ({ name, force }) =>
       runTool(
         clientFor(),
-        (c) => c.chooseIdentity({ name, force }),
-        (r) => {
+        (c) => adoptBeforeMutation(
+          applicationIdentities,
+          name,
+          () => c.chooseIdentity({ name, force }),
+        ),
+        async (r) => {
           let msg = `Bound to identity "${r.name}" (${r.cid}).`;
           if (r.switchedFrom) {
             msg += `\n\nSwitched away from "${r.switchedFrom}" — disable any live monitor previously armed for it.`;
@@ -320,7 +400,7 @@ export function registerIdentityTools(server: McpServer, clientFor: () => OursCl
 
   server.tool(
     'list_identities',
-    'List all identities hosted by this node (name + container id) as a hierarchy — ' +
+    'List identities adopted by this ours-mcp application (name + container id) as a hierarchy — ' +
       'the root identity first with its roles indented under it — marking which one ' +
       'is bound to this session and which are in use elsewhere. Temporary ' +
       '(session-scoped) identities are tagged with their lease state: owned by this ' +
@@ -331,7 +411,8 @@ export function registerIdentityTools(server: McpServer, clientFor: () => OursCl
       runTool(
         clientFor(),
         (c) => c.listIdentities(),
-        (rows) => {
+        async (daemonRows) => {
+          const rows = await filterApplicationIdentities(applicationIdentities, daemonRows);
           if (rows.length === 0) {
             return textResult('No identities yet. Create a root with create_root_identity (or a flat identity with create_identity).');
           }
@@ -402,17 +483,24 @@ export function registerIdentityTools(server: McpServer, clientFor: () => OursCl
     'Permanently delete a persisted identity — its packet and all on-disk state. ' +
       'This cannot be undone.',
     { name: z.string().min(1).describe('Name of the identity to delete.') },
-    async ({ name }) =>
-      runTool(
-        clientFor(),
-        (c) => c.removeIdentity({ name }),
-        (r) =>
-          // A temporary identity goes out through its lifecycle path (ownership check
-          // + best-effort remove-me notices), so it reports the notice counts; a
-          // permanent one is a bare delete.
-          r.kind === 'temporary' && r.close
-            ? textResult(`Removed temporary identity "${r.name}" and its state.${removeNotice(r.close)}`)
-            : textResult(`Removed identity "${r.name}" and its state.`),
-      ),
+    async ({ name }) => {
+      try {
+        const r = await dropBeforeMutation(
+          applicationIdentities,
+          name,
+          () => clientFor().removeIdentity({ name }),
+        );
+        return r.kind === 'temporary' && r.close
+          ? textResult(`Removed temporary identity "${r.name}" and its state.${removeNotice(r.close)}`)
+          : textResult(`Removed identity "${r.name}" and its state.`);
+      } catch (error) {
+        if (error instanceof OursError && error.code === 'NO_SUCH_IDENTITY') {
+          await applicationIdentities.remove(name);
+          return textResult(`Identity "${name}" was already absent; removed it from this ours-mcp application's identity list.`);
+        }
+        if (error instanceof OursError) return textResult(error.message, true);
+        throw error;
+      }
+    },
   );
 }

@@ -1,31 +1,14 @@
-// Bundles the agent-agnostic ours MCP server into self-contained JS.
-// Each entry becomes a single ESM file with all node_modules inlined.
-//
-// Outputs:
-//   dist/index.js          ← MCP server (loaded at runtime by dist/cli.js)
-//   dist/cli.js            ← daemon CLI (ours-mcp start/stop/status/serve/proxy/watch)
-//   dist/mufl_code/*.muflo ← the COMPILED ADAPT packet only (no .mu/.mm source)
-//
-// Published builds are minified (raises the reverse-engineering bar). For a
-// readable build with intact stack traces, run `npm run build:dev`
-// (OURS_BUILD_DEV=1), which disables minification.
-//
-// Run via `npm run build` from inside packages/core/.
+import { readFileSync } from 'node:fs';
+import { mkdir, rm } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { build } from 'esbuild';
-import { mkdir, rm, cp, readdir } from 'node:fs/promises';
-import { readFileSync, existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const dist = resolve(root, 'dist');
-const dev = !!process.env.OURS_BUILD_DEV;
-
-// Single source of truth for the version — read package.json so the reported
-// version always matches the published package (the CI version bumper only
-// touches package.json, never src).
-const pkgVersion = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version;
+const version = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version;
+const minify = process.env.OURS_BUILD_DEV !== '1';
 
 await rm(dist, { recursive: true, force: true });
 await mkdir(dist, { recursive: true });
@@ -35,157 +18,16 @@ const shared = {
   platform: 'node',
   target: 'node20',
   format: 'esm',
-  // Minify published bundles; keep readable output for `build:dev`.
-  minify: !dev,
-  // Make `import.meta.url` work post-bundle.
-  banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" },
-  // Inline the package version (see src/index.ts __OURS_VERSION__).
-  define: { __OURS_VERSION__: JSON.stringify(pkgVersion) },
-  // @ours.network/sdk MUST BE EXTERNAL, and not for the usual reason.
-  //
-  // Inlining it produces a bundle that builds, typechecks and then dies at boot:
-  //
-  //   ours: fatal startup error: Error: no compiled .muflo packet found
-  //     (looked in: packages/core/dist/mufl_code, packages/core/mufl_code)
-  //
-  // The SDK finds its MUFL packet with `locateUnit()`, which resolves relative to
-  // `dirname(import.meta.url)` — inside the SDK package, where the packet ships.
-  // Bundled into dist/index.js that expression resolves HERE instead, and ours-mcp
-  // has no packet because it no longer owns the engine. Bundling a dependency
-  // that locates its own runtime assets relocates them out from under it.
-  //
-  // Keeping it external is also what preserves the SDK's single-module-instance
-  // guarantee across our three entry points (dist/index.js, dist/cli.js and the
-  // rest): inlined, each bundle would hold a private copy of `identities` and the
-  // lease table — the exact duplicated-state failure ours-sdk's `splitting: true`
-  // exists to prevent, reintroduced one level up.
-  //
-  // The ADAPT SDK stays external for its own reason: a native NAPI addon and a
-  // WASM blob that cannot be bundled at all. Everything else (MCP SDK, zod) is
-  // pure JS and is still inlined, so the bundle stays self-contained.
-  external: [
-    '@ours.network/sdk', '@ours.network/sdk/*',
-    '@adapt-toolkit/sdk', '@adapt-toolkit/sdk/*', '@adapt-toolkit/sdk-native',
-  ],
+  minify,
+  define: { __OURS_VERSION__: JSON.stringify(version) },
+  external: ['@ours.network/sdk', '@ours.network/sdk/*'],
   logLevel: 'info',
 };
 
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/index.ts')],
-  outfile: resolve(dist, 'index.js'),
-});
-
-// The daemon CLI (ours-mcp start/stop/status/serve). It loads dist/index.js at
-// runtime via a computed specifier, so the two bundles stay separate.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/cli.ts')],
-  outfile: resolve(dist, 'cli.js'),
-});
-
-// The stdio connector. Loaded by cli.js through a COMPUTED specifier, exactly as
-// dist/index.js is, so esbuild cannot bundle it into the CLI — it pulls the MCP
-// tool registrars and, through them, the SDK engine, whose module-load side
-// effects print to stdout and corrupt every parseable CLI output.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/connector.ts')],
-  outfile: resolve(dist, 'connector.js'),
-});
-
-// Pure file helpers (mimeFromExt / sanitizeFilename). index.ts inlines these when
-// it imports './files.js', but emit them as a standalone module too so the
-// unit test (test/files-helpers.test.mjs) can import ../dist/files.js directly.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/files.ts')],
-  outfile: resolve(dist, 'files.js'),
-});
-
-// Pure inbox helpers (get_messages encryption-type derivation / JSON payload).
-// index.ts inlines these via './inbox.js'; emit a standalone module too so the
-// unit test (test/inbox-encryption.test.mjs) can import ../dist/inbox.js directly.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/inbox.ts')],
-  outfile: resolve(dist, 'inbox.js'),
-});
-
-// Same deal for the voice-message detection/transcription helpers
-// (test/transcribe-detect.test.mjs imports ../dist/transcribe.js directly).
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/transcribe.ts')],
-  outfile: resolve(dist, 'transcribe.js'),
-});
-
-// Pure Linux process-state parser used by daemon stop polling.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/process-state.ts')],
-  outfile: resolve(dist, 'process-state.js'),
-});
-
-// Pure/setup helpers used by focused config-transaction tests.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/voice-setup.ts')],
-  outfile: resolve(dist, 'voice-setup.js'),
-});
-
-// Boot-service instance naming + validation. cli.ts inlines it; the standalone
-// output lets test/service-instance.test.mjs assert the REAL naming rules that
-// keep an isolated second daemon from overwriting the shared unit.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/service-instance.ts')],
-  outfile: resolve(dist, 'service-instance.js'),
-});
-
-// Nightly installer profile association parsing/validation. cli.ts inlines it;
-// the standalone output is used by focused fail-closed resolver tests.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/association.ts')],
-  outfile: resolve(dist, 'association.js'),
-});
-
-// Structured daemon-startup progress + bounded wait helpers. index.ts and
-// cli.ts inline these, while the standalone output keeps the deterministic
-// timeout/rendering contract directly unit-testable.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/startup-progress.ts')],
-  outfile: resolve(dist, 'startup-progress.js'),
-});
-
-// Pure contact-list rendering (duplicate-name markers). Standalone for the unit
-// test (test/contact-lines.test.mjs) — same pattern as files.js / inbox.js.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/contacts.ts')],
-  outfile: resolve(dist, 'contacts.js'),
-});
-
-// The two inbox notification pushes. serve.ts inlines this via './mcp/push.js';
-// the standalone output is what lets test/inbox-push.test.mjs drive the REAL
-// shipped function against fake servers — including the rejection path, which
-// cannot be provoked deterministically from a live client.
-await build({
-  ...shared,
-  entryPoints: [resolve(root, 'src/mcp/push.ts')],
-  outfile: resolve(dist, 'push.js'),
-});
-
-// Ship ONLY the compiled MUFL packet (*.muflo) — never the .mu/.mm/.mufl source.
-// The MCP server loads the .muflo at runtime from dist/mufl_code/ by hash.
-const muflSrc = resolve(root, 'mufl_code');
-if (existsSync(muflSrc)) {
-  await mkdir(resolve(dist, 'mufl_code'), { recursive: true });
-  for (const entry of await readdir(muflSrc, { withFileTypes: true })) {
-    if (entry.isFile() && entry.name.endsWith('.muflo')) {
-      await cp(resolve(muflSrc, entry.name), resolve(dist, 'mufl_code', entry.name));
-    }
-  }
+for (const entry of ['cli', 'connector', 'application-identities', 'contacts', 'mcp/push']) {
+  await build({
+    ...shared,
+    entryPoints: [resolve(root, `src/${entry}.ts`)],
+    outfile: resolve(dist, `${entry.split('/').at(-1)}.js`),
+  });
 }

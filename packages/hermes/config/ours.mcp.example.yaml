@@ -12,5 +12,5 @@
 mcp_servers:
   ours:
     command: "ours-mcp"
-    args: ["proxy", "--application", "hermes"]
+    args: ["proxy"]
     enabled: true
