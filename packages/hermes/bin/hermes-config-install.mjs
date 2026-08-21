@@ -25,9 +25,9 @@ export function planConfigInstall(text) {
   const t = text ?? '';
   if (t.includes(SENTINEL)) {
     if (!t.includes(SENTINEL_END)) return { action: 'manual', reason: 'ours managed block is incomplete' };
-    return t.includes('--application') && t.includes('hermes')
+    return t.includes('ours-mcp') && t.includes('proxy') && !t.includes('--application')
       ? { action: 'noop', reason: 'ours block already present' }
-      : { action: 'replace', reason: 'migrate the managed block to its durable daemon association' };
+      : { action: 'replace', reason: 'migrate the managed block to shared-daemon selection' };
   }
   if (!t.trim()) return { action: 'write', reason: 'no existing config' };
   if (/^mcp_servers:/m.test(t)) {
@@ -47,7 +47,7 @@ export function renderConfigBlock() {
 mcp_servers:
   ours:
     command: "ours-mcp"
-    args: ["proxy", "--application", "hermes"]
+    args: ["proxy"]
     enabled: true
 ${SENTINEL_END}
 `;

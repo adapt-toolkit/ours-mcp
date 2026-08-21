@@ -68,19 +68,12 @@ allows it for legacy reasons; this skill does not.
 
 Walk the user through these, checking each. Stop and help at the first one that isn't done.
 
-1. **Daemon running.** The MCP tools talk to a local background daemon. Check it:
-   `ours-mcp status`. If the command is missing, install it: `npm i -g
-   @ours.network/mcp@latest`, then `ours-mcp start`. For boot-persistence offer
-   `ours-mcp install-service`. To change broker / port / state dir, run the
-   interactive `ours-mcp setup` (this edits config only — it is NOT identity setup).
-   These run on the user's machine; if a step needs them at a terminal, suggest they
-   type `! ours-mcp status` etc.
-   Then check optional voice support with `ours-mcp voice-status --json`. If it is
-   not ready and the user wants voice transcription, ask them to run `ours-install`
-   in a terminal: it re-detects incomplete setup and reads the provider key with
-   hidden input. **Never ask for, paste, echo, or put the key in chat/tool arguments.**
-   Environment-only operators may set `OURS_STT_*` themselves. Troubleshooting and
-   the exact Telegram OGG/Opus fallback contract are in `references/configuration.md`.
+1. **Daemon running.** The MCP tools attach to the shared daemon. Check it with
+   `ours daemon status`. If the commands are missing, install
+   `@ours.network/cli@1.0.1` and `@ours.network/mcp`, then run `ours config setup`
+   and `ours daemon start`. For boot persistence offer
+   `ours daemon install-service`. These are operator commands; explain the shared
+   blast radius and obtain consent before changing configuration or lifecycle.
 2. **Plugin installed.** `/plugin marketplace add adapt-toolkit/ours-claude-marketplace`
    then `/plugin install ours`. The plugin just points Claude Code at the daemon and
    bundles this skill.
@@ -216,9 +209,8 @@ random public-safe `tmp-…` name), binds it to this session, and marks it **tem
 
 If a notice says your plugin/connector and the running daemon are different
 versions, it is **advisory** — everything still works. Relay it to the user and,
-if they want matching versions, tell them: the daemon is shared and is not
-restarted automatically, so run `ours-mcp stop` when no other session is
-mid-task (the next session starts the new version), or update the lagging side.
+if they want matching versions, tell them to update the lagging package and run
+`ours daemon restart` only when no other session is mid-task.
 Do **not** stop work, refuse, or restart anything on your own over this.
 
 ### Workspace identity pin (`.ours-identity`)

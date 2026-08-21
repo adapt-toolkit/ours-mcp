@@ -8,7 +8,6 @@ import {
   DEFAULT_PORT, DEFAULT_BROKER, RESERVED_PORTS,
   resolveChannel, pkgTag, pkgSpec, DEFAULT_CHANNEL,
   isNightlyVersion, daemonEndpoint, resolveSharedBroker, tgConfigPath, planTgDaemonConfig,
-  validateDaemonPort, planPorts, resolveDaemonMode, dedicatedDaemonPaths, DEDICATED_INSTANCES,
   coworkConfigPath, planCoworkConfig, COWORK_DEFAULT_PORT, coworkDaemonMode, coworkDaemonBlock,
   coworkSupportsExternalDaemon, compareVersions, COWORK_EXTERNAL_MIN_VERSION,
 } from '../lib/logic.mjs';
@@ -340,87 +339,6 @@ test('RESERVED_PORTS covers every port another component in the stack owns', () 
   assert.ok(RESERVED_PORTS.includes(COWORK_DEFAULT_PORT), 'rooms console port reserved');
   assert.equal(COWORK_DEFAULT_PORT, 3052);
   assert.ok(!RESERVED_PORTS.includes(DEFAULT_PORT), 'the daemon\'s own default is not reserved against it');
-});
-
-test('resolveDaemonMode: anything unrecognized (incl. empty/headless) means the COMMON daemon', () => {
-  assert.equal(resolveDaemonMode('dedicated'), 'dedicated');
-  assert.equal(resolveDaemonMode('own'), 'dedicated');
-  assert.equal(resolveDaemonMode('separate'), 'dedicated');
-  assert.equal(resolveDaemonMode('DEDICATED'), 'dedicated');
-  assert.equal(resolveDaemonMode('common'), 'common');
-  assert.equal(resolveDaemonMode(''), 'common', 'Enter keeps the shared daemon');
-  assert.equal(resolveDaemonMode(undefined), 'common', 'non-interactive keeps the shared daemon');
-  assert.equal(resolveDaemonMode('yes please'), 'common', 'never guesses isolation from junk');
-});
-
-test('dedicatedDaemonPaths: each consumer gets its own config, state dir and service name', () => {
-  const tg = dedicatedDaemonPaths('/home/u', DEDICATED_INSTANCES.telegram);
-  const rooms = dedicatedDaemonPaths('/home/u', DEDICATED_INSTANCES.rooms);
-  assert.equal(tg.stateDir, '/home/u/.ours-tg');
-  assert.equal(tg.configPath, '/home/u/.ours-tg/config.json');
-  assert.equal(tg.serviceName, 'tg');
-  // Isolation is only real if none of the three is shared with another daemon.
-  assert.notEqual(tg.stateDir, rooms.stateDir);
-  assert.notEqual(tg.configPath, rooms.configPath);
-  assert.notEqual(tg.serviceName, rooms.serviceName);
-  assert.notEqual(tg.stateDir, '/home/u/.ours', 'never the shared daemon\'s state dir');
-  // The instance names must satisfy core's service-name rules (alphanumeric, no separators).
-  for (const name of Object.values(DEDICATED_INSTANCES)) {
-    assert.match(name, /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,30}[A-Za-z0-9])?$/, `${name} is a valid unit name`);
-  }
-});
-
-test('validateDaemonPort: rejects junk, reserved, already-claimed and occupied ports', () => {
-  const free = () => false;
-  // A good port passes through unchanged.
-  assert.deepEqual(validateDaemonPort('3060', { isTaken: free }), { ok: true, port: 3060, reason: '' });
-  // Enter (empty input) takes the fallback rather than failing.
-  assert.equal(validateDaemonPort('', { fallback: 3050, isTaken: free }).ok, false, 'empty is not a number');
-  // Out of range / non-numeric.
-  for (const bad of ['0', '65536', 'abc', '-1', '3.5.1']) {
-    const v = validateDaemonPort(bad, { isTaken: free });
-    assert.equal(v.ok, false, `${bad} rejected`);
-    assert.match(v.reason, /port number/);
-  }
-  // Reserved by another component.
-  const reserved = validateDaemonPort('3051', { isTaken: free });
-  assert.equal(reserved.ok, false);
-  assert.match(reserved.reason, /reserved by another part of the stack/);
-  assert.equal(validateDaemonPort(String(COWORK_DEFAULT_PORT), { isTaken: free }).ok, false, 'rooms console port too');
-  // Already claimed EARLIER IN THIS RUN — nothing is listening yet, so only the
-  // in-run ledger can catch this. This is the duplicate-port case.
-  const dup = validateDaemonPort('3060', { isTaken: free, taken: [3060] });
-  assert.equal(dup.ok, false);
-  assert.match(dup.reason, /already being used by another daemon in this install/);
-  // Occupied on the machine.
-  const busy = validateDaemonPort('3070', { isTaken: (p) => p === 3070 });
-  assert.equal(busy.ok, false);
-  assert.match(busy.reason, /already in use on this machine/);
-  // A caller may drop the reserved list (the rooms console legitimately wants 3052).
-  assert.equal(validateDaemonPort('3052', { isTaken: free, reserved: [] }).ok, true);
-});
-
-test('planPorts: the finished topology is refused when two daemons share a port', () => {
-  const ok = planPorts([
-    { label: 'shared', port: 3050 },
-    { label: 'telegram', port: 3060 },
-    { label: 'rooms', port: 3052 },
-  ]);
-  assert.equal(ok.ok, true);
-  assert.deepEqual(ok.duplicates, []);
-
-  const clash = planPorts([
-    { label: 'shared', port: 3050 },
-    { label: 'telegram', port: 3050 },
-  ]);
-  assert.equal(clash.ok, false);
-  assert.equal(clash.duplicates.length, 1);
-  assert.equal(clash.duplicates[0].port, 3050);
-  assert.deepEqual(clash.duplicates[0].labels, ['shared', 'telegram']);
-
-  // Rows that own no port (a skipped component) are simply not part of the plan.
-  assert.equal(planPorts([{ label: 'skipped', port: null }, { label: 'shared', port: 3050 }]).ok, true);
-  assert.equal(planPorts([]).ok, true);
 });
 
 // ── Rooms / ours-cowork ───────────────────────────────────────────────────────

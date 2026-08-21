@@ -133,81 +133,6 @@ export const RESERVED_PORTS = [3051, 3052];
 export const DEFAULT_PORT = 3050;
 export const DEFAULT_BROKER = 'wss://broker1.ours.network';
 
-// ── Daemon topology: one COMMON daemon, plus optional DEDICATED ones ───────────
-// Every consumer defaults to the common daemon on the common port — that is the
-// backward-compatible answer and what Enter / non-interactive mode picks. A
-// consumer may instead be given its OWN daemon, which needs three things to be
-// genuinely isolated and not merely differently-addressed:
-//   · its own PORT              (nothing else may bind it)
-//   · its own STATE DIRECTORY   (the daemon's API token lives there; sharing one
-//                                state dir between two daemons corrupts both)
-//   · its own SERVICE NAME      (ours-mcp's boot unit — without a distinct name,
-//                                `install-service` overwrites the common daemon's
-//                                unit; see packages/core/src/service-instance.ts)
-// The config file is separate too, since ours-mcp resolves port + stateDir from
-// whatever OURS_CONFIG points at.
-export const DAEMON_MODES = ['common', 'dedicated'];
-
-// Fixed instance names, one per consumer that can own a daemon. These are what
-// core validates and turns into `ours-<name>.service`, so they must satisfy its
-// rules (alphanumeric, no separators at the ends).
-export const DEDICATED_INSTANCES = { telegram: 'tg', rooms: 'rooms' };
-
-// Where a dedicated daemon's private config + state live. Derived from the
-// instance name so two consumers can never be handed the same directory.
-export function dedicatedDaemonPaths(home, instance) {
-  const name = String(instance || '').trim();
-  const stateDir = `${home}/.ours-${name}`;
-  return { stateDir, configPath: `${stateDir}/config.json`, serviceName: name };
-}
-
-// Normalize a daemon-mode answer. Anything unrecognized (including empty and
-// non-interactive) is 'common' — the backward-compatible default.
-export function resolveDaemonMode(raw) {
-  const v = String(raw || '').trim().toLowerCase();
-  return v === 'dedicated' || v === 'own' || v === 'separate' ? 'dedicated' : 'common';
-}
-
-// Validate a port the user picked for a daemon, against the reserved list AND
-// every port this install has already committed to. `isTaken(port)` probes a real
-// bind; `taken` is the set of ports already chosen in THIS run, which a live probe
-// cannot see (nothing is listening on them yet). Returns
-// { ok, port, reason } — ok=false means "ask again", never "silently substitute".
-export function validateDaemonPort(input, { fallback = DEFAULT_PORT, isTaken = () => false, taken = [], reserved = RESERVED_PORTS } = {}) {
-  // Stricter than parsePort on purpose: this answer becomes a persisted listen port,
-  // so "3.5.1" must be a question repeated, not silently accepted as port 3.
-  if (!/^\d+$/.test(String(input ?? '').trim())) {
-    return { ok: false, port: fallback, reason: 'that is not a port number between 1 and 65535' };
-  }
-  const parsed = parsePort(input, fallback);
-  if (!parsed.ok) return { ok: false, port: fallback, reason: 'that is not a port number between 1 and 65535' };
-  const port = parsed.port;
-  if (reserved.includes(port)) {
-    return { ok: false, port, reason: `port ${port} is reserved by another part of the stack` };
-  }
-  if (taken.includes(port)) {
-    return { ok: false, port, reason: `port ${port} is already being used by another daemon in this install` };
-  }
-  if (isTaken(port)) {
-    return { ok: false, port, reason: `port ${port} is already in use on this machine` };
-  }
-  return { ok: true, port, reason: '' };
-}
-
-// The whole install's port plan, checked as a set. Returns { ok, duplicates } so
-// the caller can refuse a topology where two daemons would fight over one port
-// even though each looked fine on its own.
-export function planPorts(entries = []) {
-  const seen = new Map();
-  const duplicates = [];
-  for (const { label, port } of entries) {
-    if (!Number.isInteger(port)) continue;
-    if (seen.has(port)) duplicates.push({ port, labels: [seen.get(port), label] });
-    else seen.set(port, label);
-  }
-  return { ok: duplicates.length === 0, duplicates };
-}
-
 // ── Handing the Telegram connector the ONE shared daemon ───────────────────────
 // The connector has its OWN config file and never inherits the daemon's. Two
 // generations of it are in the wild and the installer must satisfy BOTH, because
@@ -246,7 +171,7 @@ export function daemonEndpoint(port) {
 
 // The broker the whole deployment shares, for a <=0.3.2 connector.
 // Precedence: what the user chose in THIS run > what the running daemon actually
-// resolved (`ours-mcp status`, which already accounts for OURS_BROKER_URL) > what
+// resolved (`ours daemon status`, which accounts for the selected config) > what
 // the daemon's config file says > the built-in default (identical to the daemon's
 // DEFAULT_CONFIG.brokerUrl, so "no answer anywhere" still agrees).
 export function resolveSharedBroker({ chosenBroker, statusBroker, configBroker } = {}) {
@@ -592,7 +517,7 @@ export function parseVersion(text) {
   return m ? m[0] : '';
 }
 
-// parseStatus: read the daemon's RESOLVED broker + port out of `ours-mcp status` output, so we
+// parseStatus: read the daemon's RESOLVED broker + port out of `ours daemon status` output, so we
 // prompt with what the daemon is actually using rather than a hardcoded guess. Returns
 // { broker, port } with either field null when the line isn't present (daemon stopped / older
 // build). Lines look like:  "  broker: wss://broker1.ours.network"  and

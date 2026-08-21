@@ -27,8 +27,8 @@ function readJsonObject(path: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-// Hooks read body-free metadata directly, so they must resolve the same durable
-// application association as the proxy. Explicit state/config still wins.
+// Hooks read body-free metadata directly, using the same explicit daemon
+// selection as the SDK-backed proxy.
 function hookStateDir(): string {
   if (process.env.OURS_STATE_DIR) return resolve(process.env.OURS_STATE_DIR);
   const home = homedir();
@@ -36,35 +36,15 @@ function hookStateDir(): string {
     const config = readJsonObject(process.env.OURS_CONFIG);
     return resolve(typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'));
   }
-  if (!process.env.OURS_PORT) {
-    const registryPath = process.env.OURS_INSTALL_PROFILES ?? join(home, '.ours', 'installer-profiles.json');
-    if (fs.existsSync(registryPath)) {
-      const registry = readJsonObject(registryPath);
-      if (registry.version !== 1) throw new Error('unsupported installer profile registry version');
-      const associations = registry.harnessAssociations as Record<string, unknown> | undefined;
-      const profiles = registry.profiles as Record<string, unknown> | undefined;
-      const profileId = associations?.['claude-code'];
-      if (profileId !== undefined) {
-        if (typeof profileId !== 'string' || !profiles?.[profileId]) throw new Error('claude-code association names a missing profile');
-        const profile = profiles[profileId] as Record<string, unknown>;
-        if (profile.host !== '127.0.0.1' && profile.host !== 'localhost') throw new Error('claude-code association is not loopback');
-        if (typeof profile.configPath !== 'string' || typeof profile.stateDir !== 'string') throw new Error('claude-code association paths are invalid');
-        const config = readJsonObject(profile.configPath);
-        const configuredPort = Number(config.port ?? 3050);
-        const configuredState = resolve(typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'));
-        if (configuredPort !== Number(profile.port) || configuredState !== resolve(profile.stateDir)) {
-          throw new Error('claude-code association drifted from its selected config');
-        }
-        return resolve(profile.stateDir);
-      }
-    }
+  if (process.env.OURS_PORT || process.env.OURS_API_TOKEN) {
+    throw new Error('explicit port/token requires OURS_STATE_DIR or OURS_CONFIG');
   }
   return resolve(home, '.ours');
 }
 
 const STATE_DIR: string | null = (() => {
   try { return hookStateDir(); }
-  catch { return null; } // corrupt/drifted association: fail closed with a benign hook no-op
+  catch { return null; } // corrupt explicit selection: fail closed with a benign hook no-op
 })();
 
 // A workspace can pin itself to an identity by dropping this file at the repo
@@ -123,10 +103,14 @@ function collectUnread(): Unread[] {
   if (!STATE_DIR) return [];
   let names: string[];
   try {
-    names = fs
-      .readdirSync(STATE_DIR, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name);
+    const appPath = process.env.OURS_MCP_CONFIG || join(homedir(), '.ours-mcp', 'config.json');
+    const config = readJsonObject(appPath);
+    if (config.version !== 1) throw new Error('unsupported ours-mcp application identity config version');
+    const daemons = config.daemons as Record<string, unknown> | undefined;
+    const selected = daemons?.[resolve(STATE_DIR)] as { identities?: unknown } | undefined;
+    names = Array.isArray(selected?.identities)
+      ? selected.identities.filter((name): name is string => typeof name === 'string' && name.length > 0)
+      : [];
   } catch {
     return [];
   }

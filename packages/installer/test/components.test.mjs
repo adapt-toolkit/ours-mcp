@@ -24,8 +24,8 @@ test('defaults: MCP server yes, connector no, cowork no', () => {
 
 test('declining an already-installed component never uninstalls it', () => {
   // "No" means "do not add", never "take it away". Removal is ours-uninstall.
-  // The MCP server is excluded now: it is the daemon, so it has no "no" — that is
-  // covered by its own test rather than weakened here.
+  // The MCP adapter is required wiring, so it has no "no"; only optional
+  // connectors are part of this selection.
   const chosen = planComponentSelection({ answers: { tg: false, cowork: false }, installed: { tg: true, cowork: true } });
   assert.equal(chosen.find((c) => c.key === 'tg').action, 'leave-alone');
   assert.equal(chosen.find((c) => c.key === 'cowork').action, 'leave-alone');
@@ -292,11 +292,9 @@ test('an already-complete cowork config is still not rewritten', () => {
 
 // --------------------------------- the MCP server is not optional any more ---
 
-test('the MCP server cannot be declined, because it IS the daemon', () => {
-  // The daemon phase installs and starts @ours.network/mcp: it is the only
-  // MCP-capable daemon in the stack. An operator who declined it would have no
-  // daemon at all, which is not a decision anyone means to make — so declining is
-  // impossible rather than merely discouraged.
+test('the required MCP adapter cannot be declined', () => {
+  // The daemon phase installs @ours.network/mcp as required harness wiring.
+  // Optional connector selection must not be able to remove that adapter.
   for (const answers of [{ mcp: false }, {}, { mcp: true }]) {
     const chosen = planComponentSelection({ answers });
     assert.equal(chosen.find((c) => c.key === 'mcp').action, 'install', `answers=${JSON.stringify(answers)}`);

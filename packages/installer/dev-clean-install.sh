@@ -32,7 +32,6 @@ cd "$SRC"
 
 say "installing workspace deps + building @ours.network/mcp from ${REF}…"
 npm ci
-bash scripts/compile-mufl.sh
 npm run build --workspace @ours.network/mcp
 TGZ="$(npm pack --workspace @ours.network/mcp --pack-destination /tmp | tail -1)"
 say "built /tmp/${TGZ}"

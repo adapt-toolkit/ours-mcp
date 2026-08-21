@@ -9,7 +9,7 @@ import {
 test('exposes background and foreground monitor tools', () => {
   assert.deepEqual(monitorToolNames, ['arm_monitor', 'foreground_monitor', 'disarm_monitor', 'monitor_status']);
   const watch = foregroundWatchProcess('Alice');
-  assert.deepEqual(watch.args.slice(-4), ['watch', '--application', 'codex', 'Alice']);
+  assert.deepEqual(watch.args.slice(-2), ['watch', 'Alice']);
 });
 
 test('standard mode is informative and live mode uses private control channel', async () => {

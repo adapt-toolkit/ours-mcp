@@ -139,10 +139,7 @@ export async function runUninstall(argv, effects) {
     readJson: effects.readJson,
     readText: effects.readText,
     exists: effects.exists,
-    // EITHER record proves a managed daemon: ours-cli-daemon.json is what
-    // `ours daemon start` wrote yesterday, daemon.pid is what `ours-mcp start`
-    // writes today. Reading only one makes an uninstall on the other kind decline
-    // to stop a daemon it could have stopped.
+    // Accept the current CLI record and the legacy ours-mcp pid file during migration.
     cliStartedIt: effects.readJson(join(dir, 'ours-cli-daemon.json')) !== null
       || effects.readText(join(dir, 'daemon.pid')) !== null,
     otherStateDirsWithConfig: effects.knownStateDirs(),

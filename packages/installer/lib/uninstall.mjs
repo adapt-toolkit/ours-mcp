@@ -171,24 +171,16 @@ export function planComponentDetach(key, existing) {
 export function planDaemonRemoval({ stateDir, cliStartedIt }) {
   const dir = resolve(stateDir);
   const unit = unitNameForStateDir(dir);
-  // ours-mcp's own uninstall-service, for the same reason install-service is:
-  // the unit that exists was written by ours-mcp, and `ours daemon
-  // uninstall-service` refuses a unit it did not mark. It takes no flags and is
-  // selected by the environment, like every other ours-mcp lifecycle command.
-  //
-  // The macOS skip that briefly lived here is gone with the daemon change:
-  // ours-mcp's uninstall-service handles launchd as well as systemd, so there is
-  // no platform on which this declines to try.
   const service = {
     id: 'service',
     unit: unit.ok ? unit.unit : null,
-    command: ['ours-mcp', 'uninstall-service'],
-    note: 'removes the unit ours-mcp installed',
+    command: ['ours', 'daemon', 'uninstall-service', '--yes', '--state-dir', dir, '--config', join(dir, 'config.json')],
+    note: 'removes the unit managed by the ours CLI',
   };
   return [
     service,
     cliStartedIt
-      ? { id: 'stop', command: ['ours-mcp', 'stop'] }
+      ? { id: 'stop', command: ['ours', 'daemon', 'stop', '--state-dir', dir, '--config', join(dir, 'config.json')] }
       : { id: 'stop-external', command: null, continues: true, note: 'this daemon was not started by the CLI; naming its launcher and continuing' },
   ];
 }

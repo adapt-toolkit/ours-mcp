@@ -30,11 +30,6 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   errFileUnreadable,
-  deferMessages,
-  getMessages,
-  listIncomingMessages,
-  sendFile,
-  sendMessage,
 } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 

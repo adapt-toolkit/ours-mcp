@@ -19,18 +19,14 @@
 // deletion of the capability — pairing a messenger to a machine has no route
 // after this, and re-adding it needs an authorization rule that does not exist.
 //
-// ----- WHY `ctx` IS PASSED AS A THUNK -------------------------------------
-// `startDaemon` hands us a `SessionContext` whose three members are GETTERS
-// (`sdk src/http/server.ts:558-562`): the transport has no session id until the
-// initialize response lands, and the request headers change on every call. The
-// registrars therefore take `() => SessionContext` and call it fresh inside each
-// handler. Nothing may hoist `ctx.leaseToken()` into a local — an operation that
-// rebinds mid-call (choose_identity, create_identity) must observe the lease
-// table as it is NOW.
+// The connector owns one SDK client for one MCP session. Registrars receive a
+// thunk so binding-changing operations and later tool calls always use that same
+// live client rather than capturing daemon-side state locally.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import type { OursClient } from '@ours.network/sdk';
 
+import type { ApplicationIdentityStore } from '../application-identities.js';
 import { registerInboxResource } from './resources/inbox.js';
 import { registerContactsTools } from './tools/contacts.js';
 import { registerFilesTools } from './tools/files.js';
@@ -39,10 +35,14 @@ import { registerMessagingTools } from './tools/messaging.js';
 import { registerProfileTools } from './tools/profile.js';
 
 /**
- * Build the per-session MCP server. Handed to `startDaemon` as
- * `mcp.createServer`, and called once per MCP session.
+ * Build one per-session MCP server around the already-attached shared-daemon
+ * client.
  */
-export function createOursMcpServer(client: OursClient, version: string): McpServer {
+export function createOursMcpServer(
+  client: OursClient,
+  version: string,
+  applicationIdentities: ApplicationIdentityStore,
+): McpServer {
   const server = new McpServer(
     { name: 'ours', version },
     { capabilities: { logging: {}, resources: {} } },
@@ -50,7 +50,7 @@ export function createOursMcpServer(client: OursClient, version: string): McpSer
 
   const clientFor = () => client;
 
-  registerIdentityTools(server, clientFor);
+  registerIdentityTools(server, clientFor, applicationIdentities);
   registerContactsTools(server, clientFor);
   registerProfileTools(server, clientFor);
   registerMessagingTools(server, clientFor);

@@ -8,7 +8,11 @@
 // which is the one thing about this move that can go wrong silently.
 import { accessSync, constants as fsConstants } from 'node:fs';
 
-import type { IncomingFileMeta, InboxMsg, ReceivedFileMeta } from '@ours.network/sdk';
+import type { OursClient } from '@ours.network/sdk';
+
+type IncomingFileMeta = Awaited<ReturnType<OursClient['listIncomingFiles']>>[number];
+type InboxMsg = Awaited<ReturnType<OursClient['listIncomingMessages']>>[number];
+type ReceivedFileMeta = Awaited<ReturnType<OursClient['getFiles']>>['files'][number];
 
 // access(2) resolves against the REAL uid/gid and needs +x on every parent, so a
 // daemon-owned 0700 state dir correctly reports unreadable here. No setuid in
