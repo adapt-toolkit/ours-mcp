@@ -1,4 +1,4 @@
-// The ours MCP server: 32 tools and one resource, all of them adapters over
+// The ours MCP server: agent-facing adapters over
 // `@ours.network/sdk`.
 //
 // ============================================================================
@@ -27,9 +27,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { OursClient } from '@ours.network/sdk';
 
 import type { ApplicationIdentityStore } from '../application-identities.js';
-import { registerInboxResource } from './resources/inbox.js';
 import { registerContactsTools } from './tools/contacts.js';
 import { registerFilesTools } from './tools/files.js';
+import { registerHistoryTools } from './tools/history.js';
 import { registerIdentityTools } from './tools/identity.js';
 import { registerMessagingTools } from './tools/messaging.js';
 import { registerProfileTools } from './tools/profile.js';
@@ -45,7 +45,7 @@ export function createOursMcpServer(
 ): McpServer {
   const server = new McpServer(
     { name: 'ours', version },
-    { capabilities: { logging: {}, resources: {} } },
+    { capabilities: { logging: {} } },
   );
 
   const clientFor = () => client;
@@ -55,14 +55,7 @@ export function createOursMcpServer(
   registerProfileTools(server, clientFor);
   registerMessagingTools(server, clientFor);
   registerFilesTools(server, clientFor);
-
-  // The one registration that is not a tool: `ours://inbox` (was
-  // index.ts:4094-4107). Both developers flagged it as belonging to no
-  // registrar, correctly — it is a RESOURCE, and its body did engine work
-  // directly. Left behind when index.ts was gutted it would have gone on reading
-  // the OLD engine, a live seam in the one place that is not a tool. It is a
-  // seventh registrar for exactly the same reason as the other six.
-  registerInboxResource(server, clientFor);
+  registerHistoryTools(server, clientFor);
 
   return server;
 }

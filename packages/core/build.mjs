@@ -24,7 +24,7 @@ const shared = {
   logLevel: 'info',
 };
 
-for (const entry of ['cli', 'connector', 'application-identities', 'contacts', 'mcp/push']) {
+for (const entry of ['cli', 'connector', 'application-identities', 'contacts', 'mcp/push', 'mcp/server']) {
   await build({
     ...shared,
     entryPoints: [resolve(root, `src/${entry}.ts`)],

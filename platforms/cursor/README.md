@@ -10,6 +10,7 @@ MCP server via an `mcp.json` snippet (`{ "command": "npx", "args": ["-y",
 and ship the ours usage guidance as `.cursor/rules`. Both the deeplink and the
 rules are generated from the single canonical skill doc.
 
-The file tools (`send_file`, `list_incoming_files`, `get_files`) need no extra
+The file tools (`send_file`, `list_incoming_files`, `get_files`, `list_files`,
+`get_file_info`, `save_file`) need no extra
 registration — they ride the same proxy→daemon seam as every other tool, so they
 appear automatically once the server above is registered.

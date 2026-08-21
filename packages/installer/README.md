@@ -35,6 +35,11 @@ The operator CLI owns daemon configuration, lifecycle, and boot persistence.
 The MCP package is only the stdio adapter spawned by agent harnesses; the
 installer never asks `ours-mcp` to start a daemon.
 
+The external-history storage epoch is a clean breaking reset. The daemon refuses
+old packet state without modifying it, and this installer never migrates, purges,
+or silently replaces identities, contacts, invites, pending payloads, or history.
+Back up any wanted old state and remove it explicitly before starting the new epoch.
+
 ## What remains stopped
 
 Telegram and Fleet are installed but intentionally not started. Review and

@@ -9,7 +9,7 @@
 // identity's on-disk unread.json snapshot DIRECTLY (no MCP / network call), so a
 // resuming agent notices mail that arrived while it was away. The snapshot is
 // content-free (sender + id + date, no body) and is re-derived by the daemon from
-// the packet — the authority on read/processed state — so the backlog clears
+// the identity history database — the authority on unread/read state — so the backlog clears
 // itself once the agent calls get_messages.
 //
 // Hooks must stay fast and must never block the session: any error is swallowed
@@ -73,7 +73,7 @@ type NotifyMeta = { from: string; msg_id: number | string; date: string };
 type Unread = { name: string; count: number; recent: NotifyMeta[] };
 
 // The daemon writes a content-free unread snapshot per identity (unread.json),
-// re-derived from the packet (the authority for read/processed state) after each
+// re-derived from the identity history database (the authority for unread/read state) after each
 // change. We just read it — no message bodies ever touch this hook.
 function readUnreadSnapshot(dir: string): Unread | null {
   let raw: string;
@@ -136,7 +136,7 @@ function renderContext(unread: Unread[]): string {
   return (
     `ours — ${total} unread message(s) across ${unread.length} ` +
     `identit${unread.length === 1 ? 'y' : 'ies'} (arrived while you were away; ` +
-    `senders shown, bodies stay in the packet):\n` +
+    `senders shown, bodies stay in owner-private history storage):\n` +
     `${lines.join('\n')}\n\n` +
     `This is informational — surface it to the user; do not bind an identity, read ` +
     `mail, or arm a monitor on your own. If the user wants the messages: ` +

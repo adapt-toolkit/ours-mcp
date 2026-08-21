@@ -5,8 +5,7 @@ import type { OursClient } from '@ours.network/sdk';
 
 import { ApplicationIdentityStore } from './application-identities.js';
 import { createOursMcpServer } from './mcp/server.js';
-import { pushInboxNotifications } from './mcp/push.js';
-import { inboxResourceUri } from './mcp/resources/inbox.js';
+import { pushArrivalNotification } from './mcp/push.js';
 import { getBoundIdentity, rememberBinding } from './mcp/tool.js';
 
 export interface ConnectorOptions {
@@ -38,7 +37,7 @@ function rejectObsoleteDaemonEnvironment(env: NodeJS.ProcessEnv): void {
   );
 }
 
-export class InboxWatcher {
+export class ArrivalWatcher {
   private stopped = false;
   private bound: string | null = null;
   private readonly abort = new AbortController();
@@ -76,7 +75,7 @@ export class InboxWatcher {
           const summary = value.event === 'file_received'
             ? `new file ${value.filename ?? '?'} from ${value.from ?? '?'}`
             : `new message from ${value.from ?? '?'}`;
-          pushInboxNotifications(this.server, inboxResourceUri(name), summary, (what, error) =>
+          pushArrivalNotification(this.server, summary, (what, error) =>
             log(`[${name}] ${what} failed: ${String(error)}`));
           if (getBoundIdentity() !== name) {
             this.bound = null;
@@ -145,7 +144,7 @@ export async function runConnector(options: ConnectorOptions): Promise<void> {
   if (seed) await seedBinding(client, identities, seed);
 
   const server = createOursMcpServer(client, options.version, identities);
-  const watcher = new InboxWatcher(client, server);
+  const watcher = new ArrivalWatcher(client, server);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   log(`MCP server v${options.version} ready (transport=stdio, daemon=${endpoint})`);

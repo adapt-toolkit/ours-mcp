@@ -3,7 +3,7 @@
 The agent-facing MCP adapter for the shared ours daemon.
 
 `ours-mcp` does not contain, start, configure, or install a daemon. Install
-`@ours.network/cli@1.0.1`, configure it with `ours config setup`, and start the
+`@ours.network/cli@2.0.1`, configure it with `ours config setup`, and start the
 single shared service with `ours daemon start` (or `ours daemon install-service`).
 
 ## MCP configuration
@@ -19,7 +19,7 @@ single shared service with `ours daemon start` (or `ours daemon install-service`
 }
 ```
 
-`proxy` attaches through `@ours.network/sdk@2.0.1`. It uses the SDK's coherent
+`proxy` attaches through `@ours.network/sdk@3.0.1`. It uses the SDK's coherent
 daemon selection (`OURS_CONFIG`, or matching `OURS_PORT` and `OURS_STATE_DIR`)
 and verifies `/state-dir` before credentials are sent. An unavailable daemon is
 reported with install/start guidance; it is never started inside the MCP process.
@@ -63,6 +63,25 @@ command falls back to an embedded daemon.
 `ours-mcp watch [identity]` streams inbound JSON Lines. With no identity argument,
 only live identities in the selected daemon's ours-mcp application list are
 watched.
+
+## Message and file history
+
+The daemon stores application payloads outside the protocol packet: message bodies
+in an owner-private per-identity SQLite database and file bytes in immutable
+content-addressed blobs. `get_messages` and `get_files` consume bounded unread
+batches and mark them read. `list_history` / `get_history_item` and `list_files` /
+`get_file_info` provide persistent read-only history with authenticated-peer,
+direction, and cursor filters. `save_file` streams a stored blob to a caller-owned
+path without placing bytes in MCP content.
+
+This storage epoch is a breaking reset with no migration or fallback. A daemon
+that finds old packet state refuses startup without changing it. Operators may
+back it up and must remove it themselves before starting clean; installers never
+delete identity state implicitly.
+
+The external-history integration requires the published `@ours.network/sdk@3.0.1`
+and `@ours.network/cli@2.0.1` artifacts. Both are pinned exactly so registry-only
+installs use the validated contract; there is no compatibility fallback.
 
 ## Development
 

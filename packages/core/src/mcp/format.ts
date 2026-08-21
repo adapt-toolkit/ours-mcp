@@ -11,7 +11,6 @@ import { accessSync, constants as fsConstants } from 'node:fs';
 import type { OursClient } from '@ours.network/sdk';
 
 type IncomingFileMeta = Awaited<ReturnType<OursClient['listIncomingFiles']>>[number];
-type InboxMsg = Awaited<ReturnType<OursClient['listIncomingMessages']>>[number];
 type ReceivedFileMeta = Awaited<ReturnType<OursClient['getFiles']>>['files'][number];
 
 // access(2) resolves against the REAL uid/gid and needs +x on every parent, so a
@@ -31,18 +30,7 @@ export const canRead = (p: string): boolean => {
   try { accessSync(p, fsConstants.R_OK); return true; } catch { return false; }
 };
 
-// ----- the two list renderers, moved here VERBATIM ---------------------------
-//
-// `renderFiles` is index.ts:3292 and `fmtMsg` is index.ts:3544, unchanged. They
-// moved because the converted handlers live in src/mcp/tools/ and cannot import
-// from index.ts, which is being emptied — and because rendering is what this file
-// is for. The types are now the SDK's `IncomingFileMeta` / `InboxMsg`, which are
-// the same shapes index.ts declared locally.
-//
-// ⚠ index.ts STILL HAS ITS OWN COPY of both, because the `ours://inbox` RESOURCE
-// (index.ts:4095-4107) uses fmtMsg and is not a tool, so it belongs to no
-// registrar. Those copies are duplicates from now on: whoever moves that resource
-// must delete them and import from here, or the two will drift.
+// ----- unread file rendering -------------------------------------------------
 
 function renderFiles(files: IncomingFileMeta[]): string {
   if (files.length === 0) return 'No files received.';
@@ -57,18 +45,7 @@ function renderFiles(files: IncomingFileMeta[]): string {
   return `${lines.length} file(s):\n${lines.join('\n')}`;
 }
 
-// One-line message rendering: id + sender + body + date, with status when not
-// the default "unread" (so list views show what's already been read).
-function fmtMsg(m: InboxMsg, withStatus = true): string {
-  const status = withStatus && m.status && m.status !== 'unread' ? ` [${m.status}]` : '';
-  const wire = m.wire_id ? ` {${m.wire_id}}` : '';
-  const reply = m.reply_to
-    ? ` ↳re ${m.reply_to.wire_id}${m.reply_to.sentence ? `·s${m.reply_to.sentence}` : ''}`
-    : '';
-  return `#${m.msg_id} [${m.sender_name}]${status}${wire}${reply} ${m.text}  (${m.date})`;
-}
-
-export { fmtMsg, renderFiles };
+export { renderFiles };
 
 const describeFile = (f: ReceivedFileMeta): string =>
   `  • ${f.filename} — ${f.mime || 'application/octet-stream'}, ${f.size} B, ` +
@@ -112,7 +89,7 @@ export function annotateGetFilesResult(result: unknown, readable: (p: string) =>
 
   const lines: string[] = [
     `${blocked.length} of ${files.length} received file(s) are NOT readable by your OS user: the ours ` +
-      `daemon runs as a different OS user and keeps its files dir private. Nothing was lost — the bytes ` +
+      `daemon runs as a different OS user and keeps its immutable blob store private. Nothing was lost — the bytes ` +
       `are safely on disk. IGNORE the on-disk paths reported below for these files; you cannot open them.`,
     '',
     `TELL THE USER what arrived (details below) and ASK WHERE TO SAVE each file on this filesystem. ` +
