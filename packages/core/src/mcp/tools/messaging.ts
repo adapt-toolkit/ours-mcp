@@ -1,6 +1,6 @@
-// The five MESSAGING tools, converted onto `@ours.network/sdk`.
+// The message-send, file-send and unread-message tools over `@ours.network/sdk`.
 //
-//   send_message  send_file  list_incoming_messages  get_messages  defer_messages
+//   send_message  send_file  get_messages
 //
 // Each handler does the three things src/mcp/tool.ts allows and nothing else:
 // take its zod arguments, call ONE SDK operation with the session context, render
@@ -33,8 +33,18 @@ import {
 } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 
-import { fmtMsg } from '../format.js';
-import { runTool, textResult } from '../tool.js';
+import { runTool, type McpTextResult } from '../tool.js';
+
+function sendResult<T extends object>(text: string, outcome: T, isError = false): McpTextResult {
+  const historyWarning = 'history_stored' in outcome && outcome.history_stored === false
+    ? '\n\nWARNING: the item was not stored in this identity\'s local history. Delivery and local history are not transactional; there is no fallback or automatic retry.'
+    : '';
+  return {
+    content: [{ type: 'text', text: `${text}${historyWarning}` }],
+    structuredContent: { outcome },
+    isError,
+  };
+}
 
 export function registerMessagingTools(server: McpServer, clientFor: () => OursClient): void {
   server.tool(
@@ -45,7 +55,7 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
       'delegation cert, and an identity published in the host-local contact book connects ' +
       'via a registrar introduction — either way the message is delivered with the ' +
       'introduction, no invite needed. To reply to a specific message, pass ' +
-      'reply_to_wire_id (the wire_id from get_messages) and optionally ' +
+      'reply_to_wire_id (from get_messages or list_history) and optionally ' +
       'reply_to_sentence (1-based index of the sentence you are answering). ' +
       'Requires a bound identity.',
     {
@@ -54,7 +64,7 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
       reply_to_wire_id: z
         .string()
         .optional()
-        .describe('wire_id (from get_messages) of the message this replies to.'),
+        .describe('wire_id (from get_messages or list_history) of the message this replies to.'),
       reply_to_sentence: z
         .number()
         .int()
@@ -69,37 +79,38 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
         (v) => {
           switch (v.kind) {
             case 'refused':
-              return textResult(
+              return sendResult(
                 `Couldn't send to "${contact}" (wire_id ${v.wireId}): their end-to-end encryption must be ` +
                 `re-established after an upgrade before messages can go through. It was NOT sent and NOT ` +
                 `downgraded to the old channel — the system re-offers the upgrade automatically; try again shortly.`,
+                v,
                 true);
             case 'migrating':
-              return textResult(
+              return sendResult(
                 `Message queued for "${contact}" (wire_id ${v.wireId}) — an encryption upgrade is completing; ` +
                 `it will send automatically the moment the migration goes active ` +
-                `(${v.queued} message${v.queued === 1 ? '' : 's'} queued).`);
+                `(${v.queued} message${v.queued === 1 ? '' : 's'} queued).`, v);
             case 'e2e':
               if (v.notRetained) {
-                return textResult(
+                return sendResult(
                   `Message sent to "${contact}" over the end-to-end session (wire_id ${v.wireId}) — ` +
                   'WARNING: the message body exceeds the redrive budget, so it is NOT retained for automatic ' +
                   'resend. If the recipient loses its session, this message will NOT re-deliver automatically — ' +
-                  'confirm receipt or resend once the contact is confirmed back.',
+                  'confirm receipt or resend once the contact is confirmed back.', v,
                 );
               }
-              return textResult(`Message sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`);
+              return sendResult(`Message sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`, v);
             case 'deferred':
-              return textResult(
+              return sendResult(
                 `Message queued for "${contact}" (wire_id ${v.wireId}) — the contact's encryption keys are being ` +
                 `re-established after an upgrade (contact restore in progress); delivery is automatic once ` +
-                `restored (${v.queued} message${v.queued === 1 ? '' : 's'} queued).`);
+                `restored (${v.queued} message${v.queued === 1 ? '' : 's'} queued).`, v);
             // The contact-miss fallback. `text` is finished prose from the SDK —
             // the baseline's `return textResult(sent)` at index.ts:4625.
             case 'introduced':
-              return textResult(v.text);
+              return sendResult(v.text, v);
             default:
-              return textResult(`Message sent to "${contact}" (wire_id ${v.wireId}).`);
+              return sendResult(`Message sent to "${contact}" (wire_id ${v.wireId}).`, v);
           }
         },
       ),
@@ -117,7 +128,7 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
       data_base64: z.string().min(1).optional().describe('Inline file bytes, base64-encoded (alternative to path).'),
       filename: z.string().min(1).optional().describe('Filename to advertise (required with data_base64; defaults to basename of path).'),
       mime: z.string().optional().describe('MIME type (inferred from the path extension when omitted).'),
-      reply_to_wire_id: z.string().optional().describe('wire_id (from get_messages/get_files) this file replies to.'),
+      reply_to_wire_id: z.string().optional().describe('wire_id (from unread or persistent-history tools) this file replies to.'),
       reply_to_sentence: z.number().int().positive().optional().describe('Optional 1-based sentence index in the replied-to item.'),
     },
     // ⚠ `path` IS READ HERE, NOT BY THE DAEMON, AND THAT IS THE WHOLE POINT.
@@ -166,26 +177,26 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
           const desc = `File "${v.filename}" (${v.bytes} B${v.mime ? `, ${v.mime}` : ''})`;
           switch (v.kind) {
             case 'refused':
-              return textResult(
+              return sendResult(
                 `Couldn't send ${desc} to "${contact}" (wire_id ${v.wireId}): their end-to-end encryption must be ` +
                 `re-established after an upgrade first. It was NOT sent and NOT downgraded; the system re-offers ` +
-                `the upgrade automatically — try again shortly.`,
+                `the upgrade automatically — try again shortly.`, v,
                 true);
             case 'migrating':
-              return textResult(
+              return sendResult(
                 `${desc} not sent to "${contact}" yet — an encryption upgrade is completing; retry the file once ` +
-                `the migration goes active (files aren't auto-queued like messages).`,
+                `the migration goes active (files aren't auto-queued like messages).`, v,
                 true);
             case 'e2e':
               if (v.notRetained) {
-                return textResult(
+                return sendResult(
                   `${desc} sent to "${contact}" over the end-to-end session (wire_id ${v.wireId}) — ` +
                   'WARNING: the file exceeds the 2 MiB redrive budget, so it is NOT retained for automatic ' +
                   'resend. If the recipient loses its session (e.g. it was mid-restart), this file will NOT ' +
-                  're-deliver automatically — confirm receipt or resend it once the contact is confirmed back.',
+                  're-deliver automatically — confirm receipt or resend it once the contact is confirmed back.', v,
                 );
               }
-              return textResult(`${desc} sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`);
+              return sendResult(`${desc} sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`, v);
             // UNREACHABLE for send_file, and present only because FileSendOutcome
             // is SendOutcome & {…} so it inherits the union member. sendFile has NO
             // contact-miss fallback — the baseline has no `/Unknown contact/` branch
@@ -194,72 +205,34 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
             // prose is the only honest thing to do if that ever changes; inventing a
             // sentence here would not be.
             case 'introduced':
-              return textResult(v.text);
+              return sendResult(v.text, v);
             default:
-              return textResult(`${desc} sent to "${contact}" (wire_id ${v.wireId}).`);
+              return sendResult(`${desc} sent to "${contact}" (wire_id ${v.wireId}).`, v);
           }
         },
       ),
   );
 
   server.tool(
-    'list_incoming_messages',
-    "List ALL messages in the bound identity's inbox (decrypted), each with its id " +
-      'and status (unread/read). A read-only history view — it does not change any ' +
-      "status. To consume new mail use get_messages instead.",
-    {},
-    async () =>
-      runTool(
-        clientFor(),
-        (c) => c.listIncomingMessages(),
-        (inbox) => {
-          if (inbox.length === 0) return textResult('Inbox is empty.');
-          const unread = inbox.filter((m) => m.status === 'unread').length;
-          return textResult(
-            `Inbox (${inbox.length}, ${unread} unread):\n${inbox.map((m) => fmtMsg(m)).join('\n')}`,
-          );
-        },
-      ),
-  );
-
-  server.tool(
     'get_messages',
-    'Fetch the messages the bound identity has not seen yet (status "unread") and ' +
-      'mark them "processed". This is the ONLY call that returns message bodies, and ' +
-      'each message is delivered exactly once, so reading and acting on it immediately ' +
-      'never double-processes — no acknowledgement call is needed. If you read a message ' +
-      'but crash or want to hand it to another session before acting, call defer_messages ' +
-      'to put it back to "unread"; otherwise handled messages are garbage-collected ' +
-      'automatically. Returns ALWAYS-JSON: { count, messages: [{ msg_id, wire_id, ' +
-      'from:{id,name}, encryption ("legacy" for a legacy box | "e2e" for the ' +
-      'double-ratchet path), transport, text, date, status, reply_to }] } — so you can ' +
-      'tell HOW each message arrived (ask the agent "how did you receive this"). Pass a ' +
-      "message's wire_id as reply_to_wire_id in send_message to reply to it specifically.",
-    {},
-    async () =>
+    'Fetch the oldest unread messages for the bound identity and atomically mark that ' +
+      'bounded batch read. Defaults to 50 and returns at most 200, plus the remaining unread ' +
+      'count. Bodies remain available through persistent list_history/get_history_item. ' +
+      'Read receipts are best-effort after the local read commit; there is no defer, outbox, ' +
+      'fallback, or automatic retry.',
+    { limit: z.number().int().min(1).max(200).optional().describe('Batch size from 1 to 200 (default 50).') },
+    async ({ limit }) =>
       runTool(
         clientFor(),
-        (c) => c.getMessages(),
-        // The payload crosses the boundary as an OBJECT and is stringified HERE —
-        // index.ts:4848's line, kept in ours-mcp (ours-sdk api/types.ts:320-327).
-        (payload) => textResult(JSON.stringify(payload, null, 2)),
-      ),
-  );
-
-  server.tool(
-    'defer_messages',
-    'Put handled messages back into the queue (status "unread") so another ' +
-      "session's get_messages picks them up. Works on messages you have read " +
-      '(status "processed") and even ones already queued for GC ("ready_to_delete"), ' +
-      'so a message stays recoverable across a full GC cycle.',
-    { msg_ids: z.array(z.number().int()).min(1).describe('Message ids (from get_messages) to defer back to unread.') },
-    async ({ msg_ids }) =>
-      runTool(
-        clientFor(),
-        (c) => c.deferMessages({ msg_ids }),
-        // `deferred` is the packet's own Visualize() string, interpolated unparsed
-        // by the baseline (index.ts:4871) — not coerced to a number here either.
-        (r) => textResult(`Deferred ${r.deferred} message(s) back to unread.`),
+        (c) => c.getMessages({ limit }),
+        (payload) => {
+          const result = { count: payload.messages.length, messages: payload.messages, remaining: payload.remaining };
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+            isError: false,
+          };
+        },
       ),
   );
 }

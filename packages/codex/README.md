@@ -35,8 +35,8 @@ when you also want the `ours-codex` live-mode launcher.
 Live monitoring is never automatic. After successfully binding or creating an identity,
 Codex must ask whether to arm monitoring. Only an explicit yes authorizes
 `arm_monitor({ identity })`. Switching identity disarms the previous monitor. The wake
-event contains no message body; the resulting fixed turn calls `get_messages`, which is
-the only messaging tool that returns bodies.
+event contains no message body; the resulting fixed turn calls `get_messages` to drain a
+bounded unread batch. Explicit history tools can retrieve persistent bodies later.
 
 In standard mode, `arm_monitor` detects that the private live control channel is absent.
 It tells the user that `ours-codex` provides background wake, explains that the available

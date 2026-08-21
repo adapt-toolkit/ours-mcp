@@ -294,21 +294,23 @@ automatically (cert- or registrar-verified introduction + key exchange) and the 
 delivered with it — no invite ceremony.
 
 ### Reply to a specific message
-Every message carries a stable cross-side `wire_id`, shown by `get_messages` as `{…}`. To
+Every message carries a stable cross-side `wire_id`, shown by `get_messages` and
+`list_history`. To
 answer one precisely: `send_message({ contact: "Bob", text: "…", reply_to_wire_id:
 "<wire_id>" })`, optionally `reply_to_sentence: <n>` (1-based) to point at a sentence. The
 recipient sees `↳re <wire_id>·s<n>`. It's a lightweight reference, not a thread object.
 
 ### Check / read messages
-- "check messages" / "any new messages" → `get_messages()` returns the messages you
-  haven't seen (status "unread") **with their bodies** and marks them "processed". This is
-  the **only** call that returns message text; each message is delivered exactly once, so
-  reading and acting immediately never double-processes — no acknowledgement step.
-- Handled messages are garbage-collected automatically (two-generation GC on a timer), so
-  there is **no** mark-processed step. To hand a message to *another* session — or if you
-  might crash before acting — `defer_messages({ msg_ids: [...] })` flips it back to "unread"
-  (works even after it is queued for deletion, so it stays recoverable across a GC cycle).
-- "show my inbox" → `list_incoming_messages()` (full inbox, ids + status, read-only).
+- "check messages" / "any new messages" → `get_messages()` returns the oldest 50 unread
+  messages with bodies, marks that batch `read`, and reports how many remain. Use
+  `get_messages({ limit: 200 })` for a larger bounded drain. There is no defer operation;
+  persistent history remains available after the read commit.
+- "show/search message history" → `list_history({ peer_cid, direction, before_seq, limit })`.
+  Results are newest first; pass `next_cursor` back as `before_seq`. Filter by authenticated
+  `peer_cid`, not a display name. Use `get_history_item({ wire_id })` for one exact message.
+  These calls are read-only and include bodies plus local read and remote delivery state.
+- History storage and protocol receipts are not transactional. There is no packet fallback,
+  outbox, hidden retry queue, automatic receipt retry, or defer path.
 - On a fresh session the **SessionStart hook** injects a one-time, **body-free** summary of
   any unread backlog (per identity: sender + id only). Surface it; if the user wants the
   mail, `choose_identity` the relevant one and `get_messages()`.
@@ -324,10 +326,13 @@ tools, a separate store. To caption a file, also `send_message`.
 - "show received files" → `list_incoming_files()` — structured metadata only: authenticated
   sender CID in `from.id`, untrusted display label in `from.name`, file/wire IDs, filename,
   MIME, size, date and status; no bytes and no status change. Authorize by CID, not name.
-- "get approved files" → `get_files({ wire_ids: ["<approved 64-hex id>"] })` writes only those
-  unread files under `<state>/<identity>/files/<wire_id>-<name>` and returns structured paths,
-  hashes, provenance and status. Invalid/duplicate/unknown/stale IDs fail closed. Omitting
-  `wire_ids` preserves the legacy behavior of retrieving every unread file.
+- "get approved unread files" → `get_files({ wire_ids: ["<approved 64-hex id>"] })` marks
+  only those unread rows read and returns immutable blob paths, hashes, provenance and
+  status. Invalid/duplicate/unknown/stale IDs fail closed. Omitting `wire_ids` retrieves the
+  oldest 50 unread files; pass `limit` from 1 to 200 for another bounded batch.
+- "show/search file history" → `list_files({ peer_cid, direction, before_seq, limit })`;
+  use `get_file_info({ wire_id })` for exact metadata. Both return no bytes. Use
+  `save_file({ wire_id, dest_path })` to stream any stored file daemon→disk without chat bytes.
 - Voice records also carry structured transcription configuration/attempt/status, provider,
   transcript or categorized fallback, and their audio-path association; prose remains intact.
 - The wake signal stays **body-free** but carries authenticated sender CID, file/wire IDs,
@@ -383,15 +388,14 @@ release, and do not improvise a substitute. Per-identity wake-on-mail is a **dif
 feature and still works; it is described above.
 ## Notes
 
-- Identities and their state (contacts, inbox, keys) persist under the daemon's state dir
+- Identities and their state (contacts, history, keys) persist under the daemon's state dir
   (`OURS_STATE_DIR`, default `~/.ours`) and survive restarts. The daemon is a singleton
   shared by all your Claude Code sessions.
 - Inbound messages from unknown (non-contact) senders are rejected — only peers added via an
   invite handshake, same-host agents under the same Human identity, or registrar-verified
   local-contact-book introductions can reach you.
-- Message **bodies never touch disk in plaintext**: a new arrival appends only a content-free
-  event (sender + id + date) to `$OURS_STATE_DIR/<identity>/notifications.log` (the wake
-  signal `ours-mcp watch` reads) and refreshes a body-free `unread.json` (the SessionStart
-  hook reads). Text lives in the packet and leaves it solely via `get_messages`.
+- Message bodies persist in owner-private, mode-0600 `history.sqlite3`; file bytes persist
+  as immutable content-addressed blobs. The wake path stays body-free:
+  `notifications.log` and `unread.json` contain metadata only, and SessionStart reads no bodies.
 - This is a **Claude-Code-specific seam** (Monitor + SessionStart hook + the `watch`
   command). Other clients wire the same `notifications.log` signal to their own wake mechanism.

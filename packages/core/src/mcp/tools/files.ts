@@ -64,7 +64,7 @@ const GET_FILES_PREFIX = 'get_files failed: ';
 export function registerFilesTools(server: McpServer, clientFor: () => OursClient): void {
   server.tool(
     'list_incoming_files',
-    'List received files as structured metadata only — authenticated sender CID in ' +
+    'List unread received files as structured metadata only — authenticated sender CID in ' +
       '`from.id`, untrusted display label in `from.name`, stable file_id/wire_id, filename, ' +
       'MIME, received size/date, status, and voice kind. Does not return/write bytes or ' +
       'change status. Authorize by from.id, then pass approved wire_ids to get_files. ' +
@@ -84,13 +84,13 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
 
   server.tool(
     'get_files',
-    'Retrieve selected unread files by stable wire_id, or (when wire_ids is omitted) all ' +
-      'unread files for backward compatibility. Writes only retrieved files to disk under ' +
-      "the identity's files dir (STATE_DIR/<identity>/files/<wire_id>-<name>) and returns " +
+    'Retrieve selected unread files by stable wire_id, or the oldest bounded unread batch ' +
+      'when wire_ids is omitted (default 50, maximum 200). The immutable bytes already live ' +
+      "in the identity's content-addressed blob store; this marks the selected rows read and returns " +
       'structured status, authenticated sender CID, IDs, path, filename/MIME, actual size, ' +
-      'sha256, and voice transcription outcome — the BYTES are ' +
-      'never returned into your context. Flips them to "processed" — the sole place file ' +
-      'bytes leave the packet. If your OS user can read the returned path, use it directly; ' +
+      'sha256, remaining unread count, and voice transcription outcome — the BYTES are ' +
+      'never returned into your context. Marks the selected rows read. If your OS user can ' +
+      'read the returned immutable blob path, use it directly; ' +
       'if you run as a different OS user than the daemon owner and cannot read it, the ours ' +
       'connector says so in the result and asks you for a destination — then call ' +
       'save_file({ wire_id, dest_path }) to stream a copy to a path you can write. ' +
@@ -98,22 +98,26 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
     {
       wire_ids: z.array(z.string()).optional().describe(
         `Optional 1-${FILE_SELECTION_CAP} unique 64-hex wire_ids from list_incoming_files. ` +
-        'Omit for legacy bulk retrieval of every unread file.',
+        'Omit for the oldest bounded unread batch.',
+      ),
+      limit: z.number().int().min(1).max(200).optional().describe(
+        'Batch size from 1 to 200 when wire_ids is omitted (default 50).',
       ),
     },
-    async ({ wire_ids }): Promise<McpTextResult> => {
+    async ({ wire_ids, limit }): Promise<McpTextResult> => {
       try {
-        const out = await clientFor().getFiles({ wire_ids });
+        const out = await clientFor().getFiles({ wire_ids, limit });
         // structuredContent carries the same records the prose lists. No
         // outputSchema is declared, so this stays additive for every other client.
         const result: McpTextResult = {
           content: [{ type: 'text' as const, text: out.text }],
           structuredContent: {
             files: out.files,
+            remaining: out.remaining,
             selection: {
               mode: out.mode,
               // null — NOT [] — for the bulk form, which is how a caller tells
-              // "every unread file" from "these zero files".
+              // an unselected batch from "these zero selected files".
               requested_wire_ids: out.requested,
               items: out.files.map((file) => ({ wire_id: file.wire_id, status: file.status })),
             },
@@ -165,15 +169,15 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
 
   server.tool(
     'save_file',
-    'Stream a received file (already pulled to disk by get_files) to a path YOUR OS user ' +
+    'Stream a file from the bound identity\'s persistent history to a path YOUR OS user ' +
       'can write, WITHOUT the bytes ever entering your context. Use this when you run as a ' +
-      'different OS user than the daemon owner and cannot read the get_files path directly. ' +
+      'different OS user than the daemon owner and cannot read its immutable blob path directly. ' +
       'The ours connector streams the bytes daemon→proxy→disk (the proxy runs as your OS ' +
-      'user and does the write); the file is resolved strictly within the bound identity\'s ' +
-      'own files folder, so you can only save files delivered to YOU. Run get_files first so ' +
-      'the file exists on disk. Requires a bound identity.',
+      'user and does the write); the wire_id is resolved strictly within the bound identity\'s ' +
+      'own history. Discover it with list_files/get_file_info or the unread-file tools. ' +
+      'Requires a bound identity.',
     {
-      wire_id: z.string().min(1).describe('wire_id of the received file (from get_files).'),
+      wire_id: z.string().min(1).describe('wire_id of a stored file for the bound identity.'),
       dest_path: z.string().min(1).describe('Destination path on your local filesystem to write the copy to.'),
     },
     // This handler DOES THE WRITE. It used to be a refusal because the daemon runs
@@ -196,9 +200,8 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
           'The bytes were streamed daemon→disk and never entered this result.',
         );
       } catch (e) {
-        // The daemon's own 404 text already says "run get_files first, or it
-        // belongs to another identity", so it is passed through rather than
-        // re-worded — re-wording it here would be a second copy that drifts.
+        // The daemon owns identity scoping and returns its typed HTTP failure
+        // detail. Pass it through rather than maintaining a second copy here.
         return textResult(`save_file failed: ${e instanceof Error ? e.message : String(e)}`, true);
       }
     },

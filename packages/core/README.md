@@ -64,6 +64,28 @@ command falls back to an embedded daemon.
 only live identities in the selected daemon's ours-mcp application list are
 watched.
 
+## Message and file history
+
+The daemon stores application payloads outside the protocol packet: message bodies
+in an owner-private per-identity SQLite database and file bytes in immutable
+content-addressed blobs. `get_messages` and `get_files` consume bounded unread
+batches and mark them read. `list_history` / `get_history_item` and `list_files` /
+`get_file_info` provide persistent read-only history with authenticated-peer,
+direction, and cursor filters. `save_file` streams a stored blob to a caller-owned
+path without placing bytes in MCP content.
+
+This storage epoch is a breaking reset with no migration or fallback. A daemon
+that finds old packet state refuses startup without changing it. Operators may
+back it up and must remove it themselves before starting clean; installers never
+delete identity state implicitly.
+
+This source candidate is release-coupled to the external-history SDK contract at
+commit `9cbb57ba45b3dd8a835d2695e9ba3329ca85dc5d`. Until matching SDK and CLI
+artifacts are published and the tracked registry pins are advanced by the release
+owner, a clean registry-only CI install is expected to fail the integration
+typecheck. There is no compatibility fallback; development validation must use a
+no-save local pack of that exact SDK commit without changing manifests or locks.
+
 ## Development
 
 ```sh
