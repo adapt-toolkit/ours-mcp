@@ -16,10 +16,10 @@ const TG = resolve(HOME, '.ours-tg');
 
 // ----------------------------------------------------------------- selection --
 
-test('defaults: MCP server yes, connector no, cowork no', () => {
-  assert.deepEqual(COMPONENTS.map((c) => [c.key, c.default]), [['mcp', true], ['tg', false], ['cowork', false]]);
+test('defaults: the complete MCP + Telegram + cowork stack is selected', () => {
+  assert.deepEqual(COMPONENTS.map((c) => [c.key, c.default]), [['mcp', true], ['tg', true], ['cowork', true]]);
   const chosen = planComponentSelection({ assumeYes: true });
-  assert.deepEqual(chosen.map((c) => [c.key, c.action]), [['mcp', 'install'], ['tg', 'skip'], ['cowork', 'skip']]);
+  assert.deepEqual(chosen.map((c) => [c.key, c.action]), [['mcp', 'install'], ['tg', 'install'], ['cowork', 'install']]);
 });
 
 test('declining an already-installed component never uninstalls it', () => {
@@ -102,12 +102,12 @@ test('a connector is NEVER repointed non-interactively', () => {
   assert.equal(p.action, 'skip-repoint', 'assume-yes never turns a component on or moves one that exists');
 });
 
-test('the connector config is written BEFORE its service is installed', () => {
+test('the connector is configured but its start-coupled service command is deferred', () => {
   // install-service bakes the resolved values into the unit as environment, and
   // environment outranks the config file afterwards.
   const p = planTgAttachment({ existing: {}, endpoint: 'http://127.0.0.1:3050', stateDir: OURS, brokerUrl: 'wss://b' });
   assert.ok(p.config, 'a config to write');
-  assert.deepEqual(p.service, ['ours-tg-connector', 'install-service']);
+  assert.equal(p.service, null, 'install-service enables and starts Telegram, so the installer must not call it');
 });
 
 test('config paths honour the documented env overrides', () => {

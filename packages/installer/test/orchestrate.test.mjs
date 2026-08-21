@@ -165,33 +165,28 @@ test('a clean install passes no --force at all', async () => {
 
 // ---------------------------------------------------------- §5 components ----
 
-test('assume-yes installs the MCP server and nothing else, and asks nothing', async () => {
-  const e = fx({ env: { OURS_ASSUME_YES: '1' } });
+test('assume-yes installs the complete stack, stages Telegram and Fleet, and asks nothing', async () => {
+  const e = fx({ env: { OURS_ASSUME_YES: '1' }, versions: { '@ours.network/cowork': '0.5.0' } });
   assert.equal(await runInstall([], e), EXIT_OK);
   assert.deepEqual(e.recorder.asked, [], 'a linear run reads no input');
   const ran = e.recorder.ran.map((c) => c.join(' '));
   assert.ok(ran.some((s) => s.includes('@ours.network/mcp')));
-  assert.ok(!ran.some((s) => s.includes('tg-connector')), 'never turned on by assume-yes');
-  assert.ok(!ran.some((s) => s.includes('@ours.network/cowork')));
+  assert.ok(ran.some((s) => s.includes('@ours.network/tg-connector')));
+  assert.ok(ran.some((s) => s.includes('@ours.network/cowork')));
+  assert.ok(ran.some((s) => s.includes('@ours.network/fleet')));
+  assert.ok(!ran.some((s) => s.includes('ours-tg-connector install-service')), 'Telegram stays stopped');
+  assert.ok(!ran.some((s) => s.includes('ours-fleet up')), 'Fleet stays stopped');
+  assert.equal(e.recorder.wroteText.length, 1, 'the starter fleet config is staged');
 });
 
-test('a connector pointing elsewhere is never moved without a yes', async () => {
+test('a connector selected by default is never moved without a yes', async () => {
   const path = join(HOME, '.ours-telegram', 'config.json');
   const seed = { json: { [path]: { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: OURS, botToken: 'secret' } } };
 
   const declined = fx(seed);
   await runInstall(['--state-dir', TG, '--port', '3051'], { ...declined, ask: async (p) => { declined.recorder.asked.push(p); return false; } });
-  // The run asks its own questions (broker, fleet, voice); what it must never
-  // ask unprompted is the one about MOVING the connector, because tg is not
-  // selected by default and an unselected component is not negotiated over.
-  assert.ok(!declined.recorder.asked.some((p) => /Point it at/.test(p)),
-    'tg is not selected by default, so the move is never even raised');
-
-  // Now select it explicitly and decline the move.
-  const e2 = fx(seed);
-  const r = await runInstall(['--state-dir', TG, '--port', '3051'], { ...e2, ask: async (p) => { e2.recorder.asked.push(p); return false; } });
-  assert.equal(r, EXIT_OK);
-  assert.ok(!e2.recorder.wrote.some(([p]) => p === path), 'declining leaves the connector where it is');
+  assert.ok(declined.recorder.asked.some((p) => /Point it at/.test(p)), 'moving an existing connector is the one required confirmation');
+  assert.ok(!declined.recorder.wrote.some(([p]) => p === path), 'declining leaves the connector where it is');
 });
 
 test('cowork older than the floor is left embedded rather than handed a block', async () => {
@@ -228,10 +223,26 @@ test('a component that throws is reported with a retry and the run continues', a
 test('a second identical run changes nothing but refreshed packages', async () => {
   const json = {
     [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://broker1.ours.network' },
+    [join(HOME, '.ours-telegram', 'config.json')]: {
+      daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: OURS, brokerUrl: 'wss://broker1.ours.network',
+    },
+    [join(HOME, '.ours-cowork', 'config.json')]: {
+      daemon: { mode: 'external', endpoint: 'http://127.0.0.1:3050', stateDir: OURS },
+    },
   };
-  const e = fx({ json, net: { 3050: { ok: true, stateDir: OURS } }, text: { [unitPath('ours.service')]: `${CLI_UNIT_MARKER}\n[Unit]\n` }, unitUnchanged: true });
+  const e = fx({
+    json,
+    net: { 3050: { ok: true, stateDir: OURS } },
+    text: {
+      [unitPath('ours.service')]: `${CLI_UNIT_MARKER}\n[Unit]\n`,
+      [join(HOME, 'fleet.yaml')]: 'roles: {}\n',
+    },
+    versions: { '@ours.network/cowork': '0.5.0' },
+    unitUnchanged: true,
+  });
   assert.equal(await runInstall([], e), EXIT_OK);
   assert.deepEqual(e.recorder.wrote, [], 'no config rewritten');
+  assert.deepEqual(e.recorder.wroteText, [], 'an existing fleet config is preserved');
   assert.match(said(e), /nothing changed except refreshed packages/);
 });
 
@@ -449,26 +460,21 @@ test('a --dry-run snapshots nothing, because it wrote nothing', async () => {
   assert.ok(!said(e).includes('rolled back'), 'and says nothing about rolling back');
 });
 
-test('a connector whose service fails does not keep a config pointing at this daemon', async () => {
-  // The config names this daemon while the unit still carries the OLD environment,
-  // and the component phase would report one failed line and let the run finish.
+test('Telegram is configured but its start-coupled service command is never called', async () => {
   const e = fx({
     json: { [join(HOME, '.ours-telegram', 'config.json')]: { botToken: 'secret', daemonUrl: 'http://127.0.0.1:9999', daemonStateDir: '/elsewhere' } },
     runFails: ['ours-tg-connector install-service'],
-    answers: [true],   // yes, repoint it — the case that writes the most dangerous bytes
+    answers: [true],
   });
   const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
-    // Both answers supplied, so the new component QUESTION asks nothing and the
-    // single fx answer belongs to the repoint prompt this test is about.
     { answers: { tg: true, cowork: false }, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
     e,
     { stateDir: OURS, port: 3050 },
   );
-  assert.deepEqual(summary.failed.map((f) => f.key), ['tg']);
-  const [path, snapshot] = e.recorder.restored[0];
-  assert.equal(path, join(HOME, '.ours-telegram', 'config.json'));
-  assert.equal(JSON.parse(snapshot.text).daemonUrl, 'http://127.0.0.1:9999', 'back to the daemon it was on');
-  assert.equal(JSON.parse(snapshot.text).botToken, 'secret');
+  assert.ok(summary.installed.includes('tg'));
+  assert.ok(e.recorder.wrote.some(([p]) => p === join(HOME, '.ours-telegram', 'config.json')));
+  assert.ok(!e.recorder.ran.some((cmd) => cmd.join(' ').includes('ours-tg-connector install-service')));
+  assert.deepEqual(e.recorder.restored, [], 'staging a stopped connector needs no rollback');
 });
 
 test('a component rollback NEVER touches the daemon that came up correctly', async () => {
@@ -581,7 +587,7 @@ test('the Telegram connector is never offered as a daemon to install into', asyn
   });
   await runInstall([], e);
   assert.doesNotMatch(said(e), /Which ours daemon is this for\?/, 'one daemon, so no screen');
-  assert.doesNotMatch(said(e), /\.ours-telegram/);
+  assert.doesNotMatch(said(e), /using the ours daemon at .*\.ours-telegram/, 'the connector directory is never selected as the daemon');
   assert.match(said(e), /the only one found/);
 });
 
@@ -766,21 +772,15 @@ test('an explicit env var still outranks the installer version, both ways', asyn
 
 // ------------------------------ the component question that was never asked --
 
-test('the optional components are ASKED, not silently defaulted', async () => {
-  // THE DEFECT: planComponentSelection has always read an `answers` map and
-  // nothing ever populated it, so tg and cowork fell to default:false and were
-  // skipped in silence — while the screen printed "not installed" as though it
-  // had been a decision. Components were the one phase with no question.
-  const e = fx({ answers: [true, true], versions: { '@ours.network/cowork': '0.5.0' } });
+test('the complete component stack is selected without package questions', async () => {
+  const e = fx({ versions: { '@ours.network/cowork': '0.5.0' } });
   const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
     { dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
     e,
     { stateDir: OURS, port: 3050 },
   );
-  const asked = e.recorder.asked.join(' | ');
-  assert.match(asked, /Install Telegram connector\?/, 'tg is asked — the same defect, different label');
-  assert.match(asked, /Install cowork\?/, 'and cowork, which is the one that was reported');
-  assert.ok(summary.installed.includes('tg') && summary.installed.includes('cowork'), 'a yes installs them');
+  assert.deepEqual(e.recorder.asked, []);
+  assert.ok(summary.installed.includes('tg') && summary.installed.includes('cowork'));
 });
 
 test('the required MCP adapter is never presented as optional', async () => {
@@ -794,10 +794,10 @@ test('the required MCP adapter is never presented as optional', async () => {
   assert.ok(!e.recorder.asked.some((p) => /MCP server|ours daemon/.test(p)), 'not offered as a choice');
 });
 
-test('declining leaves them out, and the run still completes', async () => {
-  const e = fx({ answers: [false, false] });
+test('explicit programmatic omissions remain available for compatibility', async () => {
+  const e = fx();
   const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
-    { dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+    { answers: { tg: false, cowork: false }, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
     e,
     { stateDir: OURS, port: 3050 },
   );
@@ -805,15 +805,13 @@ test('declining leaves them out, and the run still completes', async () => {
   assert.deepEqual(e.recorder.wrote, [], 'nothing written for a component that was declined');
 });
 
-test('a non-interactive run asks NOTHING and keeps the documented answers', async () => {
-  // NON_INTERACTIVE_ANSWERS: mcp yes, tg no, cowork no. The unattended contract
-  // does not move because a question was added for humans.
-  const e = fx({ env: { OURS_ASSUME_YES: '1' } });
+test('a non-interactive run asks NOTHING and selects the complete stack', async () => {
+  const e = fx({ env: { OURS_ASSUME_YES: '1' }, versions: { '@ours.network/cowork': '0.5.0' } });
   const summary = await (await import('../lib/orchestrate.mjs')).runComponentPhase(
     { dryRun: false, assumeYes: true, brokerUrl: 'wss://b', channel: 'latest' },
     e,
     { stateDir: OURS, port: 3050 },
   );
   assert.deepEqual(e.recorder.asked, [], 'nothing asked');
-  assert.deepEqual(summary.skipped.sort(), ['cowork', 'tg']);
+  assert.ok(summary.installed.includes('tg') && summary.installed.includes('cowork'));
 });

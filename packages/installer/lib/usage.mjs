@@ -11,10 +11,11 @@ export const USAGE = `ours-install — the unified ours.network stack installer.
 
   ours-install [--state-dir PATH] [--port N] [--dry-run] [--help] [--version]
 
-Guided setup for the whole stack: the ours daemon, its components (the MCP
-server, the Telegram connector, cowork), your harness plugins (Claude Code /
-Codex / Hermes), ours-fleet and voice transcription — then one copy-paste
-hand-off prompt. You approve each step; re-run any time to add a piece or update.
+Progress-driven setup for the whole stack: one shared daemon, MCP, Telegram,
+cowork, detected harness plugins (Claude Code / Codex / Hermes), a Human
+identity, and ours-fleet. The daemon and cowork start; Telegram and Fleet are
+staged but stopped. The installer asks only for information it cannot infer and
+ends with exact next commands plus a copy-paste agent hand-off prompt.
 
   --state-dir  the daemon's STATE DIRECTORY, which is what identifies a daemon
                (default ~/.ours). A second state directory is a second daemon.

@@ -8,10 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import {
-  planHarnessPlugins, planFleet, buildHandoffPromptV3,
+  planHarnessPlugins, planFleet, defaultFleetConfig, buildHandoffPromptV3,
   HARNESS_ENV_SUPPORT, CLAUDE_MARKET, CODEX_MARKET,
 } from '../lib/extras.mjs';
-import { buildHandoffPrompt } from '../lib/logic.mjs';
 
 const HOME = '/home/me';
 const OURS = resolve(HOME, '.ours');
@@ -112,22 +111,33 @@ test('nothing a harness plan drives ever calls the `hermes` binary', () => {
 
 // -------------------------------------------------------------------- fleet --
 
-test('ours-fleet is configured by SAYING one line, not by writing anything', () => {
-  // Fleet already resolves the daemon per role through OURS_CONFIG and friends.
-  // The whole feature is telling the operator the fleet.yaml line.
+test('ours-fleet gets a stopped starter config on the selected daemon', () => {
   const plan = planFleet({ stateDir: TG, isDefaultStateDir: false });
   assert.equal(plan.action, 'install');
-  assert.deepEqual(plan.writes, [], 'the installer writes no fleet config, ever');
+  assert.deepEqual(plan.writes, [join(HOME, 'fleet.yaml')]);
   assert.deepEqual(plan.init, ['ours-fleet', 'init'], 'init takes no daemon argument');
   assert.deepEqual(plan.roleEnv, { OURS_CONFIG: TG_CFG });
   assert.match(plan.instruction, /fleet\.yaml/);
-  assert.ok(plan.instruction.includes(`OURS_CONFIG: ${TG_CFG}`));
+  assert.ok(plan.instruction.includes(`OURS_CONFIG=${TG_CFG}`));
+  assert.match(plan.config, /FleetCoordinator/);
+  assert.match(plan.config, /fleet-health/);
+  assert.match(plan.config, /coordinator_health/);
+  assert.match(plan.config, new RegExp(`OURS_CONFIG: ${JSON.stringify(TG_CFG)}`));
 });
 
-test('the default state directory needs no fleet.yaml instruction at all', () => {
+test('the default state directory writes the starter without a redundant daemon env', () => {
   const plan = planFleet({ stateDir: OURS, isDefaultStateDir: true });
-  assert.equal(plan.instruction, null);
+  assert.match(plan.instruction, /ours-fleet doctor/);
   assert.deepEqual(plan.roleEnv, {});
+  assert.doesNotMatch(plan.config, /OURS_CONFIG/);
+});
+
+test('the starter config is conservative and never starts anything by itself', () => {
+  const text = defaultFleetConfig({ home: HOME, stateDir: OURS, isDefaultStateDir: true });
+  assert.match(text, /approval: allow/);
+  assert.match(text, /filesystem: workspace/);
+  assert.match(text, /unattended: wait/);
+  assert.doesNotMatch(text, /ours-fleet up/);
 });
 
 test('ours-fleet FOLLOWS the channel, so a nightly stack does not get stable fleet', () => {
@@ -144,26 +154,15 @@ test('ours-fleet FOLLOWS the channel, so a nightly stack does not get stable fle
 
 // ---------------------------------------------------------------- hand-off --
 
-test('the default state directory produces the v2 hand-off text BYTE FOR BYTE', () => {
-  // The agent on the other end of this prompt configures fleet roles and
-  // harness environments. A stray line about a state directory the user never
-  // chose is worse than no line at all.
-  for (const flags of [
-    { identity: true, fleet: true, telegram: true },
-    { fleet: true },
-    { identity: true, telegram: true },
-  ]) {
-    assert.equal(
-      buildHandoffPromptV3({ ...flags, stateDir: OURS, isDefaultStateDir: true }).text,
-      buildHandoffPrompt(flags).text,
-    );
-  }
+test('the hand-off explains the staged Fleet and Telegram state', () => {
+  const result = buildHandoffPromptV3({ fleet: true, telegram: true, stateDir: OURS, isDefaultStateDir: true });
+  assert.match(result.text, /Review ~\/fleet\.yaml/);
+  assert.match(result.text, /stopped FleetCoordinator/);
+  assert.match(result.text, /start the connector only after I approve/);
 });
 
 test('a non-default state directory adds ONE preamble that names the config path', () => {
   const v3 = buildHandoffPromptV3({ fleet: true, telegram: true, stateDir: TG, isDefaultStateDir: false });
-  const v2 = buildHandoffPrompt({ fleet: true, telegram: true });
-  assert.ok(v3.text.endsWith(v2.text), 'the steps themselves are untouched');
   assert.ok(v3.text.startsWith('My ours daemon uses the state directory '));
   assert.ok(v3.text.includes(TG_CFG));
   assert.ok(v3.text.includes('OURS_CONFIG'));

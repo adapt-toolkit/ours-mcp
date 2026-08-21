@@ -6,8 +6,8 @@
 // contents and the installed versions, and every function returns a plan.
 //
 // The three components are the MCP server, the Telegram connector and cowork.
-// None of them IS the daemon; all three attach to one. The messenger is out of
-// scope here, and ours-fleet sits on top and is not installed here.
+// None of them IS the daemon; all three attach to one. A normal install carries
+// the complete stack, while the messenger remains deliberately out of scope.
 
 import { join, resolve } from 'node:path';
 import { pkgSpec, resolveChannel } from './logic.mjs';
@@ -29,8 +29,8 @@ import { pkgSpec, resolveChannel } from './logic.mjs';
 // has to be impossible rather than discouraged.
 export const COMPONENTS = [
   { key: 'mcp', label: 'MCP server for your harness', pkg: '@ours.network/mcp', specKey: 'mcp', default: true, required: true },
-  { key: 'tg', label: 'Telegram connector', pkg: '@ours.network/tg-connector', specKey: 'tg-connector', default: false },
-  { key: 'cowork', label: 'cowork', pkg: '@ours.network/cowork', specKey: 'cowork', default: false },
+  { key: 'tg', label: 'Telegram connector', pkg: '@ours.network/tg-connector', specKey: 'tg-connector', default: true },
+  { key: 'cowork', label: 'cowork', pkg: '@ours.network/cowork', specKey: 'cowork', default: true },
 ];
 
 /**
@@ -105,10 +105,10 @@ export const coworkConfigPath = (home, env = {}) => env.OURS_COWORK_CONFIG ?? jo
 // -----------------------------------------------------------------------------
 
 /**
- * Which components this run installs. Defaults are MCP server yes, connector no,
- * cowork no — the same answers a non-interactive run takes, so
- * `OURS_ASSUME_YES=1 ours-install` produces a daemon plus the MCP server and
- * nothing else (spec §9).
+ * Which components this run installs. The default is the complete stack: MCP,
+ * Telegram and cowork all attach to the same daemon. Explicit programmatic
+ * answers are retained for compatibility, but the public installer no longer
+ * asks the user to assemble the product one package at a time.
  *
  * `installed` marks a component already present so the question reads "keep it?"
  * — and DECLINING AN ALREADY-INSTALLED COMPONENT NEVER UNINSTALLS IT. Removal is
@@ -203,10 +203,11 @@ export function planTgAttachment({ existing, endpoint, stateDir, brokerUrl, assu
     changed: changes.length > 0,
     changes,
     config: merged,
-    // Written BEFORE the service: `ours-tg-connector install-service` bakes the
-    // resolved values into the unit as environment, and environment outranks the
-    // config file afterwards.
-    service: ['ours-tg-connector', 'install-service'],
+    // Telegram is intentionally staged but stopped. Its CLI currently couples
+    // service installation with `enable --now`, so calling it here would violate
+    // the installer's promise not to launch Telegram before a bot is configured.
+    // The end screen gives this exact command as the explicit opt-in start step.
+    service: null,
     untouched: [...TG_REGISTRY_FILES, ...TG_ROUTE_FILES],
   };
   if (!pointsElsewhere) return { ...plan, action: plan.changed ? 'attach' : 'unchanged' };

@@ -27,7 +27,7 @@ export function fx({
   // throws: this one succeeds loudly and lies quietly.
   const notTaken = new Set();
   const modeDrifted = new Set();
-  const recorder = { ran: [], ranEnv: [], wrote: [], out: [], asked: [], askedLines: [], interactive: [], restored: [] };
+  const recorder = { ran: [], ranEnv: [], wrote: [], wroteText: [], out: [], asked: [], askedLines: [], interactive: [], restored: [] };
   let answerIndex = 0;
   let lineIndex = 0;
   const fails = (cmd) => runFails.some((f) => cmd.join(' ').includes(f));
@@ -53,6 +53,7 @@ export function fx({
     readJson: (p) => (Object.prototype.hasOwnProperty.call(json, p) ? json[p] : null),
     readText: (p) => (Object.prototype.hasOwnProperty.call(text, p) ? text[p] : null),
     writeJson: (p, body) => { recorder.wrote.push([p, body]); },
+    writeText: (p, body) => { recorder.wroteText.push([p, body]); },
     // The rollback seam. `snapshot` returns what the file looked like before the
     // run — seeded from `json`, exactly as readJson is, so a test does not have to
     // describe the same file twice — and `restore` is RECORDED rather than done,

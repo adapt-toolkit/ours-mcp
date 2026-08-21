@@ -127,7 +127,7 @@ test('a later run can ADD a component without disturbing the installed ones', as
   const chosen = planComponentSelection({ answers: { tg: true }, installed: { mcp: true } });
   assert.equal(chosen.find((c) => c.key === 'mcp').action, 'keep');
   assert.equal(chosen.find((c) => c.key === 'tg').action, 'install');
-  assert.equal(chosen.find((c) => c.key === 'cowork').action, 'skip');
+  assert.equal(chosen.find((c) => c.key === 'cowork').action, 'install', 'a re-run completes a missing default component');
 });
 
 test('update never deletes state, moves a port, or creates a second daemon', async () => {
