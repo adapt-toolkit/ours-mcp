@@ -77,12 +77,19 @@ allows it for legacy reasons; this skill does not.
 
 Walk the user through these, checking each. Stop and help at the first one that isn't done.
 
-1. **Daemon running.** The MCP tools attach to the shared daemon. Check it with
-   `ours daemon status`. If the commands are missing, install
-   `@ours.network/cli@1.0.1` and `@ours.network/mcp`, then run `ours config setup`
-   and `ours daemon start`. For boot persistence offer
-   `ours daemon install-service`. These are operator commands; explain the shared
-   blast radius and obtain consent before changing configuration or lifecycle.
+For a first-time or complete host setup, prefer `ours-install`. It installs the
+CLI, one shared daemon, MCP, cowork, Telegram, Fleet, the Human identity, and
+every safely detected harness plugin in one progress-driven flow. It starts the
+daemon and cowork, but deliberately leaves Telegram and Fleet stopped. If
+`~/fleet.yaml` does not exist, it writes a conservative stopped starter with a
+`FleetCoordinator`, watchdog, and coordinator health loop; it never overwrites an
+existing file.
+
+1. **Daemon running.** Check it with `ours daemon status`. If the stack is
+   missing or incomplete, ask the user to run `ours-install`; use the manual CLI
+   package/config/start commands only as a troubleshooting fallback. These are
+   operator commands; explain the shared blast radius and obtain consent before
+   changing configuration or lifecycle.
 2. **Plugin installed.** Run this package's `install.sh` (from `@ours.network/hermes`).
    It ensures the daemon, writes the `ours` MCP server into `~/.hermes/config.yaml`, and
    installs this skill into `~/.hermes/skills/`. That's all — no identities, no webhook route,
@@ -120,6 +127,19 @@ the version-matched source of truth:
    release does not provide `docs`, use `ours-fleet --help` and the relevant
    subcommand's `--help`, and recommend upgrading. Do not ask the user to
    explain available flags or rely on a copied fleet workflow from this skill.
+
+After `ours-install`, review `~/fleet.yaml` with the user before activation. Do
+not start Fleet or Telegram merely because installation finished. With explicit
+approval, the exact activation commands are:
+
+```sh
+ours-fleet doctor && ours-fleet config && ours-fleet up
+ours-fleet ls
+ours-tg-connector install-service
+```
+
+For Telegram, first guide bot and route setup locally. Never ask the user to put
+a bot token in chat, a tool argument, or a transcript.
 
 ## Layer 1 — identities (global)
 

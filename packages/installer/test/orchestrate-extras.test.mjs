@@ -65,7 +65,7 @@ test('a harness we cannot drive is never called, and never dead-ends either', as
   assert.equal(rows.find((r) => r.key === 'codex').state, 'skipped');
 });
 
-test('a drivable harness is offered, then driven in order', async () => {
+test('a drivable harness is installed automatically, in order', async () => {
   const e = fx({
     answers: [true],
     harnesses: [{ name: 'codex', command: 'codex', label: 'Codex', status: 'ok' }],
@@ -79,11 +79,12 @@ test('a drivable harness is offered, then driven in order', async () => {
   assert.equal(rows[0].state, 'installed');
 });
 
-test('declining a harness installs nothing and is offered again on a re-run', async () => {
+test('detected safe harnesses are not gated by package-selection questions', async () => {
   const e = fx({ answers: [false], harnesses: [{ name: 'codex', command: 'codex', label: 'Codex', status: 'ok' }] });
   const rows = await runHarnessPhase(ARGS, e, { target: AT_DEFAULT, isDefaultStateDir: true });
-  assert.deepEqual(ranAsText(e), []);
-  assert.equal(rows[0].note, 'declined');
+  assert.ok(ranAsText(e).some((line) => line.startsWith('codex plugin add')));
+  assert.equal(rows[0].state, 'installed');
+  assert.deepEqual(e.recorder.asked, []);
 });
 
 test('a harness whose install fails still gets its manual path, and the run continues', async () => {
@@ -134,11 +135,15 @@ test('the DEFAULT state directory prints no env line at all', async () => {
 
 // ------------------------------------------------------------- ours-fleet ---
 
-test('ours-fleet is installed and initialised, and the installer configures nothing in it', async () => {
+test('ours-fleet is installed, initialised, and given a stopped starter config', async () => {
   const e = fx({ answers: [true] });
   const row = await runFleetPhase(ARGS, e, { target: AT_DEFAULT, isDefaultStateDir: true });
   assert.deepEqual(ranAsText(e), ['npm i -g @ours.network/fleet@latest', 'ours-fleet init']);
-  assert.deepEqual(e.recorder.wrote, [], 'ours-fleet needs zero configuration from this installer');
+  assert.equal(e.recorder.wroteText.length, 1);
+  assert.equal(e.recorder.wroteText[0][0], join(HOME, 'fleet.yaml'));
+  assert.match(e.recorder.wroteText[0][1], /FleetCoordinator/);
+  assert.match(e.recorder.wroteText[0][1], /fleet-health/);
+  assert.match(e.recorder.wroteText[0][1], /coordinator_health/);
   // CHANGED BY THE COORDINATOR'S RULING (2026-08-17), and worth saying why: this
   // used to assert [null, null] — no daemon environment on either call — which
   // pinned extras.mjs:180's analysis ("init reads no daemon config; fleet resolves
@@ -153,10 +158,10 @@ test('ours-fleet is installed and initialised, and the installer configures noth
   assert.equal(row.state, 'installed');
 });
 
-test('for a non-default state directory ours-fleet gets the one fleet.yaml line — which is the whole feature', async () => {
+test('for a non-default state directory the starter pins the coordinator to this daemon', async () => {
   const e = fx({ answers: [true] });
   await runFleetPhase(ARGS, e, { target: AT_TG, isDefaultStateDir: false });
-  assert.match(said(e), /env: \{ OURS_CONFIG: .*\.ours-tg\/config\.json \}/);
+  assert.match(e.recorder.wroteText[0][1], /OURS_CONFIG: "\/home\/me\/\.ours-tg\/config\.json"/);
   assert.match(said(e), /fleet\.yaml/);
 });
 
@@ -229,7 +234,7 @@ test('the hand-off drops what this run already did and keeps what it did not', a
   await endScreen(ARGS, e, { summary, target: AT_DEFAULT, isDefaultStateDir: true, brokerUrl: e.brokerUrl });
   const out = said(e);
   assert.doesNotMatch(out, /Create my Ours human identity/, 'an identity created in-run drops out of the hand-off');
-  assert.match(out, /Set up my ours-fleet/, 'fleet was installed, so its step stays');
+  assert.match(out, /Review ~\/fleet\.yaml/, 'fleet was installed, so its review step stays');
   assert.doesNotMatch(out, /Set up my Telegram bot/, 'a skipped connector drops its step');
   assert.doesNotMatch(out, /OURS_CONFIG/, 'the default state directory adds nothing to the prompt');
 });

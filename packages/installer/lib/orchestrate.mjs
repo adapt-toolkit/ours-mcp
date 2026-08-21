@@ -35,10 +35,10 @@ import { planHarnessPlugins, planFleet, buildHandoffPromptV3, restartHints } fro
 import { summarizeRun } from './rerun.mjs';
 import { configJournal, reportRollback } from './journal.mjs';
 import { detectDaemons, planDaemonSelection, resolveSelection } from './detect.mjs';
-import { detectPlatform, resolveChannel, validateBroker } from './logic.mjs';
+import { detectPlatform, resolveChannel } from './logic.mjs';
 import { daemonEnv } from './effects.mjs';
 import { USAGE } from './usage.mjs';
-import { ok, info, warn, heading, banner, box, c } from './ui.mjs';
+import { ok, info, warn, heading, banner, box, c, progress } from './ui.mjs';
 
 export const EXIT_OK = 0;
 export const EXIT_REFUSED = 2;
@@ -418,42 +418,15 @@ function readChanged(stdout) {
 /**
  * THE QUESTION NOBODY WAS ASKING.
  *
- * `planComponentSelection` has always read an `answers` map — and NOTHING EVER
- * POPULATED IT. `args.answers` is not produced by parseInstallArgs and is not
- * written by any phase, so it was permanently `{}`, every optional component fell
- * to its own default, and tg and cowork (both default false) were skipped in
- * silence. The screen then printed "cowork — not installed" as though that had
- * been a decision.
- *
- * This was the ONE phase with no question. Harness plugins ask, ours-fleet asks,
- * voice asks, the broker asks. Components did not.
- *
- * IT IS NOT A COWORK BUG, and fixing only the component that got reported would
- * have left the identical defect live under a different label: the Telegram
- * connector is unreachable by exactly the same route, and nobody noticed only
- * because tg is usually configured somewhere else.
- *
- * A REQUIRED component is never asked — since #74 the MCP package IS the daemon,
- * the daemon phase has already installed it, and a question whose only honest
- * answer is yes is not a question. Non-interactive runs are unchanged: assumeYes
- * takes each component's own default, which is what NON_INTERACTIVE_ANSWERS
- * documents (mcp yes, tg no, cowork no), so nothing about the unattended contract
- * moves.
+ * The public installer has one product, not a package-selection questionnaire:
+ * MCP, Telegram, and cowork are all installed. Explicit injected answers remain
+ * only as a compatibility/test seam for callers that deliberately omit a piece.
  */
 export async function askComponents(args, effects) {
-  const answers = { ...(args.answers ?? {}) };
-  if (args.assumeYes) return answers;
-  const optional = COMPONENTS.filter((c) => !c.required && answers[c.key] === undefined);
-  if (optional.length === 0) return answers;
-  effects.out(heading('What else should this daemon carry?'));
-  for (const component of optional) {
-    const already = (args.installed ?? {})[component.key] === true;
-    answers[component.key] = await effects.ask(
-      already ? `Keep ${component.label}?` : `Install ${component.label}?`,
-      already || component.default,
-    );
-  }
-  return answers;
+  // The product is the complete stack. Asking the operator to reconstruct that
+  // product from package names was choice theatre and made unattended installs
+  // incomplete. Explicit injected answers remain a test/compatibility seam.
+  return { ...(args.answers ?? {}) };
 }
 
 /**
@@ -529,29 +502,14 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
       }
     }
     await perform(effects, args.dryRun, `install ${plan.install[3]}`, () => effects.run(plan.install[0], plan.install.slice(1)));
-    // ONE UNIT OF WORK: these bytes and the service that reads them. If the
-    // service does not come up, the connector's config names this daemon while its
-    // unit still carries the OLD environment — and the phase's own catch would
-    // report one failed line and let the run print "install complete".
-    const journal = configJournal(effects, { dryRun: args.dryRun });
     if (plan.changed) {
-      // Written BEFORE the service: install-service bakes these values into the
-      // unit as environment, and environment outranks the config file after.
-      journal.snapshot(path);
       await perform(effects, args.dryRun, `write ${path}`, () => effects.writeJson(path, `${JSON.stringify(plan.config, null, 2)}\n`));
     } else {
       effects.out(ok(`${path} already points here — not touched`));
     }
-    try {
-      await perform(effects, args.dryRun, 'Telegram connector service installed', () => effects.run(plan.service[0], plan.service.slice(1)));
-    } catch (error) {
-      // Scoped to THIS component: the daemon came up correctly and is not undone
-      // by a connector that did not. That is the rule this journal's per-unit scope
-      // exists to keep.
-      rollBack(effects, journal, args, 'the Telegram connector service did not come up — putting its config back');
-      throw error;
-    }
-    return { key: 'tg', state: 'installed' };
+    effects.out(ok('Telegram connector installed and configured, but not started.'));
+    effects.out(info('After adding a bot, start it explicitly with: ours-tg-connector install-service'));
+    return { key: 'tg', state: 'installed', note: 'configured; stopped' };
   }
 
   const path = coworkConfigPath(effects.home, effects.env);
@@ -608,27 +566,11 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
  */
 export async function askBroker(args, effects) {
   const standard = args.brokerUrl;
-  if (args.assumeYes) return standard;
-  effects.out(heading('Your broker'));
-  effects.out(info('Your agents connect through a "broker" — a shared meeting point that lets them find'));
-  effects.out(info("each other. It's secure: your messages are end-to-end encrypted, so the broker never"));
-  effects.out(info('sees what they say. Almost everyone uses the standard one — just press Enter.'));
-  if (!(await effects.ask('Use a custom broker address?', false))) {
-    effects.out(ok('using the standard broker.'));
-    return standard;
-  }
-  const entered = String(await effects.askLine('Enter the broker address: ', '')).trim();
-  const checked = validateBroker(entered);
-  if (!entered || !checked.ok || checked.empty) {
-    if (entered) effects.out(warn(`"${entered}" doesn't look like a ws:// address — using the standard broker.`));
-    else effects.out(ok('using the standard broker.'));
-    return standard;
-  }
-  if (await effects.ask(`Use "${checked.value}"?  (No = go back to the standard broker)`, true)) {
-    effects.out(ok(`broker set to ${checked.value}.`));
-    return checked.value;
-  }
-  effects.out(ok('using the standard broker.'));
+  // Custom deployments remain available through OURS_BROKER_URL. The ordinary
+  // install is intentionally linear and explains the standard safe default.
+  effects.out(info(effects.env.OURS_BROKER_URL
+    ? 'All services use the end-to-end encrypted broker configured in OURS_BROKER_URL.'
+    : 'All services use the standard end-to-end encrypted ours broker.'));
   return standard;
 }
 
@@ -748,24 +690,13 @@ export async function runHarnessPhase(args, effects, { target, isDefaultStateDir
     return [];
   }
 
-  // Asked BEFORE planning, because the plan's `wanted` is the answer. Only a
-  // harness we can actually drive is worth a question — the others are going to
-  // print manual steps whatever the operator says.
-  const answers = {};
-  if (!args.assumeYes) {
-    for (const h of detected) {
-      if (h.status !== 'ok') continue;
-      answers[h.name] = await effects.ask(`Install the ours plugin into ${h.label ?? h.name}?`, true);
-    }
-  }
-
   const plans = planHarnessPlugins({
     harnesses: detected.map((h) => ({ name: h.name, status: h.status })),
     stateDir: target.stateDir,
     isDefaultStateDir,
     channel: args.channel,
-    assumeYes: args.assumeYes,
-    answers,
+    assumeYes: true,
+    answers: {},
   });
 
   const rows = [];
@@ -808,48 +739,21 @@ export async function runHarnessPhase(args, effects, { target, isDefaultStateDir
   return rows;
 }
 
-/**
- * ours-fleet. The feature that needed zero code anywhere.
- *
- * `ours-fleet init` takes no daemon argument and reads no daemon config; fleet
- * resolves a daemon per role, from the role's own env. So the installer installs
- * it, runs its one-time host setup, and — for a non-default state directory —
- * SAYS the one fleet.yaml line. Saying it is the whole feature.
- */
+/** Install Fleet, initialize its host support, and stage a stopped starter config. */
 export async function runFleetPhase(args, effects, { target, isDefaultStateDir }) {
   effects.out(heading('ours-fleet (your always-online agent team)'));
   effects.out(info('This makes your harnesses PERSISTENT: they stop being just a terminal session and'));
   effects.out(info('become always-online agents that survive a reboot.'));
-  const wanted = args.assumeYes ? true : await effects.ask('Install it?', true);
   const plan = planFleet({
-    stateDir: target.stateDir, isDefaultStateDir, wanted, channel: args.channel,
+    home: effects.home, stateDir: target.stateDir, isDefaultStateDir, wanted: true, channel: args.channel,
   });
   if (plan.action === 'skip') {
     effects.out(info('skipped cleanly — re-run ours-install any time to add it.'));
     return { key: 'fleet', label: plan.label, state: 'skipped' };
   }
   const install = await attempt(effects, args.dryRun, plan.install.join(' '), () => effects.run(plan.install[0], plan.install.slice(1)));
-  // THE PAIR IS PASSED AS DELIBERATE INSURANCE AGAINST AN UNRESOLVED
-  // CONTRADICTION, not because the question was settled.
-  //
-  // Two written analyses disagree, and NEITHER was verified — ours-fleet is not in
-  // this repo:
-  //   lib/nightly-install.mjs:611 says fleet resolves its daemon from
-  //     OURS_CONFIG / OURS_PORT / OURS_STATE_DIR and has no concept of a registry,
-  //     so an `init` run without the pair points every role at the historical
-  //     default daemon — which, when the selected daemon is not the default, may
-  //     be one the user does not even have.
-  //   lib/extras.mjs:180 says `init` takes no daemon argument of any kind, reads no
-  //     daemon config, and resolves per role through
-  //     resolveEndpoint({ ...process.env, ...role.env }) — so the pair is
-  //     unnecessary here.
-  // Passing it is harmless if extras.mjs is right and load-bearing if
-  // nightly-install.mjs is. When the cheap action is safe under both readings and
-  // the expensive one is only safe under one, take the cheap one. (Coordinator
-  //
-  // Passed for EVERY state directory, not only a non-default one, exactly as the
-  // nightly flow does: `init` is a one-time host setup and the pair is what names
-  // the daemon it was set up beside.
+  // Pass the complete daemon tuple to host initialization. The generated role
+  // also carries OURS_CONFIG when the chosen daemon is non-default.
   const initEnv = daemonEnv(target.stateDir, target.port);
   const init = install.ok
     ? await attempt(effects, args.dryRun, `${plan.init.join(' ')} (one-time host setup: units, dirs, linger)`, () => effects.run(plan.init[0], plan.init.slice(1), { env: initEnv }))
@@ -858,9 +762,14 @@ export async function runFleetPhase(args, effects, { target, isDefaultStateDir }
     effects.out(info(`retry manually: ${plan.init.join(' ')}`));
     return { key: 'fleet', label: plan.label, state: 'failed', note: 'ours-fleet init failed' };
   }
-  effects.out(ok('ours-fleet ready — the core ours plugin discovers every option through `ours-fleet docs`.'));
+  if (effects.readText(plan.configPath) === null) {
+    await perform(effects, args.dryRun, `write starter fleet config ${plan.configPath}`, () => effects.writeText(plan.configPath, plan.config));
+  } else {
+    effects.out(ok(`${plan.configPath} already exists — not touched`));
+  }
+  effects.out(ok('ours-fleet installed and initialized; no fleet roles were started.'));
   if (plan.instruction) effects.out(info(plan.instruction));
-  return { key: 'fleet', label: plan.label, state: 'installed', note: 'CLI + core-plugin discovery' };
+  return { key: 'fleet', label: plan.label, state: 'installed', note: `configured at ${plan.configPath}; stopped` };
 }
 
 /** Voice configuration belongs to the shared daemon, not the MCP adapter. */
@@ -914,6 +823,20 @@ export async function endScreen(args, effects, { summary, target, isDefaultState
   }
 
   const has = (key) => summary.some((r) => r.key === key && (r.state === 'installed' || r.state === 'current'));
+  if (has('tg') || has('fleet')) {
+    effects.out('');
+    effects.out(`  ${c.bold('Installed but intentionally stopped')}`);
+    if (has('tg')) {
+      effects.out(`  ${c.gray('• Telegram: add a bot/route first, then run')}`);
+      effects.out(`    ${c.cyan('ours-tg-connector install-service')}`);
+    }
+    if (has('fleet')) {
+      effects.out(`  ${c.gray('• Fleet: review the generated coordinator/watchdog config, then run')}`);
+      effects.out(`    ${c.cyan('ours-fleet doctor && ours-fleet config && ours-fleet up')}`);
+      effects.out(`    ${c.cyan('ours-fleet ls')}`);
+    }
+  }
+
   const { text, empty } = buildHandoffPromptV3({
     identity: !has('identity'),
     fleet: has('fleet'),
@@ -927,7 +850,7 @@ export async function endScreen(args, effects, { summary, target, isDefaultState
   } else {
     effects.out('');
     effects.out(`  ${c.gray('─'.repeat(64))}`);
-    effects.out(`  ${c.bold('ONE LAST STEP')} — copy the prompt below and paste it into your agent.`);
+    effects.out(`  ${c.bold('ONE LAST STEP')} — paste this prompt into Claude Code, Codex, or Hermes.`);
     effects.out(`  ${c.gray('─'.repeat(64))}`);
     effects.out('');
     effects.out(box(text.split('\n'), 'paste this into your agent'));
@@ -987,6 +910,7 @@ export async function runInstall(argv, effects) {
   effects.out(banner());
   effects.out(heading(`ours: target ${args.stateDir}${args.portExplicit ? `, port ${args.port}` : ''}`));
   if (args.dryRun) effects.out(info('dry-run: nothing will be installed or changed'));
+  effects.out(progress(1, 8, 'Check the host', 'Verify the platform and Node.js before changing anything.'));
 
   // An unsupported platform is not a refusal of an incoherent selection, it is a
   // machine this cannot run on. v2 exited 0 there and so does this, so a script
@@ -995,9 +919,11 @@ export async function runInstall(argv, effects) {
 
   // Which daemon, before anything is decided about it. Only args.stateDir can
   // change here; every refusal downstream is unaffected.
+  effects.out(progress(2, 8, 'Choose one daemon', 'Reuse the only detected daemon or create one coherent shared target.'));
   const selection = await runSelectionPhase(args, effects);
   if (selection.action === 'refuse') return EXIT_REFUSED;
 
+  effects.out(progress(3, 8, 'Prepare the shared daemon', 'Install the CLI, write config, start it, and enable boot persistence.'));
   const daemon = await runDaemonPhase(args, effects);
   if (daemon.refused) return EXIT_REFUSED;
   const target = daemon.target;
@@ -1020,6 +946,7 @@ export async function runInstall(argv, effects) {
     });
   }
 
+  effects.out(progress(4, 8, 'Install the complete stack', 'Attach MCP, Telegram, and cowork to the same daemon; Telegram stays stopped.'));
   const components = await runComponentPhase(args, effects, target);
   for (const component of COMPONENTS) {
     const state = components.installed.includes(component.key) ? 'installed'
@@ -1029,13 +956,18 @@ export async function runInstall(argv, effects) {
       label: component.label,
       state,
       version: state === 'installed' && !args.dryRun ? (effects.installedVersion(component.pkg) ?? '') : '',
-      note: components.failed.find((f) => f.key === component.key)?.reason,
+      note: components.failed.find((f) => f.key === component.key)?.reason
+        ?? (state === 'installed' && component.key === 'tg' ? 'configured; stopped'
+          : state === 'installed' && component.key === 'cowork' ? 'configured; service running' : undefined),
     });
   }
   const mcpReady = components.installed.includes('mcp');
 
+  effects.out(progress(5, 8, 'Create the Human identity', 'Create the daemon root identity once, or keep the existing one.'));
   summary.push(await runIdentityPhase(args, effects, { target, mcpReady }));
+  effects.out(progress(6, 8, 'Wire detected harnesses', 'Install the ours plugin into each safe Claude Code, Codex, or Hermes installation.'));
   summary.push(...await runHarnessPhase(args, effects, { target, isDefaultStateDir }));
+  effects.out(progress(7, 8, 'Stage the fleet', 'Install Fleet and write a stopped coordinator + watchdog + health-loop starter config.'));
   summary.push(await runFleetPhase(args, effects, { target, isDefaultStateDir }));
   summary.push(await runVoicePhase(args, effects, { target, mcpReady }));
 
@@ -1046,6 +978,7 @@ export async function runInstall(argv, effects) {
   for (const failure of components.failed) {
     effects.out(warn(`${failure.key} did not install: ${failure.reason}`));
   }
+  effects.out(progress(8, 8, 'Finish', 'Summarize what is running, what is stopped, and the exact next commands.'));
   await endScreen(args, effects, { summary, target, isDefaultStateDir, brokerUrl: args.brokerUrl });
   return EXIT_OK;
 }
