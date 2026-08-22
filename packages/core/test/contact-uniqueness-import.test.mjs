@@ -19,7 +19,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtempSync, rmSync, mkdirSync, copyFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +42,26 @@ const idDir = join(dir, 'BookKeeper');
 mkdirSync(idDir, { recursive: true });
 copyFileSync(join(FIX, 'dup-contacts-state.bin'), join(idDir, 'state_data.bin'));
 copyFileSync(join(FIX, 'dup-contacts-identity.key'), join(idDir, 'identity.key'));
+// Adversarial legacy residue: an old daemon could persist public discovery
+// material before the identity had a Human/root hierarchy. Neither the CID nor
+// the routing document may escape while the packet is quarantined, and the
+// stale mismatched entry must never become registrar-connectable later.
+const leakedCid = 'LEAKED-QUARANTINED-CID';
+const leakedRouting = 'LEAKED-QUARANTINED-ROUTING-DOCUMENT';
+mkdirSync(join(dir, 'contact-book'), { recursive: true });
+writeFileSync(join(dir, 'contact-book', 'book.json'), JSON.stringify({
+  v: 1,
+  entries: {
+    BookKeeper: {
+      v: 1,
+      name: 'BookKeeper',
+      container_id: leakedCid,
+      address_document: leakedRouting,
+      published_at: '2026-01-01T00:00:00.000Z',
+      registrar_sig: 'STALE-REGISTRAR-SIGNATURE',
+    },
+  },
+}));
 
 async function withDaemon(fn) {
   const PORT = await freePort();
@@ -93,6 +113,9 @@ try {
       'quarantined legacy state has no unread/notification summary surface');
     const notifications = await fetch(`http://127.0.0.1:${port}/identities/BookKeeper/notifications?since=tip`);
     ok(notifications.status === 404, 'quarantined legacy state has no notification stream');
+    const preAdoptionBook = (await call('list_local_contact_book')).text;
+    ok(preAdoptionBook === 'The local contact book is empty.' && !preAdoptionBook.includes(leakedCid),
+      'packed artifact: local-book enumeration hides every persisted CID for quarantined legacy state');
 
     // Exercise the supported explicit migration path before using the restored role.
     const human = await call('create_root_identity', { name: 'FixtureHuman', expose_local: false });
@@ -105,7 +128,21 @@ try {
     const migrated = await fetch(`http://127.0.0.1:${port}/identities`).then((r) => r.json());
     ok(migrated.identities.some((i) => i.name === 'BookKeeper' && i.kind === 'role' && i.root === 'FixtureHuman'),
       'management API exposes the restored record only after it is a delegated role');
+    const staleRegistrarLookup = await call('send_message', { contact: leakedCid, text: 'must not route' });
+    ok(staleRegistrarLookup.isError && /has no local contact-book entry/.test(staleRegistrarLookup.text),
+      'registrar-backed discovery rejects the quarantined legacy entry even after adoption');
     await call('choose_identity', { name: 'BookKeeper', force: true });
+    const publish = await call('set_local_book_policy', { expose: true });
+    ok(!publish.isError, 'adopted role may be explicitly published after hierarchy reconciliation');
+    const publishedBook = (await call('list_local_contact_book')).text;
+    const publishedRole = /^• BookKeeper — ([A-F0-9]{64}) \(published /m.exec(publishedBook);
+    ok(publishedRole !== null &&
+        !publishedBook.includes(leakedCid) && !publishedBook.includes(leakedRouting),
+      'local discovery exposes only the adopted role CID, never persisted quarantined discovery material');
+    const afterPublish = daemonStderr();
+    const publishedAt = afterPublish.indexOf('[BookKeeper] published to the local contact book');
+    ok(publishedAt > delegatedAt && publishedAt > exposedAt,
+      'packed artifact: adoption/delegation and broker activation both precede local publication');
     const book = (await call('list_contacts')).text;
     ok(new RegExp(`• Twin — ${keeper}`).test(book), 'boot 1: the LOWEST container id (byte order) keeps the bare "Twin"');
     ok(new RegExp(`• Twin 1 — ${renamed}`).test(book), 'boot 1: the other duplicate became "Twin 1"');

@@ -512,6 +512,21 @@ function readBook(): Record<string, BookEntry> {
   }
 }
 
+// Public/registrar discovery must never trust book.json by itself. The file is
+// persistent input and older releases could leave an entry behind for a legacy
+// unassociated packet (or for a same-named packet with a different CID). Only an
+// exact entry→live-identity match that has crossed the hierarchy barrier is
+// discoverable. Both enumeration and registrar-backed connection use this one
+// view so a quarantined/stale CID cannot escape through a secondary path.
+function readDiscoverableBook(): Record<string, BookEntry> {
+  return Object.fromEntries(
+    Object.entries(readBook()).filter(([, entry]) => {
+      const id = identities.get(entry.name);
+      return id !== undefined && id.cid === entry.container_id && isHierarchyIdentity(id);
+    }),
+  );
+}
+
 function writeBook(entries: Record<string, BookEntry>): void {
   fs.mkdirSync(bookDir(), { recursive: true });
   const tmp = `${bookPath()}.tmp`;
@@ -538,6 +553,11 @@ function exportSigningSecret(id: Identity): string {
 
 async function publishToBook(id: Identity): Promise<void> {
   if (!registrar) throw new Error('registrar is not available');
+  if (!isHierarchyIdentity(id)) {
+    throw new Error(
+      `refusing to publish identity "${id.name}" before Human/root hierarchy reconciliation`,
+    );
+  }
   const adBlob = exportAdBlob(id);
   const registrarSig = await withScopeAsync(async (lt) => {
     const sigData = await mutatingTx(registrar!, '::actor::sign_book_entry', {
@@ -866,7 +886,7 @@ async function sendViaLocalBook(id: Identity, contact: string, text: string): Pr
   if (!registrar) {
     throw new Error(`"${contact}" is not a contact, and the local contact book is unavailable.`);
   }
-  const entries = readBook();
+  const entries = readDiscoverableBook();
   const entry = entries[contact] ?? Object.values(entries).find((e) => e.container_id === contact);
   if (!entry) {
     throw new Error(
@@ -1420,9 +1440,16 @@ async function hostProvisionChild(root: Identity, name: string, bio: string, han
       return;
     }
     const child = await provisionIdentity(name);
+    if (bio) {
+      await withScopeAsync(async (lt) => {
+        await mutatingTx(child, '::a2a_messaging::set_my_bio', { bio }, lt);
+      });
+    }
+    await delegateRole(root, child);
+    // The historical default for host-provisioned children is local discovery,
+    // but publication is allowed only after the child carries its delegation.
+    await publishToBook(child);
     await withScopeAsync(async (lt) => {
-      if (bio) await mutatingTx(child, '::a2a_messaging::set_my_bio', { bio }, lt);
-      await delegateRole(root, child);
       const roleId = describeIdentity(child).roleId;
       // native AD record (not bin) for register_provisioned_child; round-trips as an AdaptValue.
       const childAd = readonlyTx(child, '::actor::export_address_document_native', lt);
@@ -2754,12 +2781,13 @@ if (reservedNames.size > 0) {
 }
 
 // Create a brand-new identity: fresh seed, set the display name, pin the host
-// registrar, apply the local-book policy, persist — and publish to the book
-// unless the caller opted out.
+// registrar, apply the local-book acceptance policy, and persist. Publication
+// is deliberately owned by each caller only after root establishment or role
+// delegation; this choke point never makes an unassociated packet discoverable.
 async function provisionIdentity(
   name: string,
-  opts: { exposeLocal: boolean; localAutoAccept: boolean; temp?: { tokenHash: string; pid: number } } =
-    { exposeLocal: true, localAutoAccept: true },
+  opts: { localAutoAccept: boolean; temp?: { tokenHash: string; pid: number } } =
+    { localAutoAccept: true },
 ): Promise<Identity> {
   // Ship-review round-2 major: the single provisioning choke point — every create
   // path (create_identity, create_root_identity, host_provision_child) lands here.
@@ -2794,9 +2822,6 @@ async function provisionIdentity(
       await withScopeAsync(async (lt) => {
         await mutatingTx(id, '::actor::set_local_policy', { auto_accept: false }, lt);
       });
-    }
-    if (opts.exposeLocal) {
-      await publishToBook(id);
     }
     saveStateFailClosed(id); // provisioning without a durable snapshot is a failure
     return id;
@@ -3672,7 +3697,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
       if (bad) return textResult(`create_identity failed: ${bad}`, true);
       if (identities.has(name)) return textResult(`create_identity failed: an identity named "${name}" already exists.`, true);
       try {
-        const id = await provisionIdentity(name, { exposeLocal: expose_local, localAutoAccept: local_auto_accept });
+        const id = await provisionIdentity(name, { localAutoAccept: local_auto_accept });
         if (bio) await withScopeAsync(async (lt) => { await mutatingTx(id, '::a2a_messaging::set_my_bio', { bio }, lt); });
         let hierarchy = '';
         const root = rootName ? identities.get(rootName) : undefined;
@@ -3694,6 +3719,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
             'behind all roles); create more with create_identity and they become roles under it.' +
             (adopted.length ? ` Adopted ${adopted.length} pre-existing identit${adopted.length === 1 ? 'y' : 'ies'} as role(s): ${adopted.join(', ')}.` : '');
         }
+        if (expose_local) await publishToBook(id);
         bindSession(getSessionId(), name);
         const exposure = expose_local
           ? ` Published to the local contact book${local_auto_accept ? '' : ' (introductions require approval)'}.`
@@ -3772,7 +3798,6 @@ function createMcpServer(getSessionId: () => string): McpServer {
           // A temporary role is not published before its delegation exists.
           // This prevents even an opt-in local-book entry from briefly exposing
           // an unassociated identity while create_temporary_identity is in flight.
-          exposeLocal: false,
           localAutoAccept: local_auto_accept,
           temp: { tokenHash: hashLeaseToken(token), pid },
         });
@@ -3900,7 +3925,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
       const monitorHint = `\n\nAsk the user whether to enable this harness's live mail monitor for "${name}". ` +
         'Never enable monitoring without explicit consent.';
       try {
-        const id = await provisionIdentity(name, { exposeLocal: expose_local, localAutoAccept: local_auto_accept });
+        const id = await provisionIdentity(name, { localAutoAccept: local_auto_accept });
         if (bio) await withScopeAsync(async (lt) => { await mutatingTx(id, '::a2a_messaging::set_my_bio', { bio }, lt); });
         const existingRoot = rootName ? identities.get(rootName) : undefined;
         if (existingRoot && existingRoot.name !== name) {
@@ -3908,6 +3933,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
           // create this as a ROLE under the existing root (no error, no prompt); the
           // response says what happened so it isn't a surprise.
           await delegateRole(existingRoot, id);
+          if (expose_local) await publishToBook(id);
           bindSession(getSessionId(), name);
           return textResult(
             `A host root already exists ("${existingRoot.name}") — one root per host, so "${name}" ` +
@@ -3917,6 +3943,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
         // No root yet → establish this identity as THE host root, adopting any
         // pre-existing identities as roles (single-root policy: no flat state).
         const { adopted, failed } = await establishRoot(id);
+        if (expose_local) await publishToBook(id);
         bindSession(getSessionId(), name);
         const adoption =
           adopted.length > 0
@@ -4435,7 +4462,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
       'inviteless connection. Any of them can be messaged directly with send_message.',
     {},
     async () => {
-      const entries = Object.values(readBook());
+      const entries = Object.values(readDiscoverableBook());
       if (entries.length === 0) return textResult('The local contact book is empty.');
       const sid = getSessionId();
       const myToken = sessionHeaders.get(sid)?.token;
