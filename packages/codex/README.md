@@ -77,6 +77,9 @@ lifecycle directly, while the hooks add standard-mode context and defensive stat
 - `SessionStart` surfaces body-free unread metadata and an advisory `.ours-identity` pin.
 - `UserPromptSubmit` can re-surface unresolved unread/pin context.
 - `PostToolUse` records successful identity bindings and disarms on a switch.
+- `SessionEnd` releases the session lease and waits for all session-owned temporary
+  roles to send best-effort removal notices and delete local state. Live mode also
+  invokes this cleanup directly when its TUI exits, so it does not depend on hook trust.
 
 Codex requires review and trust of the exact hook definitions before running them.
 Installation does not bypass hook trust, and live monitoring remains available when the

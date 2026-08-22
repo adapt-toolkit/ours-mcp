@@ -70,10 +70,13 @@ if (!cliPath) {
 // Only forward the pid when it is > 1; on macOS, orphaned processes are reparented
 // to launchd (pid 1) and pidAlive(1) is always true — skip it in that case.
 const env = { ...process.env };
-if (process.ppid > 1) env.OURS_CLIENT_PID = String(process.ppid);
+if (!env.OURS_CLIENT_PID && process.ppid > 1) env.OURS_CLIENT_PID = String(process.ppid);
+const sessionEnd = process.argv[2] === 'session-end';
+const command = sessionEnd ? 'session-end' : 'proxy';
+const forwarded = process.argv.slice(sessionEnd ? 3 : 2);
 const child = spawn(
   process.execPath,
-  [cliPath, 'proxy', ...process.argv.slice(2)],
+  [cliPath, command, ...forwarded],
   { stdio: 'inherit', env },
 );
 

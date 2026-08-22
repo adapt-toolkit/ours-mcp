@@ -22,10 +22,12 @@ if (!cliPath) {
 }
 const env = { ...process.env };
 if (env.OURS_CODEX_LIVE === '1') env.OURS_AUTOSTART = '0';
-if (process.ppid > 1) env.OURS_CLIENT_PID = String(process.ppid);
+if (!env.OURS_CLIENT_PID && process.ppid > 1) env.OURS_CLIENT_PID = String(process.ppid);
+const sessionEnd = process.argv[2] === 'session-end';
+const command = sessionEnd ? 'session-end' : 'proxy';
+const forwarded = process.argv.slice(sessionEnd ? 3 : 2);
 const child = cliPath
-  ? spawn(process.execPath, [cliPath, 'proxy', ...process.argv.slice(2)], { stdio: 'inherit', env })
-  : spawn('ours-mcp', ['proxy', ...process.argv.slice(2)], { stdio: 'inherit', env });
+  ? spawn(process.execPath, [cliPath, command, ...forwarded], { stdio: 'inherit', env })
+  : spawn('ours-mcp', [command, ...forwarded], { stdio: 'inherit', env });
 child.on('error', (error) => { process.stderr.write(`ours: cannot launch @ours.network/mcp proxy: ${error.message}\n`); process.exit(1); });
 child.on('exit', (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 0); });
-

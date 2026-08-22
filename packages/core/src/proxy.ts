@@ -75,7 +75,12 @@ const VERSION = typeof __OURS_VERSION__ !== 'undefined' ? __OURS_VERSION__ : '0.
 
 // Tools whose successful call binds an identity to this session. We watch for
 // them so we can re-assert the binding after an upstream reconnect.
-const BIND_TOOLS = new Set(['choose_identity', 'create_identity', 'create_root_identity']);
+const BIND_TOOLS = new Set([
+  'choose_identity',
+  'create_identity',
+  'create_root_identity',
+  'create_temporary_identity',
+]);
 
 // save_file (issue #34) is the ONE tool the proxy does not forward transparently.
 // The daemon runs as its owner and cannot write a cross-user recipient's chosen
@@ -231,12 +236,11 @@ const AUTORESTORE_OPT_OUT = ['1', 'true', 'yes', 'on'].includes(
 // existing PLAIN (force:false) choose_identity, so it can never evict a live
 // session. See that function.
 //
-// NOT COVERED, and cannot be: a temporary identity created by
-// create_temporary_identity. This seeds an EXISTING identity by name, and a
-// temporary one does not exist until the session that owns it creates it on
-// first boot — and it is deleted when that session ends, so there is never a
-// name here for a later boot to bind. Those roles still bind by calling the
-// creation tool themselves.
+// Temporary roles are covered too: a successful create_temporary_identity is
+// observed like every other bind and persists this same-session restore hint.
+// Idle connector recycling may therefore re-attach it, while SessionEnd removes
+// both the role (via lease DELETE) and this hint. A different session still
+// cannot adopt it because the daemon enforces the owner-token hash.
 const BIND_IDENTITY_SEED = (process.env.OURS_BIND_IDENTITY ?? '').trim() || null;
 
 export async function runProxy(opts: ProxyOptions): Promise<void> {

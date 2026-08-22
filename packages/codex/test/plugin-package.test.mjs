@@ -31,6 +31,7 @@ test('npm artifact contains a valid native Codex plugin and all entry points', (
   }
   assert.ok(mcp.mcpServers.ours.env_vars.includes('OURS_PORT'));
   assert.ok(mcp.mcpServers.ours.env_vars.includes('OURS_API_TOKEN'));
+  assert.ok(mcp.mcpServers.ours.env_vars.includes('OURS_CLIENT_PID'));
   assert.deepEqual(mcp.mcpServers.ours_monitor.env_vars.sort(), ['OURS_API_TOKEN', 'OURS_CODEX_CAPABILITY', 'OURS_CODEX_CONTROL_SOCKET', 'OURS_CONFIG', 'OURS_PORT', 'OURS_STATE_DIR']);
   assert.equal(mcp.mcpServers.ours_monitor.tool_timeout_sec, 86400);
 });
