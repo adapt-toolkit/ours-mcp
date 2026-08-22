@@ -20,6 +20,32 @@ Re-run (or update / add a skipped piece) any time with just `ours-install`.
 npx @ours.network/install
 ```
 
+### Stable and nightly channels
+
+The installer package selects the channel for the stack it installs. No extra environment
+variable is required:
+
+```sh
+# Stable (the default)
+npm i -g @ours.network/install@latest && ours-install
+
+# Nightly
+npm i -g @ours.network/install@nightly && ours-install
+```
+
+A clean `X.Y.Z` installer resolves the `latest` dist-tags; an
+`X.Y.Z-nightly.N` installer resolves the `nightly` dist-tags. Before changing the machine,
+`ours-install` resolves `@ours.network/mcp`, `@ours.network/claude-code`, and
+`@ours.network/codex`, validates that npm returned exact versions from the selected channel,
+and requires all three to be the same lockstep version. It then installs MCP and the Codex
+launcher by exact version and generates exact-version local marketplace sources for Claude Code
+and Codex under `~/.ours/install/marketplaces/`. A moving `latest` or `nightly` selector is never
+left in a plugin installation source after resolution.
+
+Existing automation may still set `OURS_CHANNEL=latest|nightly` (or the legacy
+`OURS_INSTALL_CHANNEL`) explicitly; that override continues to win. With no override, stable is
+still the safe default for a local checkout or an unreadable package version.
+
 **Fallback for machines without npm** (least secure — pipes a script straight into your shell):
 
 ```sh
@@ -49,7 +75,8 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
    `3051`, reserved for the Telegram connector). Applied once, then the stack is built with it.
 3. **Four consent gates**, each paced with a clean `✓ … No problems.` line + an explicit
    **Continue?** — never a start-twice-then-ask, never a silent failure:
-   - **1/4 ours core (the daemon)** — write config → optional voice setup → install/start ONCE
+   - **1/4 ours core (the daemon)** — install the exact version resolved for this installer's
+     stable/nightly channel → write config → optional voice setup → start ONCE
      → boot service. On a re-run it reuses the running config (no re-ask) and only updates when
      you say yes. Complete voice setup is kept without prompting. Missing/incomplete setup is
      offered before the first start or pending update restart, then delegated to the canonical
@@ -57,7 +84,8 @@ dependency on the things it installs): an ASCII banner, tasteful colour (degrade
      one restart/readiness transaction; declining or already-ready setup preserves the normal
      core lifecycle. The secret is written atomically to mode-`0600` config; a failed daemon
      reload rolls back.
-   - **2/4 harness plugins** — the installer **drives the plugin CLIs itself**
+   - **2/4 harness plugins** — the installer **drives the plugin CLIs itself** using generated,
+     exact-version local marketplace sources
      (`claude plugin marketplace add …` + `claude plugin install ours@ours.network`;
      `codex plugin marketplace add …` + `codex plugin add ours@ours-codex-marketplace`). Choosing
      Codex also installs the `ours-codex` live launcher in the same step. Any failure / alias
@@ -96,6 +124,8 @@ is reported and left unchanged.
 | `OURS_INSTALL_DRY_RUN` | walk the flow without installing or changing anything |
 | `OURS_NPM` | npm binary to use (default `npm`) |
 | `OURS_CONFIG` | daemon config file location (default `~/.ours/config.json`) |
+| `OURS_CHANNEL` | optional explicit `latest` or `nightly` override; otherwise follows the installer package version |
+| `OURS_INSTALL_CHANNEL` | legacy alias for `OURS_CHANNEL` |
 
 ## Uninstall
 
@@ -135,11 +165,9 @@ OURS_UNINSTALL_DAEMON=yes \
 
 ## Notes
 
-- This package is **not published to npm** (`private: true`); it ships as the hosted
-  `install.sh` bootstrap plus the `install.mjs` Node installer (and its `lib/`), and exposes the
-  `ours-install` bin. The pieces it installs — the daemon (`@ours.network/mcp`), the harness
-  plugins via each marketplace, `@ours.network/fleet`, and `@ours.network/tg-connector` — are the
-  published components.
+- This package is published to npm as `@ours.network/install` and exposes the `ours-install` bin.
+  It remains self-contained (Node built-ins only). The hosted `install.sh` is the stable/latest
+  bootstrap; install `@ours.network/install@nightly` directly for the nightly channel.
 - **Idempotent + safe to re-run.** A re-run adds a skipped piece, re-points the plugins, or (only
   when you say yes) updates a component; an already-current daemon is left untouched, its running
   port and complete voice setup are reused everywhere. Bot tokens and fleet roles remain in the

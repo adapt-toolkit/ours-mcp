@@ -43,10 +43,17 @@ const STABLE_ONLY_PKGS = new Set(['fleet']);
 
 // Normalize a raw channel selection to 'latest' | 'nightly'. Anything unrecognized
 // (incl. undefined/'') falls back to the safe default 'latest' — never guesses a tag.
-export function resolveChannel(raw) {
+export function resolveChannel(raw, selfVersion = '') {
   const v = String(raw || '').trim().toLowerCase();
   if (v === 'nightly' || v === 'prerelease' || v === 'next') return 'nightly';
-  return DEFAULT_CHANNEL; // 'latest' and everything else
+  if (v === 'latest' || v === 'stable') return DEFAULT_CHANNEL;
+  if (v) return DEFAULT_CHANNEL; // unknown explicit values never inherit a prerelease
+  return isNightlyVersion(selfVersion) ? 'nightly' : DEFAULT_CHANNEL;
+}
+
+// Nightly packages are stamped by the release workflow as X.Y.Z-nightly.N.
+export function isNightlyVersion(version) {
+  return /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-nightly\.(?:0|[1-9]\d*)$/.test(String(version || ''));
 }
 
 // The npm dist-tag to install for one package key under a channel. fleet is ALWAYS
@@ -194,10 +201,10 @@ export function redactSensitive(text, secrets = []) {
     .replace(/((?:api[_ -]?key|token)\s*[=:]\s*)\S+/gi, '$1[redacted]');
 }
 
-// parseVersion: pull the first x.y.z out of a version string (e.g. `ours-mcp v0.9.9`), matching
-// install.sh's `grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1`. Returns '' when none is present.
+// parseVersion: pull the first stable or release-workflow nightly version from a CLI line.
+// Keeping -nightly.N makes a stable↔nightly channel switch visible to restart detection.
 export function parseVersion(text) {
-  const m = String(text || '').match(/[0-9]+\.[0-9]+\.[0-9]+/);
+  const m = String(text || '').match(/[0-9]+\.[0-9]+\.[0-9]+(?:-nightly\.[0-9]+)?/);
   return m ? m[0] : '';
 }
 
