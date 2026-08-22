@@ -3158,6 +3158,11 @@ async function bootWrapper(): Promise<void> {
       log(`re-delegation on upgrade DEGRADED: root "${rootName}" is not among the restored identities — role certs not refreshed this boot`);
     }
     const refreshedRoles: Identity[] = [];
+    // A persisted role's previous cert can still satisfy hasHierarchyIdentity()
+    // after this boot's relationship refresh fails. Remember that failure as an
+    // explicit activation veto: stale relationship state is migration input, not
+    // proof that the restored packet may cross the current boot barrier.
+    const refreshFailedRoles = new Set<Identity>();
     if (hostRoot) {
       for (const id of identities.values()) {
         if (id.name === hostRoot.name) continue; // the root itself is not delegated
@@ -3170,9 +3175,19 @@ async function bootWrapper(): Promise<void> {
           continue;
         }
         try {
+          // Packed-artifact regression seam: fail only this current-boot role
+          // relationship refresh, after restore and hierarchy inspection have
+          // succeeded, without perturbing import, root restore, or activation.
+          if (process.env.OURS_TEST_FORCE_REDELEGATION_ERROR_FOR === id.name) {
+            throw new Error(
+              `forced role relationship refresh error for "${id.name}" ` +
+                '(OURS_TEST_FORCE_REDELEGATION_ERROR_FOR)',
+            );
+          }
           await delegateRole(hostRoot, id);
           refreshedRoles.push(id);
         } catch (err) {
+          refreshFailedRoles.add(id);
           // Durable, fail-loud signal (not just the daemon log). Per-boot retry re-attempts
           // next start; the redelegation_failed notify surfaces a persistent strand.
           appendNotifyLog(id, { event: 'redelegation_failed', error: String(err).slice(0, 300) });
@@ -3185,7 +3200,9 @@ async function bootWrapper(): Promise<void> {
     // have no hierarchy remain private boot-quarantine input; no expose call, CID,
     // lease, notification snapshot, or capability advertisement escapes for them.
     for (const id of identities.values()) {
-      if (hasHierarchyIdentity(id)) {
+      if (refreshFailedRoles.has(id)) {
+        log(`[${id.name}] remains QUARANTINED (current-boot role relationship refresh failed; not exposed or bindable)`);
+      } else if (hasHierarchyIdentity(id)) {
         await activateRestoredIdentity(id);
       } else if (id.bootQuarantined) {
         log(`[${id.name}] remains QUARANTINED (no Human/root hierarchy; not exposed or bindable)`);

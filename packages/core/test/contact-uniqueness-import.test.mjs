@@ -63,11 +63,11 @@ writeFileSync(join(dir, 'contact-book', 'book.json'), JSON.stringify({
   },
 }));
 
-async function withDaemon(fn) {
+async function withDaemon(fn, extraEnv = {}) {
   const PORT = await freePort();
   // Never a real broker — this test only cares about local restore-on-boot behavior.
   const daemon = spawn('node', [CLI, 'serve'], {
-    env: { ...process.env, OURS_TRANSPORT: 'http', OURS_PORT: String(PORT), OURS_STATE_DIR: dir, OURS_BROKER_URL: 'wss://invalid.local/none', OURS_API_VISIBILITY: 'open' },
+    env: { ...process.env, OURS_TRANSPORT: 'http', OURS_PORT: String(PORT), OURS_STATE_DIR: dir, OURS_BROKER_URL: 'wss://invalid.local/none', OURS_API_VISIBILITY: 'open', ...extraEnv },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
@@ -176,6 +176,35 @@ try {
     ok(new RegExp(`• TwinLive — ${renamed}`).test(book2) && !/renamed on import/.test(book2),
       'settle: the mark clears once the operator renames the contact');
   });
+
+  // ---- boot 3: a role relationship refresh error stays fail-closed -------
+  await withDaemon(async (call, daemonStderr, port) => {
+    const boot3 = daemonStderr();
+    ok(/\[BookKeeper\] boot re-delegation \(upgrade cert refresh\) failed:.*forced role relationship refresh error/.test(boot3),
+      'boot 3 packed artifact: forces exactly the persisted role relationship refresh error');
+    ok(/\[FixtureHuman\] EXPOSED \(routing \+ broker registration\)/.test(boot3),
+      'boot 3 packed artifact: the Human/root still activates, isolating the forced failure to the role refresh');
+    ok(!/\[BookKeeper\] EXPOSED \(routing \+ broker registration\)/.test(boot3) &&
+        /\[BookKeeper\] remains QUARANTINED \(current-boot role relationship refresh failed/.test(boot3),
+      'boot 3 packed artifact: the previous relationship record cannot reactivate the failed role');
+
+    const managed = await fetch(`http://127.0.0.1:${port}/identities`).then((r) => r.json());
+    const row = managed.identities.find((i) => i.name === 'BookKeeper');
+    ok(JSON.stringify(row) === JSON.stringify({ name: 'BookKeeper', status: 'quarantined' }),
+      'refresh-failed role remains management-visible only as the name-level quarantined row');
+    const bind = await call('choose_identity', { name: 'BookKeeper', force: true });
+    ok(bind.isError && /quarantined/.test(bind.text),
+      'refresh-failed role is not client-bindable through the packed MCP artifact');
+    const localBook = (await call('list_local_contact_book')).text;
+    ok(localBook === 'The local contact book is empty.',
+      'refresh-failed role is absent from local discovery despite its persisted publication record');
+    const unread = await fetch(`http://127.0.0.1:${port}/unread`).then((r) => r.json());
+    ok(!unread.identities.some((i) => i.name === 'BookKeeper'),
+      'refresh-failed role has no unread summary surface');
+    const notifications = await fetch(`http://127.0.0.1:${port}/identities/BookKeeper/notifications?since=tip`);
+    ok(notifications.status === 404,
+      'refresh-failed role has no notification stream');
+  }, { OURS_TEST_FORCE_REDELEGATION_ERROR_FOR: 'BookKeeper' });
 } catch (err) {
   fail += 1;
   console.error('  ✗ SUITE ERROR:', err);
