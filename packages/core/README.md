@@ -17,10 +17,12 @@ exposes the messaging tools — each a thin wrapper over one MUFL user transacti
 - `list_contacts`
 - `remove_contact` — contacts-layer forget + one best-effort authenticated
   "remove me" notice to the peer (fire-and-forget; remote removal NOT guaranteed)
-- `create_temporary_identity` / `close_temporary_identity` — session-scoped
-  identity owned by exactly one session lease: on close/session end, contacts get
-  one best-effort remove-me notice, then ALL local state is deleted (stale ones —
-  owner process dead — are swept automatically; permanent identities never are)
+- `create_temporary_identity` / `close_temporary_identity` — session-scoped,
+  ephemeral role delegated under the existing Human/root and owned by exactly one
+  session lease. Normal Codex/Claude SessionEnd waits for best-effort remove-me
+  notices and complete local deletion. Abrupt process death is the only stale path;
+  the daemon reclaims it on a bounded five-second detection interval (configurable
+  for tests with `OURS_SESSION_REAPER_INTERVAL_MS`). Permanent identities never sweep.
 - `send_message` — end-to-end encrypted; optional `reply_to_wire_id` (+ `reply_to_sentence`) to reply to a specific message
 - `get_messages` — return unread messages (bodies, each with its `wire_id` + any `reply_to`) + mark read; delivered exactly once
 - `mark_processed` / `defer_messages` — remove handled messages, or re-queue read ones for another session
@@ -81,6 +83,17 @@ cannot be run per session. Each session instead runs a thin `ours-mcp proxy`
 (stdio ⇄ the daemon's HTTP endpoint), which auto-starts the daemon if it is down.
 Platform plugins ship only the proxy invocation; they never own or restart the
 daemon.
+
+Temporary identities require an existing Human/root and are delegated before the
+create call succeeds. Older unassociated records are migration input, not a runtime
+identity kind: a host with a Human/root delegates them during boot; otherwise they
+remain quarantined and cannot be bound or advertised until the Human/root is created.
+For name-level management compatibility, `/identities` reports such a record as
+`{ name, status: "quarantined" }`; it deliberately has no identity `kind`, container
+ID, routing metadata, or lease surface.
+The `ours-mcp session-end` hook seam opens a short transport with the same lease token
+as the session and sends MCP DELETE. The daemon awaits every temporary role owned by
+that token—including roles switched away from—before acknowledging normal close.
 
 `ours-mcp start` and `ours-mcp restart` do not treat an open socket as readiness.
 They wait for an authenticated response from the daemon's normal control

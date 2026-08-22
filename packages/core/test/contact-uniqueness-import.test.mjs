@@ -72,6 +72,11 @@ async function withDaemon(fn) {
 try {
   // ---- boot 1: the sweep heals the imported book -------------------------
   await withDaemon(async (call) => {
+    // This pre-hierarchy fixture has no Human/root marker or delegation cert.
+    // Legacy unassociated state is deliberately fail-closed now, so exercise
+    // the supported explicit migration path before using the restored role.
+    const human = await call('create_root_identity', { name: 'FixtureHuman', expose_local: false });
+    if (human.isError) throw new Error(`could not establish fixture Human/root: ${human.text}`);
     await call('choose_identity', { name: 'BookKeeper', force: true });
     const book = (await call('list_contacts')).text;
     ok(new RegExp(`• Twin — ${keeper}`).test(book), 'boot 1: the LOWEST container id (byte order) keeps the bare "Twin"');

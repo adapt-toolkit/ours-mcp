@@ -135,6 +135,13 @@ const TRANSPORT = process.env.OURS_TRANSPORT ?? 'http';
 const PORT = CONFIG.port;
 const GC_INTERVAL_MS = CONFIG.gcIntervalMs;
 const API_VISIBILITY = CONFIG.apiVisibility;
+// Abrupt client death is the ONLY path allowed to leave a temporary identity
+// stale. Keep that recovery window small and explicit. Tests may lower it, but
+// production never accepts a value below 100ms (avoids accidental busy loops).
+const SESSION_REAPER_INTERVAL_MS = Math.max(
+  100,
+  Number(process.env.OURS_SESSION_REAPER_INTERVAL_MS || '') || 5_000,
+);
 const startupHeartbeatMs = Number(process.env.OURS_TEST_STARTUP_HEARTBEAT_MS || '') || undefined;
 const startupProgress: StartupProgressReporter | null =
   TRANSPORT === 'http'
@@ -275,7 +282,8 @@ type Pending = {
   timer: ReturnType<typeof setTimeout>;
 };
 
-// A TEMPORARY identity is owned by exactly one running session lease and has a
+// A TEMPORARY identity is an ephemeral delegated role owned by exactly one
+// running session lease and has a
 // session-scoped LOCAL lifetime: when the owning session ends (explicit close,
 // lease release, or its client pid dying), the identity sends each contact one
 // best-effort remove-me notice and is then deleted locally in full. The owner is
@@ -605,7 +613,7 @@ interface IdentityInfo {
   bio: string;
   persona: string;
   hasCert: boolean; // TRUE == this identity holds a root-signed delegation cert (a role)
-  roleId: string; // '' == no delegation cert (a root or a legacy flat identity)
+  roleId: string; // '' == no delegation cert (a root or legacy unassociated state)
   rootCid: string;
   rootName: string;
   monitoringEnabled: boolean;
@@ -624,6 +632,13 @@ function describeIdentity(id: Identity): IdentityInfo {
       monitoringEnabled: v.Reduce('monitoring_enabled').GetBoolean(),
     };
   });
+}
+
+// Public/runtime hierarchy membership. Legacy unassociated records may exist on
+// disk solely as migration input; they are never bindable or advertised.
+function isHierarchyIdentity(id: Identity): boolean {
+  if (id.name === rootName) return true;
+  try { return describeIdentity(id).hasCert; } catch { return false; }
 }
 
 // Sign a delegation cert on the root and store the verified chain (cert + root
@@ -675,9 +690,6 @@ async function establishRoot(id: Identity): Promise<{ adopted: string[]; failed:
   const failed: string[] = [];
   for (const other of identities.values()) {
     if (other.name === id.name) continue;
-    // A temporary identity is session-scoped and deliberately flat: adopting it
-    // as a role would outlive it into the root's cluster state.
-    if (other.temp) continue;
     try {
       await delegateRole(id, other);
       adopted.push(other.name);
@@ -690,14 +702,9 @@ async function establishRoot(id: Identity): Promise<{ adopted: string[]; failed:
   return { adopted, failed };
 }
 
-// TODO (single-root follow-up, separate minimal PR): proactively adopt any STRAY flat
-// identity at boot under the host root. Today the invariant self-heals on the next
-// create call (establishRoot adopts pre-existing identities when the root is first
-// created; a role is always delegated). The only residual gap is a host that already
-// has flat identities AND already has a root from before this enforcement — those flat
-// identities stay flat until re-created. A boot-time adopt would close it, but it is
-// another boot re-parenting mutation (same class as the role-cert re-delegation we just
-// reviewed), so it belongs in its own reviewed PR rather than bloating this one.
+// Legacy unassociated identities are reconciled during boot before the HTTP
+// surface starts. When a Human/root exists they are explicitly delegated under
+// it; without one they remain fail-closed and cannot be bound or advertised.
 
 // ---- core 2.2 cluster enrollment (root side) --------------------------------
 // One root↔CP bind enrolls the whole cluster. The root mints its root-signed CP
@@ -1143,7 +1150,8 @@ function closeTemporaryIdentity(id: Identity, cause: string): Promise<TempCloseR
 // Reaper half for temporary identities: an owner whose client pid is gone is a
 // STALE lease — reclaim via the normal teardown (best-effort notices included).
 // Permanent identities have no temp marker and are structurally unsweepable.
-function sweepStaleTempIdentities(): void {
+async function sweepStaleTempIdentities(): Promise<number> {
+  const closes: Array<Promise<TempCloseResult>> = [];
   for (const id of [...identities.values()]) {
     const t = id.temp;
     if (!t || t.closing) continue;
@@ -1153,10 +1161,13 @@ function sweepStaleTempIdentities(): void {
     // the lease pid), keep it — sweeping under a live holder is the one wrong move.
     const lease = leases.get(id.name);
     if (lease && pidAlive(lease.pid)) continue;
-    void closeTemporaryIdentity(id, `stale lease — owner pid ${t.owner.pid} is dead`).catch((err) =>
-      log(`[${id.name}] stale-temp reclaim failed:`, String(err)),
-    );
+    closes.push(closeTemporaryIdentity(id, `stale lease — owner pid ${t.owner.pid} is dead`));
   }
+  const results = await Promise.allSettled(closes);
+  for (const result of results) {
+    if (result.status === 'rejected') log('stale-temp reclaim failed:', String(result.reason));
+  }
+  return results.filter((result) => result.status === 'fulfilled').length;
 }
 
 // Boot-time orphan sweep: a STATE_DIR entry carrying a temp marker that did NOT
@@ -3022,6 +3033,34 @@ async function bootWrapper(): Promise<void> {
     clearRootMarker();
   }
   if (rootName) log(`root identity: ${rootName}`);
+  // Crash recovery happens before the HTTP surface starts. A dead owner's
+  // temporary role may exist briefly on disk after SIGKILL, but it is fully
+  // closed (including best-effort contact notices) before this boot is ready.
+  sweepOrphanTempDirs();
+  await sweepStaleTempIdentities();
+
+  // Compatibility migration: older releases could persist unassociated
+  // identities even when a Human/root existed. They are legacy INPUT, never a
+  // public/runtime identity kind. Explicitly delegate them now, and fail the
+  // daemon boot closed if any migration cannot be completed safely.
+  const migrationRoot = rootName ? identities.get(rootName) : undefined;
+  if (migrationRoot) {
+    for (const legacy of [...identities.values()]) {
+      if (legacy.name === migrationRoot.name) continue;
+      const info = describeIdentity(legacy);
+      if (info.hasCert) continue;
+      try {
+        await delegateRole(migrationRoot, legacy);
+        appendNotifyLog(legacy, { event: 'legacy_identity_delegated', root: migrationRoot.name });
+        log(`[${legacy.name}] legacy unassociated state safely migrated under Human/root "${migrationRoot.name}"`);
+      } catch (err) {
+        throw new Error(
+          `legacy identity "${legacy.name}" could not be safely delegated under Human/root ` +
+            `"${migrationRoot.name}"; refusing to start with an unassociated runtime identity: ${String(err)}`,
+        );
+      }
+    }
+  }
   // Boot/upgrade RE-DELEGATION (migration bootstrap for ROLE identities). A role's
   // delegation cert commits to a hash of the exact AD it was signed against. On a
   // version upgrade the role's live AD gains $e2e_bundle, so a stable-era cert's
@@ -3038,8 +3077,8 @@ async function bootWrapper(): Promise<void> {
   //   (a) already HOLDS a delegation cert ($has_cert), AND
   //   (b) whose CURRENT delegation root is cryptographically THIS host root
   //       (describeIdentity(id).rootCid === hostRoot.cid).
-  // (a) excludes flat identities (created with no root, or adopted with
-  // adopt_existing=false) and roots — turning a flat identity into a role would
+  // (a) excludes legacy unassociated identities (created with no root, or
+  // adopted with adopt_existing=false) and roots — turning one into a role would
   // silently re-parent it and change the authority a peer observes, overriding the
   // user's opt-out. (b) excludes a role delegated by a DIFFERENT root (imported /
   // shared / sub-root): re-signing it under OUR root would overwrite a valid
@@ -3068,7 +3107,7 @@ async function bootWrapper(): Promise<void> {
         if (id.name === hostRoot.name) continue; // the root itself is not delegated
         let info: IdentityInfo | undefined;
         try { info = describeIdentity(id); } catch { info = undefined; }
-        if (!info || !info.hasCert) continue; // flat identity / root — leave untouched
+        if (!info || !info.hasCert) continue; // legacy unassociated state / root — leave untouched
         if (info.rootCid !== hostRoot.cid) {
           // A role under a foreign root (import/shared/sub-root). Do NOT re-parent it.
           log(`[${id.name}] re-delegation skipped: delegated by a different root (${info.rootCid.slice(0, 12)}…), not this host root — left as-is`);
@@ -3116,13 +3155,8 @@ async function bootWrapper(): Promise<void> {
   }
   // Replace any stale snapshot from a previous server run: nothing is bound yet.
   persistBindings();
-  // Temporary-identity boot reclaim, AFTER the restore loop so a live packet can
-  // send its best-effort remove-me notices: (1) dirs whose provisioning/restore
-  // never produced a live identity, (2) restored temp identities whose owning
-  // client pid did not survive. An owner still alive keeps its identity across
-  // the daemon restart and re-attaches via choose_identity.
-  sweepOrphanTempDirs();
-  sweepStaleTempIdentities();
+  // Temporary recovery and legacy hierarchy migration ran above, before any
+  // boot reconciliation that can advertise identities to external consumers.
 }
 
 // ----- binding resolution -----------------------------------------------------
@@ -3625,7 +3659,9 @@ function createMcpServer(getSessionId: () => string): McpServer {
 
   server.tool(
     'create_temporary_identity',
-    'Create a TEMPORARY identity owned by this session and bind it. Temporary ' +
+    'Create a TEMPORARY delegated role owned by this session and bind it. A host ' +
+      'Human/root identity must already exist; temporary identities are never ' +
+      'unassociated. Temporary ' +
       'means session-scoped LOCAL lifetime: when this session ends (explicit ' +
       'close_temporary_identity, releasing the connection, or the client process ' +
       'dying), each contact is sent one best-effort "remove me from your contacts" ' +
@@ -3633,8 +3669,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
       'is deleted; the identity disappears from listings. The remove-me notice is ' +
       'fire-and-forget: remote contact deletion is NOT guaranteed (an offline or ' +
       'pre-0.13 peer keeps its entry). Ownership is exclusive: no other session can ' +
-      'bind or delete it while this session lives. The identity is flat (never ' +
-      'delegated under the host root) and, unlike create_identity, NOT published to ' +
+      'bind or delete it while this session lives. Unlike create_identity, it is NOT published to ' +
       'the local contact book unless expose_local=true. Omit name for a ' +
       'collision-resistant random one.',
     {
@@ -3653,6 +3688,15 @@ function createMcpServer(getSessionId: () => string): McpServer {
           'create_temporary_identity failed: this client is not connected through the ours ' +
             'connector (no lease token / client pid headers), so there is no session lease to own ' +
             'the identity. Launch ours via the connector (`ours-mcp proxy`).',
+          true,
+        );
+      }
+      const root = rootName ? identities.get(rootName) : undefined;
+      if (!root) {
+        return textResult(
+          'create_temporary_identity failed: a Human/root identity must exist first. ' +
+            'Create the Human identity with create_root_identity, then retry; refusing ' +
+            'to create an unassociated temporary identity.',
           true,
         );
       }
@@ -3675,17 +3719,30 @@ function createMcpServer(getSessionId: () => string): McpServer {
       }
       try {
         const id = await provisionIdentity(chosen, {
-          exposeLocal: expose_local,
+          // A temporary role is not published before its delegation exists.
+          // This prevents even an opt-in local-book entry from briefly exposing
+          // an unassociated identity while create_temporary_identity is in flight.
+          exposeLocal: false,
           localAutoAccept: local_auto_accept,
           temp: { tokenHash: hashLeaseToken(token), pid },
         });
-        if (bio) await withScopeAsync(async (lt) => { await mutatingTx(id, '::a2a_messaging::set_my_bio', { bio }, lt); });
+        try {
+          if (bio) await withScopeAsync(async (lt) => { await mutatingTx(id, '::a2a_messaging::set_my_bio', { bio }, lt); });
+          // The delegation is part of creation, not an eventual reconciliation:
+          // success is returned only after the role carries the Human/root chain.
+          await delegateRole(root, id);
+          if (expose_local) await publishToBook(id);
+        } catch (err) {
+          await closeTemporaryIdentity(id, 'creation rollback after delegation failure');
+          throw err;
+        }
         bindSession(sid, chosen);
         const exposure = expose_local
           ? ` Published to the local contact book${local_auto_accept ? '' : ' (introductions require approval)'}.`
           : '';
         return textResult(
-          `Created TEMPORARY identity "${chosen}" (${id.cid}) and bound it to this session ` +
+          `Created TEMPORARY role "${chosen}" (${id.cid}), delegated under Human/root ` +
+            `"${root.name}", and bound it to this session ` +
             `(owner: this session's lease, client pid ${pid}).${exposure}\n\n` +
             'Lifetime: session-scoped and local. Close it explicitly with close_temporary_identity ' +
             'when done; if the session ends or dies first, the daemon reclaims it automatically. ' +
@@ -3891,6 +3948,14 @@ function createMcpServer(getSessionId: () => string): McpServer {
       // Temporary identities are owned by exactly one session lease — bind/use
       // FAILS CLOSED on ownership mismatch, and force never overrides a live owner.
       const target = identities.get(name)!;
+      if (!isHierarchyIdentity(target)) {
+        return textResult(
+          `choose_identity failed: "${name}" is legacy unassociated identity state and is ` +
+            'quarantined until a Human/root identity safely delegates it. Create the Human/root ' +
+            'with create_root_identity; refusing to expose an unassociated runtime identity.',
+          true,
+        );
+      }
       if (target.temp) {
         if (target.temp.closing) {
           return textResult(`choose_identity failed: temporary identity "${name}" is closing — its state is being deleted.`, true);
@@ -3962,7 +4027,7 @@ function createMcpServer(getSessionId: () => string): McpServer {
     {},
     async () => {
       if (identities.size === 0) {
-        return textResult('No identities yet. Create a root with create_root_identity (or a flat identity with create_identity).');
+        return textResult('No identities yet. Create the Human/root identity with create_root_identity.');
       }
       const sid = getSessionId();
       const myToken = sessionHeaders.get(sid)?.token;
@@ -3996,13 +4061,13 @@ function createMcpServer(getSessionId: () => string): McpServer {
         }
         for (const id of identities.values()) {
           if (id.name === root.name || describeIdentity(id).roleId !== '') continue;
-          lines.push(`• ${id.name} — ${id.cid} (flat, no delegation)${tempTag(id)}${sessionTag(id.name)}`);
+          lines.push(`! ${id.name} — legacy unassociated state (QUARANTINED pending safe Human/root delegation)`);
         }
       } else {
         for (const id of identities.values()) {
-          lines.push(`• ${id.name} — ${id.cid}${tempTag(id)}${sessionTag(id.name)}`);
+          lines.push(`! ${id.name} — legacy unassociated state (QUARANTINED; not bindable or advertised)`);
         }
-        lines.push('(no root identity yet — create_root_identity establishes the hierarchy)');
+        lines.push('(no Human/root identity yet — create_root_identity establishes the hierarchy and safely migrates these records)');
       }
       return textResult(`Identities (${identities.size}):\n${lines.join('\n')}`);
     },
@@ -5233,9 +5298,10 @@ async function main() {
   };
   const sessionReaper = setInterval(() => {
     reapDeadSessions();
-    sweepStaleTempIdentities();
-  }, 60_000);
+    void sweepStaleTempIdentities();
+  }, SESSION_REAPER_INTERVAL_MS);
   sessionReaper.unref?.();
+  log(`session/temp crash reaper armed (maximum idle detection interval ${SESSION_REAPER_INTERVAL_MS}ms)`);
 
   // ---- undeliverable-response detection (diagnostics only) --------------------
   // When a POST SSE stream is gone, the SDK skips the write SILENTLY
@@ -5340,10 +5406,20 @@ async function main() {
       if (!requireAuth(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        identities: [...identities.values()].map((i) => ({
-          name: i.name,
-          ...(i.temp ? { temporary: true, stale: !pidAlive(i.temp.owner.pid) } : {}),
-        })),
+        identities: [...identities.values()].flatMap((i): Array<Record<string, unknown>> => {
+          const info = describeIdentity(i);
+          // Legacy unassociated records are quarantined input, never a public
+          // identity kind. Preserve name-level compatibility for management
+          // clients while making the fail-closed state explicit; there is no
+          // bindable/routable "flat" kind.
+          if (!isHierarchyIdentity(i)) return [{ name: i.name, status: 'quarantined' }];
+          return [{
+            name: i.name,
+            kind: i.name === rootName ? 'human' : 'role',
+            ...(i.name === rootName ? {} : { root: info.rootName }),
+            ...(i.temp ? { temporary: true, stale: !pidAlive(i.temp.owner.pid) } : {}),
+          }];
+        }),
       }));
       return;
     }
@@ -5494,25 +5570,39 @@ async function main() {
           res.end('Invalid or missing session ID');
           return;
         }
-        // Explicit release: free every lease this connector's token holds.
+        // Explicit release: deterministically close EVERY temporary identity
+        // owned by this connector token (including one it switched away from),
+        // then free its remaining leases. Await the best-effort contact notices
+        // and full local deletion before acknowledging normal session end.
         const token = sessionHeaders.get(sessionId)?.token ?? (req.headers['x-ours-lease-token'] as string | undefined);
         if (token) {
+          const ownerHash = hashLeaseToken(token);
+          const ownedTemps = [...identities.values()].filter(
+            (id) => id.temp?.owner.tokenHash === ownerHash,
+          );
+          const closed = await Promise.allSettled(
+            ownedTemps.map((id) => closeTemporaryIdentity(id, 'owning session ended normally')),
+          );
+          const closeFailures = closed.filter(
+            (result) => result.status === 'rejected' || result.value.deleteError !== null,
+          );
+          for (const result of closeFailures) {
+            if (result.status === 'rejected') {
+              log('normal-session temporary cleanup failed:', String(result.reason));
+            } else {
+              log('normal-session temporary cleanup left local state behind:', result.value.deleteError);
+            }
+          }
           for (const [n, l] of [...leases]) {
             if (l.token !== token) continue;
             leases.delete(n);
-            // Normal owning-session teardown: an explicit lease release closes the
-            // session's temporary identities (async; the DELETE response does not
-            // wait on the best-effort remove-me fan-out).
-            const rid = identities.get(n);
-            if (rid?.temp && rid.temp.owner.tokenHash === hashLeaseToken(token) && !rid.temp.closing) {
-              void closeTemporaryIdentity(rid, 'owning session released its lease').catch((err) =>
-                log(`[${n}] close on lease release failed:`, String(err)),
-              );
-            }
           }
           tombstones.delete(token);
           persistBindings();
-          log(`lease released by token …${token.slice(-6)}`);
+          log(
+            `lease released by token …${token.slice(-6)}; temporary cleanup ` +
+              `${ownedTemps.length - closeFailures.length}/${ownedTemps.length} completed`,
+          );
         }
         await transports[sessionId].handleRequest(req, res);
       } else {

@@ -2,7 +2,8 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { resolveDaemonProfile } from './profile.mjs';
@@ -28,6 +29,10 @@ export function launcherEnvironment(env, profile, control) {
     OURS_CODEX_CONTROL_SOCKET: control.socketPath,
     OURS_CODEX_CAPABILITY: control.capability,
     OURS_CODEX_LIVE: '1',
+    // One stable owner pid for the MCP proxy, hooks, and launcher's own cleanup
+    // call. The bin shim preserves an explicit value instead of replacing it
+    // with whichever child happened to spawn it.
+    OURS_CLIENT_PID: String(process.pid),
   };
   if (profile.token) out.OURS_API_TOKEN = profile.token;
   else delete out.OURS_API_TOKEN;
@@ -89,10 +94,24 @@ export async function runLauncher({
   let client;
   let control;
   let watcher;
+  const sessionEndShim = join(dirname(dirname(fileURLToPath(import.meta.url))), 'bin', 'proxy.mjs');
   const cleanup = async () => {
     watcher?.stop();
     await control?.close().catch(() => {});
     client?.close();
+    // The TUI exit is an authoritative normal session end. Run the same lease
+    // DELETE seam as the native hook while the shared daemon is still reachable;
+    // duplicate hook+launcher cleanup is intentionally idempotent.
+    const end = spawn(process.execPath, [sessionEndShim, 'session-end'], {
+      env: processEnvs.appServer,
+      stdio: 'ignore',
+    });
+    end.once('error', () => {});
+    await Promise.race([
+      waitExit(end),
+      new Promise((resolve) => setTimeout(resolve, 30_000)),
+    ]).catch(() => {});
+    if (end.exitCode == null) end.kill('SIGTERM');
     if (tui && tui.exitCode == null) tui.kill('SIGTERM');
     if (appServer && appServer.exitCode == null) appServer.kill('SIGTERM');
     await rm(runtimeDir, { recursive: true, force: true });

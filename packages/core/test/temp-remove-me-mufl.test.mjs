@@ -55,8 +55,8 @@ try {
   await A.call('create_identity', { name: 'Anchor' }); // permanent, published in the local book
   const B = await connector(URL_, 'tokTemp', process.pid);
   const cr = await B.call('create_temporary_identity', {});
-  const tmpName = (text(cr).match(/TEMPORARY identity "([^"]+)"/) || [])[1];
-  ok(!!tmpName, `temporary identity created (${tmpName})`);
+  const tmpName = (text(cr).match(/TEMPORARY role "([^"]+)"/) || [])[1];
+  ok(!!tmpName, `delegated temporary role created (${tmpName})`);
 
   // Connect over REAL packets: the temp identity messages the published anchor
   // (registrar introduction via the local book), which auto-accepts.
@@ -74,11 +74,10 @@ try {
   // temp side to have LEARNED the anchor's caps before it can emit the notice).
   await sleep(20_000);
 
-  // Close the temp identity: ONE best-effort remove-me per contact, then delete.
-  const closed = await B.call('close_temporary_identity', {});
-  ok(!isErr(closed) && /closed and all local state deleted/.test(text(closed)), 'temp identity closed');
-  ok(/1\/1 queued/.test(text(closed)), `remove-me notice queued for its 1 contact (got: ${text(closed).slice(0, 200)})`);
-  ok(!existsSync(join(dir, tmpName)), 'temp identity local state fully deleted');
+  // Normal session end (MCP DELETE) must await the SAME close path: one
+  // best-effort remove-me per contact, then complete local deletion.
+  await B.close();
+  ok(!existsSync(join(dir, tmpName)), 'normal session end fully deleted the temporary role before returning');
 
   // The bilateral half actually lands: the anchor drops the removed contact.
   const dropped = await until(async () =>
@@ -88,7 +87,7 @@ try {
   // Broker outage: closing still deletes locally (remove-me is best effort).
   const C = await connector(URL_, 'tokTemp2', process.pid);
   const cr2 = await C.call('create_temporary_identity', {});
-  const tmp2 = (text(cr2).match(/TEMPORARY identity "([^"]+)"/) || [])[1];
+  const tmp2 = (text(cr2).match(/TEMPORARY role "([^"]+)"/) || [])[1];
   await C.call('send_message', { contact: 'Anchor', text: 'second temp' });
   await until(async () => new RegExp(tmp2).test(text(await A.call('list_contacts', {}))), 60_000);
   if (BROKER_PID) { try { process.kill(BROKER_PID, 'SIGKILL'); } catch { /* already gone */ } }

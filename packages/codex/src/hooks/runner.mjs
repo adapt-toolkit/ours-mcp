@@ -52,7 +52,7 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
     if (event === 'SessionStart' && payload.source === 'compact') return { continue: true };
     if (event === 'PostToolUse') {
       if (!socket || !capability || payload.tool_response?.isError) return { continue: true };
-      if (!/(choose_identity|create_identity|create_root_identity)$/.test(payload.tool_name || '')) return { continue: true };
+      if (!/(choose_identity|create_identity|create_root_identity|create_temporary_identity)$/.test(payload.tool_name || '')) return { continue: true };
       const identity = payload.tool_input?.name;
       if (typeof identity !== 'string' || !identity.trim()) return { continue: true };
       await send(socket, capability, { command: 'binding_changed', identity });
@@ -83,4 +83,3 @@ async function main() {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) main();
-

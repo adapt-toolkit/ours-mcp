@@ -26,6 +26,7 @@ test('propagates exact selected profile and private control channel', () => {
   assert.equal(env.OURS_AUTOSTART, '0');
   assert.equal(env.OURS_CODEX_CONTROL_SOCKET, '/tmp/control.sock');
   assert.equal(env.OURS_CODEX_CAPABILITY, 'cap');
+  assert.equal(env.OURS_CLIENT_PID, String(process.pid));
 });
 
 test('passes the live control environment to both App Server and remote TUI', () => {

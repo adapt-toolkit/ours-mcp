@@ -779,6 +779,46 @@ async function cmdCreateRoot(argv: string[]): Promise<void> {
   }
 }
 
+// ─── session-end (harness hook seam) ─────────────────────────────────────────
+// Claude Code and Codex invoke this from their SessionEnd hooks. It opens one
+// short MCP transport using the EXACT lease token derivation of runProxy, then
+// sends Streamable HTTP DELETE via terminateSession(). The daemon awaits closure
+// of every temporary role owned by that token before acknowledging the DELETE.
+// Abrupt process death never runs this command and is handled by the bounded
+// daemon reaper instead.
+async function cmdSessionEnd(): Promise<void> {
+  if (!(await portOpen(PORT))) return; // daemon gone => no live local session state
+  const envPid = Number(process.env.OURS_CLIENT_PID);
+  const clientPid = Number.isInteger(envPid) && envPid > 1
+    ? envPid
+    : process.ppid > 1
+      ? process.ppid
+      : process.pid;
+  const claudeSessionId = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+  const leaseToken = claudeSessionId || `client:${clientPid}`;
+  const transport = new HttpClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), {
+    requestInit: {
+      headers: {
+        ...apiHeaders(),
+        'x-ours-lease-token': leaseToken,
+        'x-ours-client-pid': String(clientPid),
+      },
+    },
+  });
+  const client = new Client({ name: 'ours-session-end-hook', version: CLI_VERSION });
+  try {
+    await client.connect(transport);
+    await transport.terminateSession();
+  } finally {
+    try { await client.close(); } catch { /* hook cleanup is best effort after DELETE */ }
+    // A completed harness session must not be auto-restored later. The record is
+    // content-free, but removing it also prevents a stale bind attempt on reuse.
+    if (claudeSessionId && /^[A-Za-z0-9._-]{1,200}$/.test(claudeSessionId)) {
+      try { fs.rmSync(join(STATE_DIR, 'session-restore', `${claudeSessionId}.json`), { force: true }); } catch { /* best effort */ }
+    }
+  }
+}
+
 // ─── watch (Claude Code host seam: the wake source for `Monitor`) ────────────
 //
 // `ours-mcp watch [identity]` tails every identity's notifications.log and
@@ -1234,6 +1274,7 @@ function usage(): void {
   out('  serve     run in the foreground (used by start; handy for debugging)');
   out('  watch [identity]  stream one line per new inbound message (wake source for a Monitor)');
   out('  proxy     per-session stdio shim → daemon (stable binding; for the MCP client config)');
+  out('  session-end  internal harness hook: deterministically release this session lease');
   out('');
   out('  create-root "<name>"   create THE root human identity (one per host) via the running');
   out('                         daemon — quiet no-op if a root already exists (installer seam)');
@@ -1314,6 +1355,9 @@ async function main(): Promise<void> {
       break;
     case 'create-root':
       await cmdCreateRoot(process.argv.slice(3));
+      break;
+    case 'session-end':
+      await cmdSessionEnd();
       break;
     case 'define-local-identity-file':
       await cmdDefineLocalIdentityFile(process.argv.slice(3));
