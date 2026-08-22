@@ -48,8 +48,11 @@ async function withDaemon(fn) {
   // Never a real broker — this test only cares about local restore-on-boot behavior.
   const daemon = spawn('node', [CLI, 'serve'], {
     env: { ...process.env, OURS_TRANSPORT: 'http', OURS_PORT: String(PORT), OURS_STATE_DIR: dir, OURS_BROKER_URL: 'wss://invalid.local/none', OURS_API_VISIBILITY: 'open' },
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
   });
+  let stderr = '';
+  daemon.stderr.setEncoding('utf8');
+  daemon.stderr.on('data', (chunk) => { stderr += chunk; });
   try {
     for (let i = 0; i < 120; i++) { try { if ((await fetch(`http://127.0.0.1:${PORT}/version`)).ok) break; } catch {} await sleep(250); }
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), {
@@ -61,7 +64,7 @@ async function withDaemon(fn) {
       const r = await client.callTool({ name, arguments: args });
       return { text: txt(r), isError: !!r.isError };
     };
-    await fn(call);
+    await fn(call, () => stderr, PORT);
     try { await transport.terminateSession(); await client.close(); } catch {}
   } finally {
     daemon.kill('SIGTERM');
@@ -71,12 +74,37 @@ async function withDaemon(fn) {
 
 try {
   // ---- boot 1: the sweep heals the imported book -------------------------
-  await withDaemon(async (call) => {
+  await withDaemon(async (call, daemonStderr, port) => {
     // This pre-hierarchy fixture has no Human/root marker or delegation cert.
-    // Legacy unassociated state is deliberately fail-closed now, so exercise
-    // the supported explicit migration path before using the restored role.
+    // The PACKED production artifact must keep its packet unexposed while it
+    // reports the record quarantined. The blocked candidate logged EXPOSED here,
+    // then told the management surface the same packet was unbindable quarantine.
+    const beforeRoot = daemonStderr();
+    ok(/\[BookKeeper\] RESTORED IN QUARANTINE \(no routing\/broker registration\)/.test(beforeRoot),
+      'packed artifact: legacy packet remains in private restore quarantine before a Human/root exists');
+    ok(!/\[BookKeeper\] EXPOSED \(routing \+ broker registration\)/.test(beforeRoot),
+      'packed artifact: stderr never contradicts quarantine by exposing/registering the legacy flat packet');
+    const quarantined = await fetch(`http://127.0.0.1:${port}/identities`).then((r) => r.json());
+    const row = quarantined.identities.find((i) => i.name === 'BookKeeper');
+    ok(JSON.stringify(row) === JSON.stringify({ name: 'BookKeeper', status: 'quarantined' }),
+      'management API exposes only the name-level quarantined row (no kind/CID/routing/lease metadata)');
+    const unread = await fetch(`http://127.0.0.1:${port}/unread`).then((r) => r.json());
+    ok(!unread.identities.some((i) => i.name === 'BookKeeper'),
+      'quarantined legacy state has no unread/notification summary surface');
+    const notifications = await fetch(`http://127.0.0.1:${port}/identities/BookKeeper/notifications?since=tip`);
+    ok(notifications.status === 404, 'quarantined legacy state has no notification stream');
+
+    // Exercise the supported explicit migration path before using the restored role.
     const human = await call('create_root_identity', { name: 'FixtureHuman', expose_local: false });
     if (human.isError) throw new Error(`could not establish fixture Human/root: ${human.text}`);
+    const afterRoot = daemonStderr();
+    const delegatedAt = afterRoot.indexOf('[BookKeeper] delegated as a role under root "FixtureHuman"');
+    const exposedAt = afterRoot.indexOf('[BookKeeper] EXPOSED (routing + broker registration) — hierarchy reconciliation complete');
+    ok(delegatedAt >= 0 && exposedAt > delegatedAt,
+      'packed artifact: delegation is durably observed before the restored packet crosses the exposure barrier');
+    const migrated = await fetch(`http://127.0.0.1:${port}/identities`).then((r) => r.json());
+    ok(migrated.identities.some((i) => i.name === 'BookKeeper' && i.kind === 'role' && i.root === 'FixtureHuman'),
+      'management API exposes the restored record only after it is a delegated role');
     await call('choose_identity', { name: 'BookKeeper', force: true });
     const book = (await call('list_contacts')).text;
     ok(new RegExp(`• Twin — ${keeper}`).test(book), 'boot 1: the LOWEST container id (byte order) keeps the bare "Twin"');
@@ -91,7 +119,12 @@ try {
   });
 
   // ---- boot 2: repeated imports are STABLE -------------------------------
-  await withDaemon(async (call) => {
+  await withDaemon(async (call, daemonStderr) => {
+    const boot2 = daemonStderr();
+    const delegatedAt = boot2.indexOf('[BookKeeper] delegated as a role under root "FixtureHuman"');
+    const exposedAt = boot2.indexOf('[BookKeeper] EXPOSED (routing + broker registration) — hierarchy reconciliation complete');
+    ok(delegatedAt >= 0 && exposedAt > delegatedAt,
+      'boot 2 packed artifact: restored role refreshes its delegation before broker registration');
     await call('choose_identity', { name: 'BookKeeper', force: true });
     const book = (await call('list_contacts')).text;
     ok(new RegExp(`• Twin — ${keeper}`).test(book) && new RegExp(`• Twin 1 — ${renamed}`).test(book),

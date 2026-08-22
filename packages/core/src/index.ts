@@ -323,6 +323,10 @@ interface Identity {
   // name pattern, not any other heuristic — is what marks an identity permanent
   // and thus never swept.
   temp?: TempMeta;
+  // Restored packets stay in the host's private boot quarantine until their
+  // hierarchy has been reconciled. While set the packet is not exposed to the
+  // broker, cannot be bound, and must not appear on notification/agent surfaces.
+  bootQuarantined?: boolean;
 }
 
 let wrapper: AdaptWrapper;
@@ -634,11 +638,18 @@ function describeIdentity(id: Identity): IdentityInfo {
   });
 }
 
-// Public/runtime hierarchy membership. Legacy unassociated records may exist on
-// disk solely as migration input; they are never bindable or advertised.
-function isHierarchyIdentity(id: Identity): boolean {
+// Cryptographic hierarchy fact, independent of whether a restored packet has
+// crossed the boot exposure barrier yet.
+function hasHierarchyIdentity(id: Identity): boolean {
   if (id.name === rootName) return true;
   try { return describeIdentity(id).hasCert; } catch { return false; }
+}
+
+// Public/runtime hierarchy membership. Legacy unassociated records may exist on
+// disk solely as migration input; restored packets also remain non-public until
+// the boot reconciliation barrier explicitly activates them.
+function isHierarchyIdentity(id: Identity): boolean {
+  return id.bootQuarantined !== true && hasHierarchyIdentity(id);
 }
 
 // Sign a delegation cert on the root and store the verified chain (cert + root
@@ -692,6 +703,7 @@ async function establishRoot(id: Identity): Promise<{ adopted: string[]; failed:
     if (other.name === id.name) continue;
     try {
       await delegateRole(id, other);
+      await activateRestoredIdentity(other);
       adopted.push(other.name);
     } catch (err) {
       log(`failed to adopt "${other.name}" as a role under new root "${id.name}":`, String(err));
@@ -2128,6 +2140,10 @@ function unreadSummary(): { identities: Array<Record<string, unknown>> } {
   try { entries = fs.readdirSync(STATE_DIR, { withFileTypes: true }); } catch { return { identities: out }; }
   for (const entry of entries) {
     if (!entry.isDirectory() || validateName(entry.name) !== null) continue;
+    const id = identities.get(entry.name);
+    // Preserve the legacy file-level summary for names not currently loaded;
+    // suppress only a record we positively know is in boot quarantine.
+    if (id && !isHierarchyIdentity(id)) continue;
     let value: Record<string, unknown>;
     try { value = JSON.parse(fs.readFileSync(unreadPath(join(STATE_DIR, entry.name)), 'utf8')) as Record<string, unknown>; }
     catch { continue; }
@@ -2923,22 +2939,37 @@ async function restoreIdentity(name: string): Promise<Identity> {
       }
     }
   }
-  // Exposure + tracking happen ONLY here: every unknown-outcome or incoherent path
-  // above threw (fail-closed), so reaching this line means the import phase finished
-  // in a positively known, coherent state. Only now does the identity become
-  // client-bindable (ship-review major-1).
-  wrapper.expose_packet(id.cid);
+  // Import success is only the FIRST boot barrier. Keep the packet unrouted and
+  // explicitly marked private until bootWrapper has resolved the Human/root,
+  // migrated any legacy unassociated record, and refreshed existing role certs.
+  // Tracking here is host-private bookkeeping; resolveBound and every public
+  // hierarchy surface reject bootQuarantined identities.
+  id.bootQuarantined = true;
   identities.set(name, id);
-  log(`[${name}] EXPOSED (routing + broker registration) — import phase complete`);
-  // Eager restore: re-key degraded contacts + flush queues orphaned by a crash.
-  await contactRestoreSweep(id);
+  log(`[${name}] RESTORED IN QUARANTINE (no routing/broker registration) — import complete; awaiting hierarchy reconciliation`);
   // NOTE: capability reconciliation (capabilityReconcileSweep) is deliberately
   // NOT fired here. It must run AFTER the role-cert re-delegation pass in bootWrapper,
   // otherwise the push (and its retries) would ride a stale role cert and be rejected.
   // See the unified re-advertise pass after the re-delegation block.
-  // Make the SessionStart hook's offline view match the restored packet state.
-  refreshUnread(id);
   return id;
+}
+
+// Cross the restore exposure barrier exactly once. The hierarchy predicate is
+// checked immediately before expose_packet so a future caller cannot activate a
+// legacy flat record by accident. All work that can contact peers or publish
+// offline notification state begins only after this point.
+async function activateRestoredIdentity(id: Identity): Promise<void> {
+  if (id.bootQuarantined !== true) return;
+  if (!hasHierarchyIdentity(id)) {
+    throw new Error(
+      `refusing to expose restored identity "${id.name}" before Human/root hierarchy reconciliation`,
+    );
+  }
+  wrapper.expose_packet(id.cid);
+  id.bootQuarantined = false;
+  log(`[${id.name}] EXPOSED (routing + broker registration) — hierarchy reconciliation complete`);
+  await contactRestoreSweep(id);
+  refreshUnread(id);
 }
 
 // ----- node bootstrap ---------------------------------------------------------
@@ -3124,8 +3155,20 @@ async function bootWrapper(): Promise<void> {
         }
       }
     }
-    // BARRIER: only now, with every role cert refreshed, do the boot/upgrade
-    // re-advertise. Firing it here (not per-identity in restoreIdentity) removes the
+    // BARRIER: only now, with legacy state migrated and every existing role cert
+    // refreshed, may a restored packet register on the broker. Records that still
+    // have no hierarchy remain private boot-quarantine input; no expose call, CID,
+    // lease, notification snapshot, or capability advertisement escapes for them.
+    for (const id of identities.values()) {
+      if (hasHierarchyIdentity(id)) {
+        await activateRestoredIdentity(id);
+      } else if (id.bootQuarantined) {
+        log(`[${id.name}] remains QUARANTINED (no Human/root hierarchy; not exposed or bindable)`);
+      }
+    }
+
+    // Only after that exposure barrier do the boot/upgrade re-advertise. Firing
+    // it here (not per-identity in restoreIdentity) removes the
     // async race where a retry timer would ride a stale cert. The push is delivered
     // only while the peer is online, and a mutual upgrade reconnects each side at a
     // different time, so fire once now and RE-fire on a short schedule to catch a peer
@@ -3133,6 +3176,7 @@ async function bootWrapper(): Promise<void> {
     // no-ops for confirmed peers while retaining convergence for an offline peer.
     // Roots reconcile too (they need no cert refresh).
     for (const id of identities.values()) {
+      if (!isHierarchyIdentity(id)) continue;
       await capabilityReconcileSweep(id);
       await e2eRecoverySweep(id);
       for (const ms of [10_000, 30_000, 90_000]) {
@@ -3179,6 +3223,12 @@ function resolveBound(sid: string): Bound {
     leases.delete(lease.identity);
     persistBindings();
     return { error: `The bound identity "${lease.identity}" no longer exists. Choose another with choose_identity.` };
+  }
+  if (id.bootQuarantined || !hasHierarchyIdentity(id)) {
+    return {
+      error: `The identity "${id.name}" is quarantined until its Human/root hierarchy is safely reconciled; ` +
+        'it cannot be bound or used.',
+    };
   }
   if (id.temp?.closing) {
     return {
@@ -5188,6 +5238,7 @@ function startGcTimer(): void {
     void (async () => {
       try {
         for (const id of identities.values()) {
+          if (!isHierarchyIdentity(id)) continue;
           try {
             await withScopeAsync(async (lt) => { await mutatingTx(id, '::actor::gc', {}, lt); });
           } catch (e) {
@@ -5437,6 +5488,15 @@ async function main() {
         if (validateName(name) !== null) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'invalid identity name' }));
+          return;
+        }
+        const id = identities.get(name);
+        // Unknown names retain the legacy file-log endpoint behavior. A loaded
+        // boot-quarantined identity is the specific state that must have no
+        // notification surface.
+        if (id && !isHierarchyIdentity(id)) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'identity is not available for notifications' }));
           return;
         }
         await serveNotifications(req, res, name, url.searchParams.get('since'));
