@@ -21,6 +21,9 @@
 # From a CLONE (a sibling install.mjs is present) it runs that directly. Piped as `curl … | bash`
 # it installs the published command globally — `npm i -g @ours.network/install` — then runs
 # `ours-install`. Idempotent: a re-run updates to @latest and runs again.
+# The bootstrap is deliberately stable. For nightly, install the published nightly command
+# directly: `npm i -g @ours.network/install@nightly && ours-install`; that package's own
+# X.Y.Z-nightly.N version selects and exactly resolves the matching stack channel.
 #
 # Non-interactive env overrides (all optional) — consumed by the Node installer:
 #   OURS_ASSUME_YES=1                        accept every default; never prompt (no tty needed)

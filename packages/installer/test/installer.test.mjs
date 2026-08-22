@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync, mkdirSync, statSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync, mkdirSync, statSync, symlinkSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,17 +62,33 @@ function fakeBins(dir, opts = {}) {
     createRoot +
     `exit 0\n`);
 
+  const stable = opts.registryStableVersion || '0.17.0';
+  const nightly = opts.registryNightlyVersion || '0.18.0-nightly.3';
+  const packageVersion = (name, channel) => opts.registryVersions?.[`${name}@${channel}`]
+    || (channel === 'nightly' ? nightly : stable);
+  const views = ['mcp', 'claude-code', 'codex'].flatMap((name) => ['latest', 'nightly'].map((channel) =>
+    `  "view @ours.network/${name}@${channel} version --json") echo '"${packageVersion(name, channel)}"'; exit 0;;`,
+  )).join('\n');
   write('npm',
+    `case "$*" in\n${views}\nesac\n` +
     `case "$*" in *"@ours.network/mcp"*) touch "$CALLLOG.mcpinstalled" "$CALLLOG.mcpupdated";; esac\n` +
     `case "$1" in ls) echo "@ours.network/fleet@0.7.0"; echo "@ours.network/tg-connector@0.1.7";; esac\n` +
     `exit 0\n`);
 
   if (!opts.noHarness) {
-    write('claude', `[ "$1" = "--version" ] && { echo "2.1.181 (Claude Code)"; exit 0; }\nexit 0\n`);
+    write('claude', `[ "$1" = "--version" ] && { echo "2.1.181 (Claude Code)"; exit 0; }\n` +
+      (opts.claudePluginInstalled
+        ? `[ "$1 $2 $3" = "plugin list --json" ] && { echo '[{"id":"ours@ours.network","version":"0.16.0"}]'; exit 0; }\n`
+        : '') +
+      `exit 0\n`);
     if (opts.codex === 'unsafe') {
       write('codex', `[ "$1" = "--version" ] && { echo "not-a-version-string"; exit 1; }\nexit 0\n`);
     } else {
-      write('codex', `[ "$1" = "--version" ] && { echo "codex-cli 0.144.4"; exit 0; }\nexit 0\n`);
+      write('codex', `[ "$1" = "--version" ] && { echo "codex-cli 0.144.4"; exit 0; }\n` +
+        (opts.codexMarketplaceGit
+          ? `[ "$1 $2 $3" = "plugin marketplace list" ] && { echo '{"marketplaces":[{"name":"ours-codex-marketplace","marketplaceSource":{"sourceType":"git","source":"https://github.com/adapt-toolkit/ours-codex-marketplace.git"}}]}'; exit 0; }\n`
+          : '') +
+        `exit 0\n`);
     }
   }
   write('ours-fleet', `[ "$1" = "--version" ] && { echo "0.7.0"; exit 0; }\nexit 0\n`);
@@ -116,8 +132,19 @@ function runInstall(opts = {}, extraEnv = {}) {
     OURS_CONFIG: join(tmp, '.ours', 'config.json'),
     ...extraEnv,
   };
+  let installEntry = INSTALL_MJS;
+  if (opts.selfVersion) {
+    const staged = join(tmp, 'install-package');
+    mkdirSync(staged, { recursive: true });
+    cpSync(INSTALL_MJS, join(staged, 'install.mjs'));
+    cpSync(join(PKG, 'lib'), join(staged, 'lib'), { recursive: true });
+    const packageJson = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'));
+    packageJson.version = opts.selfVersion;
+    writeFileSync(join(staged, 'package.json'), JSON.stringify(packageJson, null, 2) + '\n');
+    installEntry = join(staged, 'install.mjs');
+  }
   let out = '';
-  try { out = execFileSync('node', [INSTALL_MJS], { env, encoding: 'utf8', stdio: 'pipe' }); }
+  try { out = execFileSync('node', [installEntry], { env, encoding: 'utf8', stdio: 'pipe' }); }
   catch (e) { out = (e.stdout || '') + (e.stderr || ''); throw Object.assign(e, { out, calls: readFileSync(log, 'utf8'), tmp }); }
   return { out, calls: readFileSync(log, 'utf8'), tmp };
 }
@@ -133,12 +160,16 @@ test('update path: daemon present → drives plugin CLIs, creates human identity
   assert.match(calls, /ours-mcp create-root /, 'human identity created in-install');
   assert.match(out, /Your human identity/, 'user-facing wording is "human identity"');
   // Claude plugin driven headlessly.
-  assert.match(calls, /claude plugin marketplace add adapt-toolkit\/ours-claude-marketplace/, 'claude marketplace add');
+  assert.match(calls, /claude plugin marketplace add .*\.ours\/install\/marketplaces\/claude-code/, 'claude exact local marketplace add');
   assert.match(calls, /claude plugin install ours@ours\.network/, 'claude plugin install (plugin@marketplace)');
   // Codex plugin + ours-codex launcher in the same step, plus the plain explanation.
-  assert.match(calls, /codex plugin marketplace add adapt-toolkit\/ours-codex-marketplace/, 'codex marketplace add');
+  assert.match(calls, /codex plugin marketplace add .*\.ours\/install\/marketplaces\/codex/, 'codex exact local marketplace add');
   assert.match(calls, /codex plugin add ours@ours-codex-marketplace/, 'codex plugin add');
-  assert.match(calls, /npm i -g @ours\.network\/codex@latest/, 'ours-codex launcher installed with the codex plugin');
+  assert.match(calls, /npm i -g @ours\.network\/codex@0\.17\.0/, 'ours-codex launcher uses the same exact plugin version');
+  const claudeMarket = JSON.parse(readFileSync(join(tmp, '.ours', 'install', 'marketplaces', 'claude-code', '.claude-plugin', 'marketplace.json'), 'utf8'));
+  const codexMarket = JSON.parse(readFileSync(join(tmp, '.ours', 'install', 'marketplaces', 'codex', '.agents', 'plugins', 'marketplace.json'), 'utf8'));
+  assert.equal(claudeMarket.plugins[0].source.version, '0.17.0');
+  assert.equal(codexMarket.plugins[0].source.version, '0.17.0');
   assert.match(out, /AUTO wake-up/, 'explains what ours-codex is (background wake vs blocking)');
   // ours-fleet: CLI + host setup. The already-installed core ours plugin points
   // agents at `ours-fleet docs`; no second fleet-specific plugin is needed.
@@ -166,7 +197,7 @@ test('first install: config-first Step 0, daemon installed once with config + se
   const { out, calls, tmp } = runInstall({ daemon: 'absent' });
   assert.match(out, /A couple of quick settings/, 'Step 0 config questions run on a first install');
   assert.match(out, /1\/4 — ours core/, 'daemon is step 1');
-  assert.match(calls, /npm i -g @ours\.network\/mcp@latest/, 'daemon installed on consent');
+  assert.match(calls, /npm i -g @ours\.network\/mcp@0\.17\.0/, 'daemon installs the resolved exact stable version');
   assert.match(calls, /ours-mcp start/, 'daemon started once');
   assert.match(calls, /ours-mcp install-service/, 'installed as a boot service');
   assert.match(calls, /ours-mcp create-root /, 'human identity created in-install after the daemon is up');
@@ -178,6 +209,65 @@ test('first install: config-first Step 0, daemon installed once with config + se
   assert.notEqual(parsed.port, 3051, 'never the reserved Telegram port');
   assert.equal(parsed.stt, undefined, 'non-interactive fresh install never invents voice provider credentials');
   assert.match(out, /Non-interactive mode leaves it unchanged/, 'headless voice setup is explicit and never blocks');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('published NIGHTLY installer with no channel env resolves and installs one exact nightly suite', () => {
+  const { out, calls, tmp } = runInstall({ daemon: 'absent', selfVersion: '0.18.0-nightly.3' });
+  assert.match(out, /Release channel: nightly → exact lockstep suite v0\.18\.0-nightly\.3/);
+  for (const name of ['mcp', 'claude-code', 'codex']) {
+    assert.match(calls, new RegExp(`npm view @ours\\.network/${name}@nightly version --json`), `${name} resolves nightly deliberately`);
+  }
+  assert.match(calls, /npm i -g @ours\.network\/mcp@0\.18\.0-nightly\.3/, 'MCP uses the resolved exact nightly version');
+  assert.match(calls, /npm i -g @ours\.network\/codex@0\.18\.0-nightly\.3/, 'Codex launcher uses the exact plugin version');
+  assert.doesNotMatch(calls, /npm i -g @ours\.network\/(?:mcp|codex)@(latest|nightly)(?:\s|$)/,
+    'no moving tag remains in MCP/Codex install commands after resolution');
+
+  const claude = JSON.parse(readFileSync(join(tmp, '.ours', 'install', 'marketplaces', 'claude-code', '.claude-plugin', 'marketplace.json'), 'utf8'));
+  const codex = JSON.parse(readFileSync(join(tmp, '.ours', 'install', 'marketplaces', 'codex', '.agents', 'plugins', 'marketplace.json'), 'utf8'));
+  assert.equal(claude.plugins[0].source.version, '0.18.0-nightly.3');
+  assert.equal(codex.plugins[0].source.version, '0.18.0-nightly.3');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('registry channel mismatch fails closed before changing the machine', () => {
+  const { out, calls, tmp } = runInstall({
+    daemon: 'absent',
+    selfVersion: '0.18.0-nightly.3',
+    registryVersions: { 'codex@nightly': '0.18.0-nightly.4' },
+  });
+  assert.match(out, /dist-tags are not lockstep/);
+  assert.match(out, /codex=0\.18\.0-nightly\.4/);
+  assert.doesNotMatch(calls, /npm i -g|plugin marketplace add|plugin install|plugin add/,
+    'no install side effect occurs from a partial channel publication');
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('wrong-channel dist-tag result fails closed before changing the machine', () => {
+  const { out, calls, tmp } = runInstall({
+    daemon: 'absent',
+    selfVersion: '0.18.0-nightly.3',
+    registryVersions: { 'mcp@nightly': '0.18.0' },
+  });
+  assert.match(out, /expected an exact X\.Y\.Z-nightly\.N version/);
+  assert.doesNotMatch(calls, /npm i -g|plugin marketplace add|plugin install|plugin add/);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('Codex migrates the prior Git marketplace to the stable exact local source before install', () => {
+  const { calls, tmp } = runInstall({ daemon: 'installed', codexMarketplaceGit: true });
+  const remove = calls.indexOf('codex plugin marketplace remove ours-codex-marketplace');
+  const add = calls.indexOf('codex plugin marketplace add ');
+  assert.ok(remove >= 0, 'prior moving Git source is removed');
+  assert.ok(add > remove, 'exact local source is added after migration');
+  assert.match(calls.slice(add), /\.ours\/install\/marketplaces\/codex/);
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('Claude rerun explicitly updates the installed plugin to the rewritten exact source', () => {
+  const { calls, tmp } = runInstall({ daemon: 'installed', claudePluginInstalled: true });
+  assert.match(calls, /claude plugin update ours@ours\.network/, 'installed plugin uses update, not install');
+  assert.doesNotMatch(calls, /claude plugin install ours@ours\.network/);
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -245,8 +335,8 @@ test('never dead-end: an undrivable codex prints a manual path and the flow cont
   // We must NOT try to drive an unsafe codex…
   assert.doesNotMatch(calls, /codex plugin/, 'unsafe codex is never driven');
   // …but we ALSO never dead-end: a manual install path is always printed.
-  assert.match(out, /codex plugin marketplace add adapt-toolkit\/ours-codex-marketplace/, 'manual codex install path shown');
-  assert.match(out, /npm i -g @ours\.network\/codex/, 'manual ours-codex launcher path shown');
+  assert.match(out, /codex plugin marketplace add .*\.ours\/install\/marketplaces\/codex/, 'manual exact codex marketplace path shown');
+  assert.match(out, /npm i -g @ours\.network\/codex@0\.17\.0/, 'manual ours-codex launcher uses the exact version');
   // Claude still installs and the rest of the flow runs.
   assert.match(calls, /claude plugin install ours@ours\.network/, 'the good harness still installs');
   assert.match(calls, /ours-fleet init/, 'the flow continues to later steps');
@@ -619,7 +709,7 @@ test('package is a publishable standalone: name @ours.network/install, bin + fil
   assert.ok(existsSync(join(PKG, 'LICENSE')), 'a LICENSE file is present to ship');
   // Self-contained: the installer + its lib import ONLY node built-ins (no @ours.network/* etc.).
   assert.ok(!pkg.dependencies || Object.keys(pkg.dependencies).length === 0, 'no runtime dependencies');
-  for (const f of ['install.mjs', 'lib/ui.mjs', 'lib/logic.mjs', 'lib/prompt.mjs', 'lib/config.mjs']) {
+  for (const f of ['install.mjs', 'lib/ui.mjs', 'lib/logic.mjs', 'lib/marketplace.mjs', 'lib/prompt.mjs', 'lib/config.mjs']) {
     const src = readFileSync(join(PKG, f), 'utf8');
     const imports = [...src.matchAll(/^import[^']*'([^']+)'/gm)].map((m) => m[1]);
     for (const spec of imports) {
@@ -627,6 +717,25 @@ test('package is a publishable standalone: name @ours.network/install, bin + fil
       assert.ok(builtin, `${f} imports only built-ins / local — got "${spec}"`);
     }
   }
+});
+
+test('release workflow publishes installer last and verifies stable + nightly channel lockstep', () => {
+  const workflow = readFileSync(join(PKG, '..', '..', '.github', 'workflows', 'ci.yml'), 'utf8');
+  const stablePublish = workflow.indexOf('name: Publish @ours.network/install');
+  const stableVerify = workflow.indexOf('name: Verify installer channel (stable/latest lockstep)');
+  assert.ok(stablePublish >= 0 && stableVerify > stablePublish, 'stable tags are read back after installer publication');
+  const stableBlock = workflow.slice(stableVerify, workflow.indexOf('- name: Summary', stableVerify));
+  for (const name of ['mcp', 'claude-code', 'codex', 'install']) {
+    assert.match(stableBlock, new RegExp(`@ours\\.network/${name}`));
+  }
+  assert.match(stableBlock, /dist-tags\.latest/);
+  const nightlyVerify = workflow.indexOf('name: Verify dist-tags (nightly moved, @latest untouched)');
+  assert.ok(nightlyVerify >= 0, 'nightly publication retains its post-publish read-back gate');
+  const nightlyBlock = workflow.slice(nightlyVerify, workflow.indexOf('- name: Summary', nightlyVerify));
+  for (const name of ['mcp', 'claude-code', 'codex', 'install']) {
+    assert.match(nightlyBlock, new RegExp(`@ours\\.network/${name}`));
+  }
+  assert.match(nightlyBlock, /dist-tags\.nightly/);
 });
 
 // --- install.sh bootstrap: Node.js check (unchanged contract) ----------------------------------

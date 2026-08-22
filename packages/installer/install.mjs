@@ -30,16 +30,23 @@ import {
   DEFAULT_PORT, resolveChannel, pkgSpec,
 } from './lib/logic.mjs';
 import { atomicWriteConfig } from './lib/config.mjs';
+import {
+  buildClaudeMarketplace, buildCodexMarketplace, marketplaceJson, marketplacePaths,
+  parseNpmVersion, validateChannelVersion,
+} from './lib/marketplace.mjs';
 
 const NPM = process.env.OURS_NPM || 'npm';
-// Release channel: OURS_CHANNEL=nightly installs @nightly for mcp/tg-connector/plugin
-// launchers but keeps @ours.network/fleet at @latest (fleet has no nightly). Default: latest.
-const CHANNEL = resolveChannel(process.env.OURS_CHANNEL || process.env.OURS_INSTALL_CHANNEL);
+// A published installer selects its OWN channel when the environment is silent:
+// X.Y.Z-nightly.N follows @nightly; a clean X.Y.Z follows @latest. Explicit legacy
+// channel overrides still win in both directions.
+const CHANNEL = resolveChannel(
+  process.env.OURS_CHANNEL || process.env.OURS_INSTALL_CHANNEL,
+  pkgVersion(),
+);
 const spec = (pkgKey) => pkgSpec(pkgKey, CHANNEL); // → "@ours.network/<key>@<tag>"
 let DRY = !!process.env.OURS_INSTALL_DRY_RUN;
 const SELFHOST_URL = 'ours.network';
-const CLAUDE_MARKET = 'adapt-toolkit/ours-claude-marketplace';
-const CODEX_MARKET = 'adapt-toolkit/ours-codex-marketplace';
+const MARKETPLACE_PATHS = marketplacePaths(homedir());
 
 const sink = (s) => process.stdout.write(s);
 const line = (s = '') => sink(`${s}\n`);
@@ -99,6 +106,107 @@ const globalVersion = (pkg) => {
   const m = ls.match(new RegExp(pkg.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') + '@([0-9][0-9.]*)'));
   return m ? m[1] : '';
 };
+
+function resolveExactPackage(pkgKey) {
+  const packageName = `@ours.network/${pkgKey}`;
+  const tag = CHANNEL === 'nightly' ? 'nightly' : 'latest';
+  const viewed = run(NPM, ['view', `${packageName}@${tag}`, 'version', '--json'], { capture: true, timeout: 15000 });
+  if (!viewed.ok) {
+    return { ok: false, packageName, tag, reason: `npm could not resolve ${packageName}@${tag}` };
+  }
+  const checked = validateChannelVersion(parseNpmVersion(viewed.out), CHANNEL);
+  if (!checked.ok) return { ...checked, packageName, tag };
+  return { ok: true, packageName, tag, version: checked.version };
+}
+
+function resolveExactSuite() {
+  const packages = {};
+  for (const key of ['mcp', 'claude-code', 'codex']) {
+    const resolved = resolveExactPackage(key);
+    if (!resolved.ok) return resolved;
+    packages[key] = resolved;
+  }
+  const versions = new Set(Object.values(packages).map((entry) => entry.version));
+  if (versions.size !== 1) {
+    const detail = Object.values(packages).map((entry) => `${entry.packageName}=${entry.version}`).join(', ');
+    return {
+      ok: false,
+      packageName: '@ours.network/{mcp,claude-code,codex}',
+      tag: CHANNEL,
+      reason: `the ${CHANNEL} dist-tags are not lockstep (${detail})`,
+    };
+  }
+  return { ok: true, channel: CHANNEL, version: versions.values().next().value, packages };
+}
+
+async function prepareExactMarketplace(pkgKey, resolved) {
+  const claude = pkgKey === 'claude-code';
+  const root = claude ? MARKETPLACE_PATHS.claudeRoot : MARKETPLACE_PATHS.codexRoot;
+  const manifest = claude ? MARKETPLACE_PATHS.claudeManifest : MARKETPLACE_PATHS.codexManifest;
+  const value = claude
+    ? buildClaudeMarketplace(resolved.version, CHANNEL)
+    : buildCodexMarketplace(resolved.version, CHANNEL);
+  const written = await act(
+    `write exact ${pkgKey} marketplace (${resolved.packageName}@${resolved.version}) to ${manifest}`,
+    async () => {
+      try {
+        atomicWriteConfig(manifest, marketplaceJson(value));
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error };
+      }
+    },
+  );
+  if (!written.ok) {
+    return { ...resolved, ok: false, reason: `could not write the exact marketplace at ${manifest}` };
+  }
+  return { ...resolved, root, manifest };
+}
+
+function exactResolutionFailure(label, result) {
+  line(warn(`Couldn't safely resolve ${label} on the ${CHANNEL} channel to an exact version.`));
+  line(info(`${result.reason || 'The npm registry returned an invalid version.'} Existing plugin setup was left unchanged.`));
+  line(info(`Check '${c.cyan(`npm view ${result.packageName}@${result.tag} version`)}', then re-run ours-install.`));
+}
+
+function configuredCodexMarketplace() {
+  const listed = run('codex', ['plugin', 'marketplace', 'list', '--json'], { capture: true, timeout: 6000 });
+  if (!listed.ok) return null;
+  try {
+    const parsed = JSON.parse(listed.out);
+    return parsed?.marketplaces?.find((marketplace) => marketplace?.name === 'ours-codex-marketplace') || null;
+  } catch {
+    return null;
+  }
+}
+
+function hasClaudePlugin(pluginId = 'ours@ours.network') {
+  const listed = run('claude', ['plugin', 'list', '--json'], { capture: true, timeout: 6000 });
+  if (!listed.ok) return false;
+  try {
+    const parsed = JSON.parse(listed.out);
+    return Array.isArray(parsed) && parsed.some((plugin) => plugin?.id === pluginId);
+  } catch {
+    return false;
+  }
+}
+
+async function addExactCodexMarketplace(exact) {
+  const current = configuredCodexMarketplace();
+  const source = current?.marketplaceSource;
+  const alreadyExact = source?.sourceType === 'local' && source?.source === exact.root;
+  if (current && !alreadyExact) {
+    const removed = await act(
+      'codex plugin marketplace remove ours-codex-marketplace (replace moving source with exact local source)',
+      async () => run('codex', ['plugin', 'marketplace', 'remove', 'ours-codex-marketplace'], { capture: true }),
+    );
+    if (!removed.ok) return removed;
+  }
+  return act(
+    `codex plugin marketplace add ${exact.root} (${exact.packageName}@${exact.version})`,
+    async () => run('codex', ['plugin', 'marketplace', 'add', exact.root], { capture: true }),
+  );
+}
 
 // --- config file (fixed home location; mirrors core/config.ts) ---------------------------------
 function configPath() { return process.env.OURS_CONFIG || join(homedir(), '.ours', 'config.json'); }
@@ -189,7 +297,8 @@ or update.
   --version    print the installer version and exit
 
 Env: OURS_ASSUME_YES=1 (accept defaults, no prompts) · OURS_INSTALL_DRY_RUN=1 ·
-     OURS_NPM · OURS_CONFIG (default ~/.ours/config.json). Docs: https://ours.network`;
+     OURS_CHANNEL=latest|nightly (optional override) · OURS_NPM ·
+     OURS_CONFIG (default ~/.ours/config.json). Docs: https://ours.network`;
 
 // ===============================================================================================
 async function main() {
@@ -271,6 +380,18 @@ async function main() {
     line(info('Install one of them first, then re-run ours-install to wire it up.'));
     finish(ttyFd); return;
   }
+
+  // Resolve the release boundary before making any change. The install package is
+  // published last in the lockstep suite, so its selected channel must already expose
+  // one identical exact MCP/Claude/Codex version. Partial or malformed registry state
+  // fails closed instead of creating a mixed installation.
+  const exactSuite = resolveExactSuite();
+  if (!exactSuite.ok) {
+    line('');
+    exactResolutionFailure('ours.network suite', exactSuite);
+    finish(ttyFd); return;
+  }
+  line(ok(`Release channel: ${exactSuite.channel} → exact lockstep suite v${exactSuite.version}`));
 
   // Daemon state up front (decides first-install vs update, and whether Step 0 runs at all).
   const versionBefore = daemonVersionLine();
@@ -432,7 +553,8 @@ async function main() {
       // Without a daemon the rest is moot; go straight to the summary.
       return endScreen({ ttyFd, summary, chosenPort, chosenBroker });
     }
-    await actSpin(`ensuring ${spec('mcp')}…`, `npm i -g ${spec('mcp')}`, () => runAsync(NPM, ['i', '-g', spec('mcp')]));
+    const exactMcp = `${exactSuite.packages.mcp.packageName}@${exactSuite.packages.mcp.version}`;
+    await actSpin(`ensuring ${exactMcp}…`, `npm i -g ${exactMcp}`, () => runAsync(NPM, ['i', '-g', exactMcp]));
     const patch = { port: chosenPort };
     if (chosenBroker) patch.brokerUrl = chosenBroker;
     await act(`write config (${configPath()}) with port ${chosenPort}${chosenBroker ? ' + custom broker' : ''}`, async () => { writeConfigPatch(patch); return { ok: true }; });
@@ -464,7 +586,8 @@ async function main() {
     let pendingUpdateRestart = false;
     let after = before;
     if (upd) {
-      await actSpin(`updating ${spec('mcp')}…`, `npm i -g ${spec('mcp')}`, () => runAsync(NPM, ['i', '-g', spec('mcp')]));
+      const exactMcp = `${exactSuite.packages.mcp.packageName}@${exactSuite.packages.mcp.version}`;
+      await actSpin(`updating ${exactMcp}…`, `npm i -g ${exactMcp}`, () => runAsync(NPM, ['i', '-g', exactMcp]));
       after = parseVersion(daemonVersionLine());
       pendingUpdateRestart = !!(before && after && before !== after);
     }
@@ -542,23 +665,39 @@ async function main() {
   // NEVER dead-end (owner edit #3): plain reason + manual path, always. Each returns whether it
   // ACTED (so a plain user-No skip shows no Continue pause).
   async function installClaude(h) {
-    if (h.status !== 'ok') { manualClaude(h); record({ key: 'claude', label: 'Claude Code plugin', state: 'skipped', note: h.status === 'alias' ? 'installed as an alias' : 'not drivable' }); return true; }
-    const go = yes('  Install the ours plugin into Claude Code?', true);
-    if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'claude', label: 'Claude Code plugin', state: 'skipped' }); return false; }
-    const add = await act(`claude plugin marketplace add ${CLAUDE_MARKET}`, async () => run('claude', ['plugin', 'marketplace', 'add', CLAUDE_MARKET], { capture: true }));
-    const inst = add.ok ? await act('claude plugin install ours@ours.network', async () => run('claude', ['plugin', 'install', 'ours@ours.network'], { capture: true })) : add;
+    if (h.status === 'ok') {
+      const go = yes('  Install the ours plugin into Claude Code?', true);
+      if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'claude', label: 'Claude Code plugin', state: 'skipped' }); return false; }
+    }
+    const exact = await prepareExactMarketplace('claude-code', exactSuite.packages['claude-code']);
+    if (!exact.ok) { exactResolutionFailure('Claude Code', exact); record({ key: 'claude', label: 'Claude Code plugin', state: 'failed', note: 'exact version resolution failed' }); return true; }
+    line(info(`Claude Code plugin channel: ${exact.tag} → exact ${exact.version}.`));
+    if (h.status !== 'ok') { manualClaude(h, exact); record({ key: 'claude', label: 'Claude Code plugin', state: 'skipped', note: h.status === 'alias' ? 'installed as an alias' : 'not drivable' }); return true; }
+    const add = await act(`claude plugin marketplace add ${exact.root}`, async () => run('claude', ['plugin', 'marketplace', 'add', exact.root], { capture: true }));
+    // Claude's `plugin install` reports success without changing an already-installed
+    // plugin. Use its explicit update command on reruns/channel switches so the newly
+    // written exact marketplace version is actually applied.
+    const claudeInstalled = add.ok && hasClaudePlugin();
+    const verb = claudeInstalled ? 'update' : 'install';
+    const inst = add.ok ? await act(`claude plugin ${verb} ours@ours.network`, async () => run('claude', ['plugin', verb, 'ours@ours.network'], { capture: true })) : add;
     if (inst.ok) { line(ok(`Claude Code plugin installed — pointed at port ${chosenPort}. No problems.`)); line(info('(restart Claude Code to load it.)')); record({ key: 'claude', label: 'Claude Code plugin', state: 'installed', note: 'restart Claude Code' }); }
-    else { failClaude(); record({ key: 'claude', label: 'Claude Code plugin', state: 'failed', note: 'marketplace/install step failed' }); }
+    else { failClaude(exact); record({ key: 'claude', label: 'Claude Code plugin', state: 'failed', note: 'marketplace/install step failed' }); }
     return true;
   }
   async function installCodex(h) {
-    if (h.status !== 'ok') { manualCodex(h); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'skipped', note: h.status === 'alias' ? 'installed as an alias' : 'not drivable' }); return true; }
-    const go = yes('  Install the ours plugin into Codex?', true);
-    if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'skipped' }); return false; }
-    const add = await act(`codex plugin marketplace add ${CODEX_MARKET}`, async () => run('codex', ['plugin', 'marketplace', 'add', CODEX_MARKET], { capture: true }));
+    if (h.status === 'ok') {
+      const go = yes('  Install the ours plugin into Codex?', true);
+      if (!go) { line(info('skipped — re-run ours-install to add it.')); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'skipped' }); return false; }
+    }
+    const exact = await prepareExactMarketplace('codex', exactSuite.packages.codex);
+    if (!exact.ok) { exactResolutionFailure('Codex', exact); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'failed', note: 'exact version resolution failed' }); return true; }
+    line(info(`Codex plugin channel: ${exact.tag} → exact ${exact.version}.`));
+    if (h.status !== 'ok') { manualCodex(h, exact); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'skipped', note: h.status === 'alias' ? 'installed as an alias' : 'not drivable' }); return true; }
+    const add = await addExactCodexMarketplace(exact);
     const inst = add.ok ? await act('codex plugin add ours@ours-codex-marketplace', async () => run('codex', ['plugin', 'add', 'ours@ours-codex-marketplace'], { capture: true })) : add;
     // Owner-mandated: choosing the Codex plugin ALSO installs the ours-codex live launcher, same step.
-    const wrap = inst.ok ? await actSpin('installing the ours-codex live launcher…', `npm i -g ${spec('codex')} (provides ours-codex)`, () => runAsync(NPM, ['i', '-g', spec('codex')])) : inst;
+    const exactSpec = `${exact.packageName}@${exact.version}`;
+    const wrap = inst.ok ? await actSpin('installing the ours-codex live launcher…', `npm i -g ${exactSpec} (provides ours-codex)`, () => runAsync(NPM, ['i', '-g', exactSpec])) : inst;
     if (inst.ok && wrap.ok) {
       line(ok(`Codex plugin + ours-codex live launcher installed — pointed at port ${chosenPort}. No problems.`));
       // Plain-language: what ours-codex is and why you'd use it (background wake vs blocking).
@@ -569,7 +708,7 @@ async function main() {
       line(info('    app server to watch for new mail in the BACKGROUND while you keep typing, so a'));
       line(info("    reply wakes it without interrupting you. Use 'ours-codex' for hands-off replies."));
       record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'installed', note: 'new Codex thread' });
-    } else { failCodex(); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'failed', note: 'marketplace/install step failed' }); }
+    } else { failCodex(exact); record({ key: 'codex', label: 'Codex plugin + ours-codex', state: 'failed', note: 'marketplace/install step failed' }); }
     return true;
   }
   // Hermes: NOT a driven CLI. Its plugin install is `npm i -g @ours.network/hermes@<channel>` then
@@ -668,7 +807,7 @@ async function main() {
 }
 
 // --- never-dead-end messaging (owner edit #3) --------------------------------------------------
-function manualClaude(h) {
+function manualClaude(h, exact) {
   if (h.status === 'alias') {
     line(warn('Heads-up: on your machine, "claude" is installed as an alias, not the real command,'));
     line(info('so I can\'t drive it safely. To fix it: run  ' + c.cyan('type claude') + '  , remove/rename that'));
@@ -677,17 +816,17 @@ function manualClaude(h) {
     line(warn('I couldn\'t safely drive the "claude" command on this machine.'));
   }
   line(info('You can still install the plugin yourself — inside Claude Code, run these two:'));
-  line('    ' + c.cyan(`/plugin marketplace add ${CLAUDE_MARKET}`));
-  line('    ' + c.cyan('/plugin install ours'));
+  line('    ' + c.cyan(`/plugin marketplace add ${exact.root}`));
+  line('    ' + c.cyan('/plugin install ours@ours.network'));
 }
-function failClaude() {
+function failClaude(exact) {
   line(warn('Couldn\'t install the Claude Code plugin automatically (network or plugin cache).'));
   line(info('Install it by hand — inside Claude Code, run these two, then re-run ours-install:'));
-  line('    ' + c.cyan(`/plugin marketplace add ${CLAUDE_MARKET}`));
-  line('    ' + c.cyan('/plugin install ours'));
+  line('    ' + c.cyan(`/plugin marketplace add ${exact.root}`));
+  line('    ' + c.cyan('/plugin install ours@ours.network'));
   line(info('Your daemon and other steps are intact. Continuing.'));
 }
-function manualCodex(h) {
+function manualCodex(h, exact) {
   if (h.status === 'alias') {
     line(warn('Heads-up: on your machine, "codex" is installed as an alias, not the real command,'));
     line(info('so I can\'t drive it safely. To fix it: run  ' + c.cyan('type codex') + '  , remove/rename that'));
@@ -695,17 +834,19 @@ function manualCodex(h) {
   } else {
     line(warn('I couldn\'t safely drive the "codex" command on this machine.'));
   }
-  line(info('You can still install it yourself — run these three in your terminal:'));
-  line('    ' + c.cyan(`codex plugin marketplace add ${CODEX_MARKET}`));
+  line(info('You can still install it yourself — run these four in your terminal:'));
+  line('    ' + c.cyan('codex plugin marketplace remove ours-codex-marketplace') + c.gray('   (okay if absent)'));
+  line('    ' + c.cyan(`codex plugin marketplace add ${exact.root}`));
   line('    ' + c.cyan('codex plugin add ours@ours-codex-marketplace'));
-  line('    ' + c.cyan('npm i -g @ours.network/codex') + c.gray('   (adds the ours-codex live launcher)'));
+  line('    ' + c.cyan(`npm i -g ${exact.packageName}@${exact.version}`) + c.gray('   (adds the ours-codex live launcher)'));
 }
-function failCodex() {
+function failCodex(exact) {
   line(warn('Couldn\'t install the Codex plugin automatically (network or plugin cache).'));
-  line(info('Install it by hand — run these three, then re-run ours-install:'));
-  line('    ' + c.cyan(`codex plugin marketplace add ${CODEX_MARKET}`));
+  line(info('Install it by hand — run these four, then re-run ours-install:'));
+  line('    ' + c.cyan('codex plugin marketplace remove ours-codex-marketplace') + c.gray('   (okay if absent)'));
+  line('    ' + c.cyan(`codex plugin marketplace add ${exact.root}`));
   line('    ' + c.cyan('codex plugin add ours@ours-codex-marketplace'));
-  line('    ' + c.cyan('npm i -g @ours.network/codex'));
+  line('    ' + c.cyan(`npm i -g ${exact.packageName}@${exact.version}`));
   line(info('Your daemon and other steps are intact. Continuing.'));
 }
 function failHermes() {

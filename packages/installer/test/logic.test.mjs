@@ -6,7 +6,7 @@ import {
   detectPlatform, classifyHarnessProbe, buildHandoffPrompt,
   effectiveVoiceConfig, voiceSetupStatus, validateVoiceSecret, redactSensitive,
   DEFAULT_PORT, DEFAULT_BROKER, RESERVED_PORTS,
-  resolveChannel, pkgTag, pkgSpec, DEFAULT_CHANNEL,
+  resolveChannel, isNightlyVersion, pkgTag, pkgSpec, DEFAULT_CHANNEL,
 } from '../lib/logic.mjs';
 
 test('resolveChannel: nightly synonyms → nightly; everything else → latest', () => {
@@ -19,6 +19,23 @@ test('resolveChannel: nightly synonyms → nightly; everything else → latest',
   assert.equal(resolveChannel(''), 'latest');
   assert.equal(resolveChannel(undefined), 'latest');
   assert.equal(resolveChannel('garbage'), 'latest', 'unknown never guesses a tag');
+});
+
+test('resolveChannel: a published installer follows its own channel when env is silent', () => {
+  assert.equal(resolveChannel(undefined, '0.17.0'), 'latest');
+  assert.equal(resolveChannel('', '0.18.0-nightly.3'), 'nightly');
+  assert.equal(resolveChannel(undefined, '0.18.0-nightly.42'), 'nightly');
+  assert.equal(resolveChannel('latest', '0.18.0-nightly.3'), 'latest', 'explicit stable override still wins');
+  assert.equal(resolveChannel('nightly', '0.17.0'), 'nightly', 'explicit nightly override still wins');
+  assert.equal(resolveChannel('garbage', '0.18.0-nightly.3'), 'latest', 'unknown override fails safe to stable');
+});
+
+test('isNightlyVersion recognizes only the release workflow suffix', () => {
+  assert.equal(isNightlyVersion('0.18.0-nightly.3'), true);
+  assert.equal(isNightlyVersion('1.2.3-nightly.42'), true);
+  assert.equal(isNightlyVersion('0.18.0'), false);
+  assert.equal(isNightlyVersion('0.18.0-rc.1'), false);
+  assert.equal(isNightlyVersion('0.18.0-nightly.03'), false);
 });
 
 test('pkgTag: nightly channel tags mcp/tg/plugins @nightly but fleet ALWAYS @latest', () => {
@@ -142,6 +159,7 @@ test('secret redaction removes exact values and common keyed diagnostics', () =>
 
 test('parseVersion / parseStatus: pull versions + resolved broker/port out of CLI output', () => {
   assert.equal(parseVersion('ours-mcp v0.9.9'), '0.9.9');
+  assert.equal(parseVersion('ours-mcp v0.18.0-nightly.3'), '0.18.0-nightly.3', 'channel switches remain restart-visible');
   assert.equal(parseVersion('nothing here'), '');
   const st = parseStatus([
     'ours-mcp: running',
