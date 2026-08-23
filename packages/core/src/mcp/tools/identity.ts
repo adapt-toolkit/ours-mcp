@@ -30,6 +30,9 @@ import type { ApplicationIdentityStore } from '../../application-identities.js';
 import { runTool, textResult } from '../tool.js';
 
 type IdentityTreeRow = Awaited<ReturnType<OursClient['listIdentities']>>[number];
+type ActiveIdentityTreeRow = Extract<IdentityTreeRow, { cid: string }>;
+
+const isActiveIdentity = (row: IdentityTreeRow): row is ActiveIdentityTreeRow => 'cid' in row;
 
 // The consent sentence create_identity, create_root_identity and choose_identity
 // all append after binding. Baseline text (index.ts:3617, 3793, 3948) — one
@@ -102,12 +105,14 @@ async function dropBeforeMutation<T>(
 // `session: null` covers BOTH "no lease" and "lease held by a dead pid" — the SDK
 // already collapsed them, because the baseline renders a dead holder as free.
 const sessionTag = (row: IdentityTreeRow): string => {
+  if (!isActiveIdentity(row)) return '';
   if (row.session === 'mine') return '  ← this session';
   if (row.session === 'other-live') return '  (in use by another session)';
   return '';
 };
 
 const tempTag = (row: IdentityTreeRow): string => {
+  if (!isActiveIdentity(row)) return '';
   if (!row.temp) return '';
   switch (row.temp.state) {
     case 'closing':
@@ -419,8 +424,14 @@ export function registerIdentityTools(
           // The rows arrive in RENDER ORDER (root, roles, flat). A no-root host is
           // detected exactly as the SDK documents it: no row claims 'root', because
           // the baseline never asks the packet for a role id in that case.
-          const hasRoot = rows.some((row) => row.kind === 'root');
+          const hasRoot = rows.some((row) => isActiveIdentity(row) && row.kind === 'root');
           const lines = rows.map((row) => {
+            if (!isActiveIdentity(row)) {
+              const status = row.status === 'awaiting-root'
+                ? 'awaiting a root identity'
+                : 'hierarchy migration failed';
+              return `⚠ ${row.name} — quarantined (${status}; unavailable for binding)`;
+            }
             if (row.kind === 'root') return `★ ${row.name} — ${row.cid} (root)${sessionTag(row)}`;
             if (row.kind === 'role') return `  └ ${row.name} — ${row.cid} (role)${tempTag(row)}${sessionTag(row)}`;
             return hasRoot
