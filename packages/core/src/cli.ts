@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { attachOursClient, resolveDaemonConfig } from '@ours.network/sdk';
 import type { NotificationEvent } from '@ours.network/sdk';
@@ -177,7 +178,16 @@ async function main(): Promise<void> {
   }
 }
 
-const invokedDirectly = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+function isInvokedDirectly(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+const invokedDirectly = isInvokedDirectly();
 if (invokedDirectly) {
   main().catch((error) => {
     err(`ours-mcp error: ${error instanceof Error ? error.message : String(error)}`);
