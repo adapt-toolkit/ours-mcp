@@ -102,12 +102,12 @@ test('a connector is NEVER repointed non-interactively', () => {
   assert.equal(p.action, 'skip-repoint', 'assume-yes never turns a component on or moves one that exists');
 });
 
-test('the connector is configured but its start-coupled service command is deferred', () => {
+test('the connector is configured as a durable service', () => {
   // install-service bakes the resolved values into the unit as environment, and
   // environment outranks the config file afterwards.
   const p = planTgAttachment({ existing: {}, endpoint: 'http://127.0.0.1:3050', stateDir: OURS, brokerUrl: 'wss://b' });
   assert.ok(p.config, 'a config to write');
-  assert.equal(p.service, null, 'install-service enables and starts Telegram, so the installer must not call it');
+  assert.deepEqual(p.service, ['ours-tg-connector', 'install-service']);
 });
 
 test('config paths honour the documented env overrides', () => {

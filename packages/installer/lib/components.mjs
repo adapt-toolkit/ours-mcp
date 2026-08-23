@@ -203,11 +203,10 @@ export function planTgAttachment({ existing, endpoint, stateDir, brokerUrl, assu
     changed: changes.length > 0,
     changes,
     config: merged,
-    // Telegram is intentionally staged but stopped. Its CLI currently couples
-    // service installation with `enable --now`, so calling it here would violate
-    // the installer's promise not to launch Telegram before a bot is configured.
-    // The end screen gives this exact command as the explicit opt-in start step.
-    service: null,
+    // The connector is a durable shim over the shared daemon. Its service command
+    // owns the platform-specific unit and `enable --now`; the installer invokes
+    // it after committing the coherent daemon selection below.
+    service: ['ours-tg-connector', 'install-service'],
     untouched: [...TG_REGISTRY_FILES, ...TG_ROUTE_FILES],
   };
   if (!pointsElsewhere) return { ...plan, action: plan.changed ? 'attach' : 'unchanged' };

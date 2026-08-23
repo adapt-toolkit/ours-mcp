@@ -91,7 +91,10 @@ test('candidatePort: the directory\'s own record, else the default', async () =>
 });
 
 test('classifyProbe: present / foreign / absent', async () => {
-  assert.equal(classifyProbe({ ok: true, stateDir: OURS }, OURS).kind, 'present');
+  assert.deepEqual(
+    classifyProbe({ ok: true, stateDir: OURS, version: '2.7.1' }, OURS),
+    { kind: 'present', stateDir: OURS, daemonVersion: '2.7.1' },
+  );
   assert.equal(classifyProbe({ ok: true, stateDir: `${HOME}/./.ours` }, OURS).kind, 'present', 'compared after normalisation');
   assert.equal(classifyProbe({ ok: true, stateDir: TG }, OURS).kind, 'foreign');
   assert.equal(classifyProbe({ ok: true }, OURS).kind, 'foreign', 'answered but not an ours daemon');
@@ -102,11 +105,12 @@ test('findDaemon: the recorded port is probed first', async () => {
   const found = await findDaemon({
     stateDir: OURS,
     readJson: files({ [join(OURS, DAEMON_CONFIG)]: { port: 3060 } }),
-    probe: net({ 3060: { ok: true, stateDir: OURS } }),
+    probe: net({ 3060: { ok: true, stateDir: OURS, version: '3.4.5' } }),
   });
   assert.equal(found.kind, 'present');
   assert.equal(found.port, 3060);
   assert.equal(found.via, 'config');
+  assert.equal(found.daemonVersion, '3.4.5');
 });
 
 test('findDaemon: a hand-started daemon with NO recorded port is still found via ours-cli-daemon.json', async () => {

@@ -24,8 +24,8 @@ connector from another daemon still require explicit confirmation.
   or preserves the existing one on a re-run.
 - Installs the ours plugin into safely detected Claude Code, Codex, and Hermes
   installations.
-- Configures and starts cowork against the shared daemon.
-- Configures Telegram against the same daemon, but does **not** start it.
+- Configures and starts cowork as a durable shim over the shared daemon.
+- Configures and starts Telegram as a durable shim over the same daemon.
 - Runs Fleet's host initialization and, when `~/fleet.yaml` is absent, writes a
   conservative stopped starter with `FleetCoordinator`, a `fleet-health`
   watchdog, and a ten-minute `coordinator_health` loop. An existing
@@ -35,20 +35,21 @@ The operator CLI owns daemon configuration, lifecycle, and boot persistence.
 The MCP package is only the stdio adapter spawned by agent harnesses; the
 installer never asks `ours-mcp` to start a daemon.
 
-The external-history storage epoch is a clean breaking reset. The daemon refuses
-old packet state without modifying it, and this installer never migrates, purges,
-or silently replaces identities, contacts, invites, pending payloads, or history.
-Back up any wanted old state and remove it explicitly before starting the new epoch.
+Daemon state is temporarily scoped to its package major version. On a same-major
+update, the installer refreshes the packages and runs `ours daemon restart`; the
+CLI streams structured startup phases until restore is complete instead of
+appearing to hang. A different-major update is detected before package
+replacement. The installer explains the incompatibility and, only in an
+interactive run, offers to stop the CLI-managed daemon, copy the complete state
+directory to a timestamped directory under `~/.ours-backups/`, remove the
+managed service and old state, then initialize the new major. The default answer is no, and
+`OURS_ASSUME_YES` never authorizes this purge.
 
 ## What remains stopped
 
-Telegram and Fleet are installed but intentionally not started. Review and
-activate them when ready:
+Only Fleet is intentionally not started. Review and activate it when ready:
 
 ```sh
-# After configuring a Telegram bot and route locally:
-ours-tg-connector install-service
-
 # After reviewing ~/fleet.yaml:
 ours-fleet doctor
 ours-fleet config
@@ -92,6 +93,8 @@ targets only the explicit state directory.
 
 `OURS_CHANNEL=nightly` (or `OURS_INSTALL_CHANNEL`) selects the packages' nightly
 dist-tags. Without an override, the installer's own version selects the channel.
+The operator CLI intentionally has no nightly dist-tag and remains untagged on
+both channels.
 
 ## Environment
 

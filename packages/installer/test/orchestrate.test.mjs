@@ -104,7 +104,7 @@ test('creating a daemon: the MCP server, the CLI, config, start, then service', 
   assert.ok(ids.findIndex((s) => s.includes('daemon start')) < ids.findIndex((s) => s.includes('install-service')));
 });
 
-test('updating an existing daemon never starts one and never moves the port', async () => {
+test('updating an existing daemon restarts it without starting a second one or moving the port', async () => {
   const e = fx({
     json: { [join(OURS, 'config.json')]: { port: 3060, stateDir: OURS, brokerUrl: 'wss://b', apiVisibility: 'shared' } },
     net: { 3060: { ok: true, stateDir: OURS } },
@@ -113,6 +113,10 @@ test('updating an existing daemon never starts one and never moves the port', as
   assert.equal(r.target.action, 'update');
   assert.equal(r.target.port, 3060);
   assert.ok(!r.steps.some((s) => s.id === 'start'));
+  assert.ok(r.steps.some((s) => s.id === 'restart'));
+  const restartIndex = e.recorder.ran.findIndex((cmd) => cmd.includes('restart'));
+  assert.ok(restartIndex >= 0);
+  assert.equal(e.recorder.runOptions[restartIndex].stream, true, 'startup progress is inherited live');
   assert.deepEqual(e.recorder.wrote, [], 'a config that already matches is not rewritten');
   assert.match(said(e), /already correct — not touched/);
 });
@@ -165,7 +169,7 @@ test('a clean install passes no --force at all', async () => {
 
 // ---------------------------------------------------------- §5 components ----
 
-test('assume-yes installs the complete stack, stages Telegram and Fleet, and asks nothing', async () => {
+test('assume-yes installs the complete stack, runs both durable shims, stages Fleet, and asks nothing', async () => {
   const e = fx({ env: { OURS_ASSUME_YES: '1' }, versions: { '@ours.network/cowork': '0.5.0' } });
   assert.equal(await runInstall([], e), EXIT_OK);
   assert.deepEqual(e.recorder.asked, [], 'a linear run reads no input');
@@ -174,7 +178,8 @@ test('assume-yes installs the complete stack, stages Telegram and Fleet, and ask
   assert.ok(ran.some((s) => s.includes('@ours.network/tg-connector')));
   assert.ok(ran.some((s) => s.includes('@ours.network/cowork')));
   assert.ok(ran.some((s) => s.includes('@ours.network/fleet')));
-  assert.ok(!ran.some((s) => s.includes('ours-tg-connector install-service')), 'Telegram stays stopped');
+  assert.ok(ran.some((s) => s.includes('ours-tg-connector install-service')), 'Telegram runs durably');
+  assert.ok(ran.some((s) => s.includes('ours-cowork install-service')), 'cowork runs durably');
   assert.ok(!ran.some((s) => s.includes('ours-fleet up')), 'Fleet stays stopped');
   assert.equal(e.recorder.wroteText.length, 1, 'the starter fleet config is staged');
 });
@@ -220,7 +225,7 @@ test('a component that throws is reported with a retry and the run continues', a
 
 // ------------------------------------------------------------- idempotence ---
 
-test('a second identical run changes nothing but refreshed packages', async () => {
+test('a second identical run preserves config, refreshes packages, and restarts the daemon', async () => {
   const json = {
     [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://broker1.ours.network' },
     [join(HOME, '.ours-telegram', 'config.json')]: {
@@ -243,7 +248,7 @@ test('a second identical run changes nothing but refreshed packages', async () =
   assert.equal(await runInstall([], e), EXIT_OK);
   assert.deepEqual(e.recorder.wrote, [], 'no config rewritten');
   assert.deepEqual(e.recorder.wroteText, [], 'an existing fleet config is preserved');
-  assert.match(said(e), /nothing changed except refreshed packages/);
+  assert.match(said(e), /restart the daemon on port 3050/);
 });
 
 // ---------------------------------------------------- the real effects layer --
@@ -286,10 +291,85 @@ test('CHANNEL=nightly installs the NIGHTLY component packages, not stable ones b
   await runInstall([], e);
   const installs = e.recorder.ran.filter((c) => c.join(' ').startsWith('npm i -g')).map((c) => c[c.length - 1]);
   assert.ok(installs.includes('@ours.network/mcp@nightly'), `mcp must be nightly, got: ${installs.join(', ')}`);
+  assert.ok(installs.includes('@ours.network/cli'), `the CLI intentionally stays on its only published channel, got: ${installs.join(', ')}`);
+  assert.ok(!installs.includes('@ours.network/cli@nightly'), 'the CLI has no nightly dist-tag');
   assert.ok(
     !installs.includes('@ours.network/mcp'),
     'and never the untagged name on a nightly run — that installs @latest',
   );
+});
+
+test('an incompatible major is refused before package replacement when purge is declined', async () => {
+  const e = fx({
+    json: {
+      [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' },
+      [join(OURS, 'ours-cli-daemon.json')]: { version: 1, owner: '@ours.network/cli', pid: 42, port: 3050, stateDir: OURS },
+    },
+    net: { 3050: { ok: true, stateDir: OURS, version: '2.9.4' } },
+    packageDeps: { '@ours.network/cli': { '@ours.network/sdk': '^3.0.0' } },
+    answers: [false],
+  });
+  const result = await runDaemonPhase(
+    { stateDir: OURS, port: null, portExplicit: false, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+    e,
+  );
+  assert.equal(result.refused.reason, 'incompatible-major-declined');
+  assert.deepEqual(e.recorder.ran, [], 'the old CLI and daemon are untouched');
+  assert.deepEqual(e.recorder.copied, []);
+  assert.match(said(e), /major upgrades are intentionally incompatible/);
+  assert.match(said(e), /Nothing was changed/);
+});
+
+test('a confirmed incompatible major stops, backs up, purges, and initializes in that order', async () => {
+  const e = fx({
+    json: {
+      [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' },
+      [join(OURS, 'ours-cli-daemon.json')]: { version: 1, owner: '@ours.network/cli', pid: 42, port: 3050, stateDir: OURS },
+    },
+    net: { 3050: { ok: true, stateDir: OURS, version: '2.9.4' } },
+    packageDeps: { '@ours.network/cli': { '@ours.network/sdk': '^3.0.0' } },
+    answers: [true],
+  });
+  const result = await runDaemonPhase(
+    { stateDir: OURS, port: null, portExplicit: false, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+    e,
+  );
+  const backup = join(HOME, '.ours-backups', '.ours-before-v3-1');
+  assert.equal(result.target.action, 'create');
+  assert.equal(result.target.backupPath, backup);
+  assert.deepEqual(e.recorder.copied, [[OURS, backup]]);
+  assert.deepEqual(e.recorder.removedDirs, [OURS]);
+  const commands = e.recorder.ran.map((cmd) => cmd.join(' '));
+  const stop = commands.findIndex((cmd) => cmd.includes('daemon stop'));
+  const uninstall = commands.findIndex((cmd) => cmd.includes('daemon uninstall-service'));
+  const install = commands.findIndex((cmd) => cmd.startsWith('npm i -g'));
+  const start = commands.findIndex((cmd) => cmd.includes('daemon start'));
+  assert.ok(stop >= 0 && stop < uninstall && uninstall < install && install < start, commands.join('\n'));
+  assert.match(said(e), new RegExp(`backup retained at ${backup.replaceAll('.', '\\.')}`));
+});
+
+test('a failed incompatible service removal keeps both copies and restarts the old daemon', async () => {
+  const e = fx({
+    json: {
+      [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' },
+      [join(OURS, 'ours-cli-daemon.json')]: { version: 1, owner: '@ours.network/cli', pid: 42, port: 3050, stateDir: OURS },
+    },
+    net: { 3050: { ok: true, stateDir: OURS, version: '2.9.4' } },
+    packageDeps: { '@ours.network/cli': { '@ours.network/sdk': '^3.0.0' } },
+    answers: [true],
+    runFails: ['uninstall-service'],
+  });
+  await assert.rejects(
+    runDaemonPhase(
+      { stateDir: OURS, port: null, portExplicit: false, dryRun: false, assumeYes: false, brokerUrl: 'wss://b', channel: 'latest' },
+      e,
+    ),
+    /ours exited 1/,
+  );
+  assert.equal(e.recorder.copied.length, 1, 'the completed backup is retained');
+  assert.deepEqual(e.recorder.removedDirs, [], 'the original state was not deleted');
+  assert.ok(e.recorder.ran.some((cmd) => cmd.includes('start')), 'the old daemon is recovered');
+  assert.match(said(e), /service removal failed, but the old daemon was started again/);
 });
 
 test('a nightly run selecting the connector and cowork tags BOTH of them too', async () => {
@@ -460,7 +540,7 @@ test('a --dry-run snapshots nothing, because it wrote nothing', async () => {
   assert.ok(!said(e).includes('rolled back'), 'and says nothing about rolling back');
 });
 
-test('Telegram is configured but its start-coupled service command is never called', async () => {
+test('Telegram config and durable service are one rollback-scoped operation', async () => {
   const e = fx({
     json: { [join(HOME, '.ours-telegram', 'config.json')]: { botToken: 'secret', daemonUrl: 'http://127.0.0.1:9999', daemonStateDir: '/elsewhere' } },
     runFails: ['ours-tg-connector install-service'],
@@ -471,10 +551,10 @@ test('Telegram is configured but its start-coupled service command is never call
     e,
     { stateDir: OURS, port: 3050 },
   );
-  assert.ok(summary.installed.includes('tg'));
+  assert.ok(summary.failed.some((failure) => failure.key === 'tg'));
   assert.ok(e.recorder.wrote.some(([p]) => p === join(HOME, '.ours-telegram', 'config.json')));
-  assert.ok(!e.recorder.ran.some((cmd) => cmd.join(' ').includes('ours-tg-connector install-service')));
-  assert.deepEqual(e.recorder.restored, [], 'staging a stopped connector needs no rollback');
+  assert.ok(e.recorder.ran.some((cmd) => cmd.join(' ').includes('ours-tg-connector install-service')));
+  assert.deepEqual(e.recorder.restored.map(([path]) => path), [join(HOME, '.ours-telegram', 'config.json')]);
 });
 
 test('a component rollback NEVER touches the daemon that came up correctly', async () => {
@@ -707,13 +787,28 @@ test('a dry run recovers nothing, because it stopped nothing', async () => {
 // Whether launchctl accepts the agent is still unproven — nothing here is macOS —
 // but it is now real code rather than a documented refusal.
 
-test('on macOS the run does NOT call install-service, and does not die trying', async () => {
+test('on macOS the daemon boot service is skipped but durable shim services still install', async () => {
   // The SDK CLI's install-service throws on any non-linux platform — its adapter
   // factory's first line — so calling it does not degrade, it fails the run after
   // preflight said the platform was supported. The skip is back with the daemon.
-  const e = fx({ platform: 'darwin', env: { OURS_ASSUME_YES: '1' } });
+  const e = fx({
+    platform: 'darwin',
+    env: { OURS_ASSUME_YES: '1' },
+    versions: { '@ours.network/cowork': '0.5.0' },
+  });
   assert.equal(await runInstall([], e), EXIT_OK, 'the daemon is fine; only the boot service is not');
-  assert.ok(!e.recorder.ran.some((c) => c.join(' ').includes('install-service')), 'never attempted');
+  assert.ok(
+    !e.recorder.ran.some((c) => c.join(' ').includes('daemon install-service')),
+    'the daemon service was not attempted',
+  );
+  assert.ok(
+    e.recorder.ran.some((c) => c.join(' ').includes('ours-tg-connector install-service')),
+    'the Telegram shim is installed as a durable service',
+  );
+  assert.ok(
+    e.recorder.ran.some((c) => c.join(' ').includes('ours-cowork install-service')),
+    'the cowork shim is installed as a durable service',
+  );
   assert.match(said(e), /not available on macOS/);
   assert.match(said(e), /Boot service/, 'and it is marked in the summary, not just in a line');
   assert.match(said(e), /needs attention/);

@@ -158,7 +158,7 @@ test('the hand-off explains the staged Fleet and Telegram state', () => {
   const result = buildHandoffPromptV3({ fleet: true, telegram: true, stateDir: OURS, isDefaultStateDir: true });
   assert.match(result.text, /Review ~\/fleet\.yaml/);
   assert.match(result.text, /stopped FleetCoordinator/);
-  assert.match(result.text, /start the connector only after I approve/);
+  assert.match(result.text, /connector service that ours-install already started/);
 });
 
 test('a non-default state directory adds ONE preamble that names the config path', () => {

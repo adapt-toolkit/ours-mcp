@@ -176,7 +176,11 @@ export function classifyProbe(probe, targetStateDir) {
   if (!samePath(probe.stateDir, targetStateDir)) {
     return { kind: 'foreign', reason: 'daemon owns a different state directory', stateDir: resolve(probe.stateDir) };
   }
-  return { kind: 'present', stateDir: resolve(probe.stateDir) };
+  return {
+    kind: 'present',
+    stateDir: resolve(probe.stateDir),
+    daemonVersion: typeof probe.version === 'string' ? probe.version : null,
+  };
 }
 
 /**
@@ -327,7 +331,13 @@ export async function resolveTarget({ stateDir, port = null, portExplicit = fals
         message: `--port ${port} disagrees with port ${found.port}, where the daemon for ${target} is actually running`,
       };
     }
-    return { action: 'update', port: found.port, stateDir: target, config: found.config };
+    return {
+      action: 'update',
+      port: found.port,
+      stateDir: target,
+      config: found.config,
+      daemonVersion: found.daemonVersion ?? null,
+    };
   }
 
   // Creating. Only now is a port chosen.
