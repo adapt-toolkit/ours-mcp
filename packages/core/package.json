@@ -46,8 +46,8 @@
     "test": "node test/application-identities.test.mjs && node test/cli-delegation.test.mjs && node test/sdk-pin.test.mjs && node test/skill-tool-vocabulary.test.mjs && node test/inbox-push.test.mjs && node test/contact-lines.test.mjs"
   },
   "dependencies": {
-    "@ours.network/cli": "2.0.1",
-    "@ours.network/sdk": "3.0.1"
+    "@ours.network/cli": "2.2.0",
+    "@ours.network/sdk": "3.2.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
