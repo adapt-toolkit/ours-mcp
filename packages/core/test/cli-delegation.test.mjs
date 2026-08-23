@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -11,6 +11,14 @@ writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$@" > "$OURS_TEST_TRACE"\nprintf
 chmodSync(fake, 0o755);
 
 const cli = new URL('../dist/cli.js', import.meta.url);
+const linkedCli = join(root, 'ours-mcp');
+symlinkSync(cli, linkedCli);
+const directVersion = spawnSync(process.execPath, [cli.pathname, 'version'], { encoding: 'utf8' });
+const linkedVersion = spawnSync(process.execPath, [linkedCli, 'version'], { encoding: 'utf8' });
+assert.equal(linkedVersion.status, 0, 'CLI invoked through an npm-style symlink exits successfully');
+assert.equal(linkedVersion.stderr, '');
+assert.equal(linkedVersion.stdout, directVersion.stdout, 'CLI invoked through a symlink executes main');
+
 const result = spawnSync(process.execPath, [cli.pathname, 'status', '--json'], {
   encoding: 'utf8',
   env: { ...process.env, OURS_CLI: fake, OURS_TEST_TRACE: trace },
