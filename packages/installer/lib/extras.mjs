@@ -331,7 +331,7 @@ export function buildHandoffPromptV3({
     steps.push(
       'Finish my Telegram setup without exposing secrets: ask me for the bot name\n'
       + '   and guide me through entering the @BotFather token locally. Register the\n'
-      + '   route, then start the connector only after I approve.',
+      + '   route in the connector service that ours-install already started.',
     );
   }
   if (steps.length === 0) return { text: '', empty: true };

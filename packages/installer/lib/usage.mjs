@@ -13,8 +13,9 @@ export const USAGE = `ours-install — the unified ours.network stack installer.
 
 Progress-driven setup for the whole stack: one shared daemon, MCP, Telegram,
 cowork, detected harness plugins (Claude Code / Codex / Hermes), a Human
-identity, and ours-fleet. The daemon and cowork start; Telegram and Fleet are
-staged but stopped. The installer asks only for information it cannot infer and
+identity, and ours-fleet. The daemon, Telegram connector, and cowork shim start
+as durable services; only Fleet is staged but stopped. The installer asks only
+for information it cannot infer and
 ends with exact next commands plus a copy-paste agent hand-off prompt.
 
   --state-dir  the daemon's STATE DIRECTORY, which is what identifies a daemon

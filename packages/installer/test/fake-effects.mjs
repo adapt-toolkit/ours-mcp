@@ -20,14 +20,14 @@ export function fx({
   json = {}, text = {}, net = {}, taken = [], versions = {}, env = {}, answers = [],
   unitUnchanged = false, harnesses = [], lines = [], platform = 'linux', nodeVersion = '22.0.0',
   runFails = [], voiceReady = false, interactiveOk = true, restoreFails = [], known = [],
-  restoreDoesNotTake = [], restoreChangesMode = [],
+  restoreDoesNotTake = [], restoreChangesMode = [], packageDeps = {},
 } = {}) {
   // A restore that RETURNS without the bytes landing — the case a read-back
   // catches and a returning call cannot. Distinct from `restoreFails`, which
   // throws: this one succeeds loudly and lies quietly.
   const notTaken = new Set();
   const modeDrifted = new Set();
-  const recorder = { ran: [], ranEnv: [], wrote: [], wroteText: [], out: [], asked: [], askedLines: [], interactive: [], restored: [] };
+  const recorder = { ran: [], ranEnv: [], runOptions: [], wrote: [], wroteText: [], copied: [], removedDirs: [], out: [], asked: [], askedLines: [], interactive: [], restored: [] };
   let answerIndex = 0;
   let lineIndex = 0;
   const fails = (cmd) => runFails.some((f) => cmd.join(' ').includes(f));
@@ -52,6 +52,8 @@ export function fx({
     isTaken: (port) => taken.includes(port),
     readJson: (p) => (Object.prototype.hasOwnProperty.call(json, p) ? json[p] : null),
     readText: (p) => (Object.prototype.hasOwnProperty.call(text, p) ? text[p] : null),
+    copyDir: (from, to) => { recorder.copied.push([from, to]); },
+    removeDir: (p) => { recorder.removedDirs.push(p); },
     writeJson: (p, body) => { recorder.wrote.push([p, body]); },
     writeText: (p, body) => { recorder.wroteText.push([p, body]); },
     // The rollback seam. `snapshot` returns what the file looked like before the
@@ -84,6 +86,7 @@ export function fx({
       // Recorded separately so deepEqual assertions on `ran` keep working; the
       // pair invariant is checked against this.
       recorder.ranEnv.push(opts.env ?? null);
+      recorder.runOptions.push(opts);
       if (fails(invocation)) throw new Error(`${cmd} exited 1`);
       const stdout = cmdArgs.includes('install-service') && cmdArgs.includes('--json')
         ? JSON.stringify({ changed: unitUnchanged ? false : true, unitName: 'ours.service' })
@@ -99,6 +102,7 @@ export function fx({
       return { ok: interactiveOk, code: interactiveOk ? 0 : 1 };
     },
     installedVersion: (pkg) => versions[pkg] ?? null,
+    packageDependencies: (spec) => packageDeps[spec] ?? null,
     installedVersions: versions,
     out: (line) => recorder.out.push(String(line)),
     ask: async (prompt) => { recorder.asked.push(prompt); return answers[answerIndex++] ?? false; },

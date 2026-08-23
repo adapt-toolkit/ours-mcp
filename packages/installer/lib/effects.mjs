@@ -12,7 +12,7 @@
 // unit file or the service manager directly.
 
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo, platform as osPlatform, release as osRelease } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { atomicWriteConfig, snapshotConfig, restoreConfig } from './config.mjs';
@@ -29,7 +29,12 @@ async function probePort(port, { timeoutMs = 1500 } = {}) {
     if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
     const body = await res.json();
     if (typeof body?.stateDir !== 'string') return { ok: false, reason: 'no stateDir in reply' };
-    return { ok: true, stateDir: body.stateDir };
+    return {
+      ok: true,
+      stateDir: body.stateDir,
+      version: typeof body.version === 'string' ? body.version : null,
+      compat: Number.isInteger(body.compat) ? body.compat : null,
+    };
   } catch (error) {
     return { ok: false, reason: error?.name === 'AbortError' ? 'timed out' : String(error?.message ?? error) };
   } finally {
@@ -70,6 +75,17 @@ function installedVersionOf(pkg) {
     return JSON.parse(out)?.dependencies?.[pkg]?.version ?? null;
   } catch {
     // Unreadable is NOT "new enough": the cowork gate fails closed on null.
+    return null;
+  }
+}
+
+function packageDependenciesOf(pkgSpec) {
+  const probe = capture('npm', ['view', pkgSpec, 'dependencies', '--json'], { timeout: 15_000 });
+  if (!probe.ok) return null;
+  try {
+    const parsed = JSON.parse(probe.stdout);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
     return null;
   }
 }
@@ -221,6 +237,15 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
     // pure planner already gated four ways, and this deletes exactly that.
     removeDir: (path) => { rmSync(resolve(path), { recursive: true, force: true }); },
     removeFile: (path) => { rmSync(resolve(path), { force: true }); },
+    copyDir: (source, destination) => {
+      mkdirSync(dirname(resolve(destination)), { recursive: true, mode: 0o700 });
+      cpSync(resolve(source), resolve(destination), {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+        preserveTimestamps: true,
+      });
+    },
     // Rewrites a config file we do NOT own, so it keeps the file's own mode
     // rather than imposing 0600: tightening the permissions of somebody else's
     // ~/.codex/config.toml is a side effect nobody asked this to have.
@@ -266,13 +291,17 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
     // invocation only and never to the installer's own process: a state
     // directory selected by one run must not leak into anything the operator
     // starts afterwards.
-    run: async (cmd, args, { env: extraEnv = null } = {}) => {
+    run: async (cmd, args, { env: extraEnv = null, stream = false } = {}) => {
       // Always built from this layer's OWN env rather than left to spawnSync's
       // implicit inheritance, so what a child receives is a property of the
       // effects object a caller constructed and not of whatever ambient shell
       // the installer happened to start in.
       const childEnv = { ...env, ...(extraEnv ?? {}) };
-      const r = spawnSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: childEnv });
+      const r = spawnSync(cmd, args, {
+        encoding: 'utf8',
+        stdio: stream ? ['ignore', 'inherit', 'inherit'] : ['ignore', 'pipe', 'pipe'],
+        env: childEnv,
+      });
       if (r.status !== 0) {
         const detail = (r.stderr || r.stdout || '').trim().split('\n').slice(-3).join('; ');
         throw new Error(`${cmd} ${args.join(' ')} exited ${r.status}${detail ? `: ${detail}` : ''}`);
@@ -289,6 +318,7 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
       return { ok: !r.error && r.status === 0, code: r.status ?? -1 };
     },
     installedVersion: installedVersionOf,
+    packageDependencies: packageDependenciesOf,
     out: out ?? ((line) => process.stdout.write(`${line}\n`)),
     // Never called when assumeYes: the orchestrator takes the default itself.
     ask: async (prompt, def = false) => (ttyFd == null ? def : askYesNo(write, ttyFd, `  ${prompt}  `, def)),
@@ -296,7 +326,7 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
   };
 }
 
-export const __testables = { probePort, portTakenSync, readJsonFile, readTextFile, installedVersionOf, knownStateDirsIn };
+export const __testables = { probePort, portTakenSync, readJsonFile, readTextFile, installedVersionOf, packageDependenciesOf, knownStateDirsIn };
 
 // -----------------------------------------------------------------------------
 // THE PAIR

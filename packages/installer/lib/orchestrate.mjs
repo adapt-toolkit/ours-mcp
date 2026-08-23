@@ -23,7 +23,7 @@
 //   ask(prompt, default)   -> boolean       (never called when assumeYes)
 //   now()                  -> number
 
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { parseInstallArgs, resolveTarget, InstallUsageError } from './target.mjs';
 import { planDaemonConfig, planServiceInstall, serviceInstallCommand } from './plan.mjs';
 import {
@@ -65,6 +65,104 @@ async function perform(effects, dryRun, label, thunk) {
 }
 
 const reason = (error) => (error instanceof Error ? error.message : String(error));
+
+function semverMajor(version) {
+  const match = /^(?:[~^<>= ]*)(\d+)\./.exec(String(version ?? '').trim());
+  return match ? Number(match[1]) : null;
+}
+
+function incompatibleUpgrade(target, cliDependencies) {
+  if (target.action !== 'update' || !target.daemonVersion) return null;
+  const runningMajor = semverMajor(target.daemonVersion);
+  const targetRange = cliDependencies?.['@ours.network/sdk'];
+  const targetMajor = semverMajor(targetRange);
+  if (runningMajor === null) {
+    return { unknown: true, runningMajor: null, runningVersion: target.daemonVersion };
+  }
+  if (targetMajor === null) {
+    return { unknown: true, runningMajor, runningVersion: target.daemonVersion };
+  }
+  return runningMajor !== targetMajor
+    ? { unknown: false, runningMajor, runningVersion: target.daemonVersion, targetMajor, targetRange }
+    : null;
+}
+
+async function prepareIncompatibleUpgrade(args, effects, target, cliPkg, mismatch) {
+  const dir = target.stateDir;
+  const configPath = join(dir, 'config.json');
+  if (mismatch.unknown) {
+    effects.out(warn(`ours: cannot verify whether ${cliPkg} can restore daemon v${mismatch.runningVersion}. Nothing was changed.`));
+    effects.out(info('Check npm registry access and re-run; compatibility checks fail closed.'));
+    return { refused: { reason: 'compatibility-unknown', exitCode: EXIT_REFUSED } };
+  }
+
+  effects.out(warn(
+    `ours: daemon v${mismatch.runningVersion} cannot be restored by the requested major v${mismatch.targetMajor}; major upgrades are intentionally incompatible.`,
+  ));
+  if (resolve(dir) === resolve(effects.home) || dirname(resolve(dir)) === resolve(dir)) {
+    effects.out(info(`Automatic purge is not available for the broad state path ${dir}. Back it up and remove it manually.`));
+    return { refused: { reason: 'incompatible-major-broad-path', exitCode: EXIT_REFUSED } };
+  }
+  // Backups live one directory below a non-daemon container. Putting a copied
+  // state beside ~/.ours under another `.ours*` name makes daemon discovery see
+  // the backup as a second live target on the next installer run.
+  const backupPath = join(
+    dirname(dir),
+    '.ours-backups',
+    `${basename(dir)}-before-v${mismatch.targetMajor}-${effects.now()}`,
+  );
+  if (args.dryRun) {
+    effects.out(info(`[dry-run] would ask to stop the old daemon, copy its complete state to ${backupPath}, remove its service/state, and initialize v${mismatch.targetMajor}.`));
+    return { refused: { reason: 'incompatible-major-dry-run', exitCode: EXIT_REFUSED } };
+  }
+  if (args.assumeYes) {
+    effects.out(info('This purge is never accepted through OURS_ASSUME_YES. Re-run interactively to confirm the backup and reset.'));
+    return { refused: { reason: 'incompatible-major-unattended', exitCode: EXIT_REFUSED } };
+  }
+  if (effects.readJson(join(dir, 'ours-cli-daemon.json')) === null) {
+    effects.out(info('The daemon is not CLI-managed. Stop its external launcher, back up and remove its state/service, then re-run the installer.'));
+    return { refused: { reason: 'incompatible-major-external', exitCode: EXIT_REFUSED } };
+  }
+  const confirmed = await effects.ask(
+    `Back up all daemon state to ${backupPath}, purge the incompatible daemon and service, and install v${mismatch.targetMajor}?`,
+    false,
+  );
+  if (!confirmed) {
+    effects.out(info(`Nothing was changed. Back up ${dir}, remove the old daemon service/state, and re-run when ready.`));
+    return { refused: { reason: 'incompatible-major-declined', exitCode: EXIT_REFUSED } };
+  }
+
+  await perform(effects, false, 'stop the incompatible daemon', () => effects.run(
+    'ours', ['daemon', 'stop', '--state-dir', dir, '--config', configPath], { stream: true },
+  ));
+  try {
+    await perform(effects, false, `back up complete daemon state to ${backupPath}`, () => effects.copyDir(dir, backupPath));
+  } catch (error) {
+    try {
+      await effects.run('ours', ['daemon', 'start', '--state-dir', dir, '--config', configPath], { stream: true });
+      effects.out(ok('backup failed, but the old daemon was started again'));
+    } catch {
+      effects.out(warn(`backup failed and the old daemon did not restart; its state is still untouched at ${dir}`));
+    }
+    throw error;
+  }
+  try {
+    await perform(effects, false, 'remove the incompatible daemon boot service', () => effects.run(
+      'ours', ['daemon', 'uninstall-service', '--yes', '--state-dir', dir, '--config', configPath], { stream: true },
+    ));
+  } catch (error) {
+    try {
+      await effects.run('ours', ['daemon', 'start', '--state-dir', dir, '--config', configPath], { stream: true });
+      effects.out(ok(`service removal failed, but the old daemon was started again; backup retained at ${backupPath}`));
+    } catch {
+      effects.out(warn(`service removal failed and the old daemon did not restart; state remains at ${dir} and the backup is at ${backupPath}`));
+    }
+    throw error;
+  }
+  await perform(effects, false, `remove incompatible state at ${dir}`, () => effects.removeDir(dir));
+  effects.out(ok(`backup retained at ${backupPath}`));
+  return { purged: true, backupPath };
+}
 
 /**
  * A step that is allowed to fail without ending the run.
@@ -184,7 +282,7 @@ export async function runDaemonPhase(args, effects) {
   }
 
   const dir = target.stateDir;
-  const creating = target.action === 'create';
+  let creating = target.action === 'create';
   effects.out(heading(creating ? `target ${dir} — creating a daemon here` : `target ${dir} — daemon found on port ${target.port}`));
   if (target.stalePidRecord) {
     effects.out(info(`a PID record names port ${target.stalePidRecord} but nothing answers there; treating it as stale`));
@@ -213,9 +311,23 @@ export async function runDaemonPhase(args, effects) {
   // adapter each harness spawns. Both are required, but only `ours daemon`
   // participates in lifecycle or service management.
   const mcpPkg = componentSpec(componentByKey('mcp'), args.channel);
+  // The CLI intentionally publishes only `latest`; unlike the lockstep MCP and
+  // connector packages it has no nightly dist-tag. Keep this untagged on every
+  // installer channel, and inspect that package's SDK dependency for the gate.
+  const cliPkg = '@ours.network/cli';
+  if (!creating && target.daemonVersion) {
+    const mismatch = incompatibleUpgrade(target, effects.packageDependencies(cliPkg));
+    if (mismatch) {
+      const prepared = await prepareIncompatibleUpgrade(args, effects, target, cliPkg, mismatch);
+      if (prepared.refused) return { target, refused: prepared.refused, steps };
+      creating = prepared.purged === true;
+      target.backupPath = prepared.backupPath;
+      target.action = 'create';
+    }
+  }
   await perform(effects, args.dryRun, `MCP server installed (npm i -g ${mcpPkg})`, () => effects.run('npm', ['i', '-g', mcpPkg]));
   steps.push({ id: 'mcp-package', changed: true, packageRefresh: true });
-  await perform(effects, args.dryRun, 'ours CLI installed (npm i -g @ours.network/cli)', () => effects.run('npm', ['i', '-g', '@ours.network/cli']));
+  await perform(effects, args.dryRun, `ours CLI installed (npm i -g ${cliPkg})`, () => effects.run('npm', ['i', '-g', cliPkg]));
   steps.push({ id: 'cli', changed: true, packageRefresh: true });
 
   // The config file — merged, never rewritten, and untouched when it already
@@ -249,8 +361,11 @@ export async function runDaemonPhase(args, effects) {
 
   try {
     if (creating) {
-      await perform(effects, args.dryRun, `start the daemon on port ${target.port}`, () => effects.run('ours', ['daemon', 'start', '--config', configPath]));
+      await perform(effects, args.dryRun, `start the daemon on port ${target.port}`, () => effects.run('ours', ['daemon', 'start', '--config', configPath], { stream: true }));
       steps.push({ id: 'start', changed: true });
+    } else {
+      await perform(effects, args.dryRun, `restart the daemon on port ${target.port}`, () => effects.run('ours', ['daemon', 'restart', '--config', configPath], { stream: true }));
+      steps.push({ id: 'restart', changed: true });
     }
 
     const service = await runServicePhase(args, effects, dir, target.port);
@@ -502,14 +617,21 @@ async function attachComponent(component, { args, effects, dir, endpoint, isDefa
       }
     }
     await perform(effects, args.dryRun, `install ${plan.install[3]}`, () => effects.run(plan.install[0], plan.install.slice(1)));
+    const journal = configJournal(effects, { dryRun: args.dryRun });
     if (plan.changed) {
+      journal.snapshot(path);
       await perform(effects, args.dryRun, `write ${path}`, () => effects.writeJson(path, `${JSON.stringify(plan.config, null, 2)}\n`));
     } else {
       effects.out(ok(`${path} already points here — not touched`));
     }
-    effects.out(ok('Telegram connector installed and configured, but not started.'));
-    effects.out(info('After adding a bot, start it explicitly with: ours-tg-connector install-service'));
-    return { key: 'tg', state: 'installed', note: 'configured; stopped' };
+    try {
+      await perform(effects, args.dryRun, 'Telegram connector service installed', () => effects.run(plan.service[0], plan.service.slice(1)));
+    } catch (error) {
+      rollBack(effects, journal, args, 'the Telegram connector service did not come up — putting its daemon selection back');
+      throw error;
+    }
+    effects.out(ok('Telegram connector installed as a durable service on the shared daemon.'));
+    return { key: 'tg', state: 'installed', note: 'configured; service running' };
   }
 
   const path = coworkConfigPath(effects.home, effects.env);
@@ -823,13 +945,9 @@ export async function endScreen(args, effects, { summary, target, isDefaultState
   }
 
   const has = (key) => summary.some((r) => r.key === key && (r.state === 'installed' || r.state === 'current'));
-  if (has('tg') || has('fleet')) {
+  if (has('fleet')) {
     effects.out('');
     effects.out(`  ${c.bold('Installed but intentionally stopped')}`);
-    if (has('tg')) {
-      effects.out(`  ${c.gray('• Telegram: add a bot/route first, then run')}`);
-      effects.out(`    ${c.cyan('ours-tg-connector install-service')}`);
-    }
     if (has('fleet')) {
       effects.out(`  ${c.gray('• Fleet: review the generated coordinator/watchdog config, then run')}`);
       effects.out(`    ${c.cyan('ours-fleet doctor && ours-fleet config && ours-fleet up')}`);
@@ -946,7 +1064,7 @@ export async function runInstall(argv, effects) {
     });
   }
 
-  effects.out(progress(4, 8, 'Install the complete stack', 'Attach MCP, Telegram, and cowork to the same daemon; Telegram stays stopped.'));
+  effects.out(progress(4, 8, 'Install the complete stack', 'Attach MCP, Telegram, and cowork to the same daemon; run both shims as durable services.'));
   const components = await runComponentPhase(args, effects, target);
   for (const component of COMPONENTS) {
     const state = components.installed.includes(component.key) ? 'installed'
@@ -957,7 +1075,7 @@ export async function runInstall(argv, effects) {
       state,
       version: state === 'installed' && !args.dryRun ? (effects.installedVersion(component.pkg) ?? '') : '',
       note: components.failed.find((f) => f.key === component.key)?.reason
-        ?? (state === 'installed' && component.key === 'tg' ? 'configured; stopped'
+        ?? (state === 'installed' && component.key === 'tg' ? 'configured; service running'
           : state === 'installed' && component.key === 'cowork' ? 'configured; service running' : undefined),
     });
   }
