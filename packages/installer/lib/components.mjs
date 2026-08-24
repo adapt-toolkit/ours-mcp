@@ -1,0 +1,258 @@
+// ours-install v3 — component selection and attachment.
+//
+// Spec: installer-spec-v3 §5 (and the repoint half of §7, which cannot be
+// separated from attaching the connector without making a silent move possible).
+// Pure, like target.mjs and plan.mjs: the caller injects the current file
+// contents and the installed versions, and every function returns a plan.
+//
+// The three components are the MCP server, the Telegram connector and cowork.
+// None of them IS the daemon; all three attach to one. The messenger is out of
+// scope by the owner's instruction, and ours-fleet sits on top and is not
+// installed here.
+
+import { join, resolve } from 'node:path';
+
+export const COMPONENTS = [
+  { key: 'mcp', label: 'MCP server', pkg: '@ours.network/mcp', default: true },
+  { key: 'tg', label: 'Telegram connector', pkg: '@ours.network/tg-connector', default: false },
+  { key: 'cowork', label: 'cowork', pkg: '@ours.network/cowork', default: false },
+];
+
+// cowork must be at least this build to understand an external-daemon block.
+export const COWORK_DAEMON_FLOOR = '0.4.1-nightly.20260816.4aaf940';
+
+// -----------------------------------------------------------------------------
+// THE REGISTRY THAT IS NOT OURS TO TOUCH
+// -----------------------------------------------------------------------------
+
+/**
+ * The Telegram connector keeps its OWN registry of routes, and the installer must
+ * never write into it.
+ *
+ *   ~/.ours-telegram/bots.json        the bot registry
+ *   ~/.ours-telegram/<route>/         one directory per route, each holding
+ *                                     identity.key, state_data.bin, connection.json
+ *
+ * (tg-connector `src/connector.ts:35-42,170-173`, `src/config.ts:39`.)
+ *
+ * WHY THIS IS STATED AS A CONSTANT AND ASSERTED BY A TEST. The connector
+ * distinguishes its identities by walking its own state directory, NOT by asking
+ * the daemon: a daemon's identity list is FLAT and carries no attribution to the
+ * app that created it. So there is no way to reconstruct this registry from the
+ * daemon side, and anything the installer clears here is gone. The installer's
+ * entire business with the connector is three keys in one config file.
+ *
+ * This also keeps the door open for the route migration the owner is considering
+ * — moving each route's packet into the shared daemon. That migration has to read
+ * this registry to know which daemon identity corresponds to which route; an
+ * installer that had trampled it would have destroyed the mapping.
+ */
+export const TG_STATE_DIR_NAME = '.ours-telegram';
+export const TG_REGISTRY_FILES = ['bots.json'];
+export const TG_ROUTE_FILES = ['identity.key', 'state_data.bin', 'connection.json'];
+
+export const tgConfigPath = (home, env = {}) => env.OURS_TG_CONFIG ?? join(home, TG_STATE_DIR_NAME, 'config.json');
+export const coworkConfigPath = (home, env = {}) => env.OURS_COWORK_CONFIG ?? join(home, '.ours-cowork', 'config.json');
+
+// -----------------------------------------------------------------------------
+// §5 — selection
+// -----------------------------------------------------------------------------
+
+/**
+ * Which components this run installs. Defaults are MCP server yes, connector no,
+ * cowork no — the same answers a non-interactive run takes, so
+ * `OURS_ASSUME_YES=1 ours-install` produces a daemon plus the MCP server and
+ * nothing else (spec §9).
+ *
+ * `installed` marks a component already present so the question reads "keep it?"
+ * — and DECLINING AN ALREADY-INSTALLED COMPONENT NEVER UNINSTALLS IT. Removal is
+ * `ours-uninstall`. A "no" here means "do not add", never "take it away".
+ */
+export function planComponentSelection({ answers = {}, installed = {}, assumeYes = false } = {}) {
+  return COMPONENTS.map((component) => {
+    const already = installed[component.key] === true;
+    const answer = assumeYes ? component.default : answers[component.key];
+    const wanted = answer === undefined ? (already || component.default) : answer === true;
+    return {
+      ...component,
+      already,
+      action: already ? (wanted ? 'keep' : 'leave-alone') : (wanted ? 'install' : 'skip'),
+    };
+  });
+}
+
+// -----------------------------------------------------------------------------
+// §5 — the MCP server
+// -----------------------------------------------------------------------------
+
+/**
+ * The MCP server runs per session, not as a daemon: the harness spawns
+ * `ours-mcp proxy` over stdio. No systemd unit is installed for it, and the only
+ * thing written to disk is the harness's MCP registration.
+ *
+ * For a non-default state directory the registration carries
+ * `OURS_CONFIG=<state-dir>/config.json`, so the endpoint and the state directory
+ * travel together — which is what keeps "endpoint given, state directory
+ * defaulted" unreachable. Several harnesses can each point at a different daemon
+ * precisely because the pair lives in each registration.
+ */
+export function planMcpAttachment({ stateDir, isDefaultStateDir }) {
+  const dir = resolve(stateDir);
+  return {
+    key: 'mcp',
+    install: ['npm', 'i', '-g', '@ours.network/mcp'],
+    service: null, // deliberate: per-session stdio proxy, never a unit
+    harnessEnv: isDefaultStateDir ? {} : { OURS_CONFIG: join(dir, 'config.json') },
+    writes: ['the harness MCP registration'],
+  };
+}
+
+// -----------------------------------------------------------------------------
+// §5 / §7 — the Telegram connector
+// -----------------------------------------------------------------------------
+
+/**
+ * Attach the connector to this daemon by setting exactly three keys in its config
+ * file, preserving every other key in it — the file also holds the operator's bot
+ * token and STT settings. If all three already match, the file is not touched.
+ *
+ * Both daemon keys are ALWAYS written together. A half-formed pair is what makes
+ * "endpoint selected, state directory defaulted" reachable downstream, and the
+ * SDK refuses that before it opens a socket.
+ *
+ * Returns `action: 'confirm-repoint'` when the connector is currently attached to
+ * a DIFFERENT daemon. There is exactly one `daemonUrl`/`daemonStateDir` pair and
+ * one unit, so pointing it elsewhere MOVES the connector; it does not add a
+ * second one. That is not something to do silently, and unlike the legacy-unit
+ * case it is not recoverable by re-running: the operator's routes would be
+ * talking to a daemon they did not choose.
+ */
+export function planTgAttachment({ existing, endpoint, stateDir, brokerUrl, assumeYes = false }) {
+  const dir = resolve(stateDir);
+  const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+  const desired = { daemonUrl: endpoint, daemonStateDir: dir, brokerUrl };
+
+  const current = typeof base.daemonUrl === 'string' || typeof base.daemonStateDir === 'string'
+    ? { daemonUrl: base.daemonUrl ?? null, daemonStateDir: base.daemonStateDir ?? null }
+    : null;
+  const pointsElsewhere = current !== null
+    && (current.daemonStateDir === null || resolve(current.daemonStateDir) !== dir);
+
+  const merged = { ...base };
+  const changes = [];
+  for (const [key, value] of Object.entries(desired)) {
+    if (value === undefined || value === null) continue;
+    if (merged[key] === value) continue;
+    changes.push(key);
+    merged[key] = value;
+  }
+  const plan = {
+    key: 'tg',
+    install: ['npm', 'i', '-g', '@ours.network/tg-connector'],
+    changed: changes.length > 0,
+    changes,
+    config: merged,
+    // Written BEFORE the service: `ours-tg-connector install-service` bakes the
+    // resolved values into the unit as environment, and environment outranks the
+    // config file afterwards.
+    service: ['ours-tg-connector', 'install-service'],
+    untouched: [...TG_REGISTRY_FILES, ...TG_ROUTE_FILES],
+  };
+  if (!pointsElsewhere) return { ...plan, action: plan.changed ? 'attach' : 'unchanged' };
+  const repoint = {
+    ...plan,
+    action: 'confirm-repoint',
+    from: current,
+    to: { daemonUrl: endpoint, daemonStateDir: dir },
+    prompt: `The Telegram connector currently uses ${current.daemonUrl ?? 'an unrecorded daemon'} (${current.daemonStateDir ?? 'unrecorded state directory'}).\nPoint it at ${endpoint} (${dir}) instead? This MOVES the connector; it does not add a second one.`,
+  };
+  // Never repointed without a human, in any mode (spec §9).
+  return assumeYes ? { ...repoint, action: 'skip-repoint', reason: 'never repointed non-interactively' } : repoint;
+}
+
+// -----------------------------------------------------------------------------
+// §5 — cowork
+// -----------------------------------------------------------------------------
+
+/**
+ * Compare an installed version against a floor. Prerelease-aware and CONSERVATIVE
+ * by design: anything unparseable is "too old", because the failure it guards is
+ * handing a daemon block to a build whose config is strict and whose boot is
+ * fail-closed. Being wrong in the cautious direction leaves cowork embedded;
+ * being wrong the other way stops it starting.
+ */
+export function atLeastVersion(actual, floor) {
+  const parse = (v) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(String(v ?? '').trim());
+    return m ? { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? null } : null;
+  };
+  const a = parse(actual);
+  const b = parse(floor);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i += 1) {
+    if (a.nums[i] !== b.nums[i]) return a.nums[i] > b.nums[i];
+  }
+  if (a.pre === b.pre) return true;
+  if (a.pre === null) return true; // a release outranks any prerelease of the same version
+  if (b.pre === null) return false;
+  return a.pre >= b.pre;
+}
+
+/**
+ * cowork's external-daemon block. Both halves are required: a half-formed block
+ * is REFUSED rather than written, because cowork's boot is fail-closed.
+ *
+ * The top-level `stateDir` in that file is cowork's OWN private state and is left
+ * alone; only `daemon.stateDir` is the ours daemon's. Confusing the two fails
+ * closed at boot, which is why they are never touched in the same write.
+ */
+export function planCoworkAttachment({ existing, endpoint, stateDir, installedVersion }) {
+  const dir = resolve(stateDir);
+  if (!endpoint || !stateDir) {
+    return { key: 'cowork', action: 'refuse', reason: 'half-formed-block', message: 'a cowork daemon block needs both an endpoint and a state directory; refusing to write half of one' };
+  }
+  if (!atLeastVersion(installedVersion, COWORK_DAEMON_FLOOR)) {
+    return {
+      key: 'cowork',
+      action: 'leave-embedded',
+      reason: 'version-floor',
+      installedVersion: installedVersion ?? null,
+      message: `the installed cowork (${installedVersion ?? 'version unreadable'}) predates ${COWORK_DAEMON_FLOOR}, which is the first build that understands an external-daemon block; leaving cowork embedded`,
+    };
+  }
+  const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+  const daemon = { mode: 'external', endpoint, stateDir: dir };
+  const unchanged = base.daemon
+    && base.daemon.mode === 'external'
+    && base.daemon.endpoint === endpoint
+    && typeof base.daemon.stateDir === 'string'
+    && resolve(base.daemon.stateDir) === dir;
+  return {
+    key: 'cowork',
+    action: unchanged ? 'unchanged' : 'attach',
+    install: ['npm', 'i', '-g', '@ours.network/cowork'],
+    changed: !unchanged,
+    // The top-level stateDir is cowork's own; it is copied through untouched.
+    config: { ...base, daemon },
+    service: ['ours-cowork', 'install-service'],
+  };
+}
+
+// -----------------------------------------------------------------------------
+// §5 — one component failing does not stop the others
+// -----------------------------------------------------------------------------
+
+/**
+ * A component that fails is reported with its reason and the exact manual
+ * command, and the run continues to the next. The daemon and the
+ * already-installed components stay as they are — a failed component is never a
+ * reason to undo a successful one.
+ */
+export function summarizeComponentRun(results) {
+  return {
+    installed: results.filter((r) => r.state === 'installed').map((r) => r.key),
+    failed: results.filter((r) => r.state === 'failed').map((r) => ({ key: r.key, reason: r.reason, retry: r.retry ?? null })),
+    skipped: results.filter((r) => r.state === 'skipped').map((r) => r.key),
+    continued: true,
+  };
+}
