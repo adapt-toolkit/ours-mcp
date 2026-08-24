@@ -14,7 +14,6 @@
     "dev": "npm --workspace @ours.network/mcp run dev"
   },
   "devDependencies": {
-    "@adapt-toolkit/broker": "0.10.12",
-    "@adapt-toolkit/mufl": "0.10.12"
+    "@adapt-toolkit/broker": "0.10.12"
   }
 }

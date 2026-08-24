@@ -81,9 +81,13 @@ const baseEnv = () => ({
 });
 
 let PORT;
+let daemonStderr = '';
 
 async function waitDaemon() {
   for (let i = 0; i < 80; i++) {
+    if (daemon?.exitCode !== null) {
+      throw new Error(`daemon exited before readiness (${daemon.exitCode}): ${daemonStderr.slice(-2000)}`);
+    }
     try {
       const r = await fetch(`http://127.0.0.1:${PORT}/state-dir`);
       if (r.ok) return true;
@@ -92,7 +96,7 @@ async function waitDaemon() {
     }
     await sleep(250);
   }
-  throw new Error('daemon did not come up on :' + PORT);
+  throw new Error(`daemon did not come up on :${PORT}: ${daemonStderr.slice(-2000)}`);
 }
 
 /** A live process whose pid stands in for a harness. `end()` makes it dead. */
@@ -120,6 +124,11 @@ function fakeClient() {
 // `client:<pid>`), which is what a non-Claude supervisor actually looks like.
 async function connectProxy(label, sessionId, clientPid, extra = {}) {
   const env = { ...baseEnv(), OURS_CLIENT_PID: String(clientPid), ...extra };
+  // The shared daemon owns broker and maintenance settings. The stdio adapter
+  // selects it by the coherent port/state pair and intentionally rejects daemon-
+  // only environment inherited from older embedded-daemon launchers.
+  delete env.OURS_BROKER_URL;
+  delete env.OURS_GC_INTERVAL_MS;
   if (sessionId) env.CLAUDE_CODE_SESSION_ID = sessionId;
   else delete env.CLAUDE_CODE_SESSION_ID;
   const transport = new StdioClientTransport({
@@ -153,9 +162,10 @@ try {
   mkdirSync(STATE, { recursive: true });
   daemon = spawn('node', [CLI, 'serve'], {
     env: { ...baseEnv(), OURS_GC_INTERVAL_MS: '3600000' },
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
     detached: true,
   });
+  daemon.stderr.on('data', (chunk) => { daemonStderr += chunk.toString(); });
   await waitDaemon();
   console.log('OURS_BIND_IDENTITY — supervisor-named startup binding\n');
 
@@ -167,10 +177,12 @@ try {
   {
     const c = fakeClient();
     const s = await connectProxy('setup', 'sess-setup', c.pid, { OURS_NO_AUTORESTORE: '1' });
-    assert((await call(s.client, 'create_identity', { name: 'Ana', expose_local: false })).ok, '(1) setup: create Ana');
+    const ana = await call(s.client, 'create_identity', { name: 'Ana', expose_local: false });
+    assert(ana.ok, `(1) setup: create Ana${ana.ok ? '' : ` (${ana.text})`}`);
+    const bo = await call(s.client, 'create_identity', { name: 'Bo', expose_local: false });
     assert(
-      (await call(s.client, 'create_identity', { name: 'Bo', expose_local: false })).ok,
-      '(1) setup: create Bo (switches this session\'s binding to Bo, releasing Ana)',
+      bo.ok,
+      `(1) setup: create Bo (switches this session's binding to Bo, releasing Ana)${bo.ok ? '' : ` (${bo.text})`}`,
     );
     await sleep(300);
     await s.transport.close();

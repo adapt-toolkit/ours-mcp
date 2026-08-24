@@ -9,7 +9,7 @@
 // identity's on-disk unread.json snapshot DIRECTLY (no MCP / network call), so a
 // resuming agent notices mail that arrived while it was away. The snapshot is
 // content-free (sender + id + date, no body) and is re-derived by the daemon from
-// the packet — the authority on read/processed state — so the backlog clears
+// the identity history database — the authority on unread/read state — so the backlog clears
 // itself once the agent calls get_messages.
 //
 // Hooks must stay fast and must never block the session: any error is swallowed
@@ -21,10 +21,31 @@ import { resolve, join, dirname } from 'node:path';
 
 type HookKind = 'session-start' | 'user-prompt-submit';
 
-// Same resolution as the server (src/index.ts) so both read the same dir.
-const STATE_DIR = resolve(
-  process.env.OURS_STATE_DIR ?? resolve(homedir(), '.ours'),
-);
+function readJsonObject(path: string): Record<string, unknown> {
+  const value = JSON.parse(fs.readFileSync(path, 'utf8')) as unknown;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${path} must contain an object`);
+  return value as Record<string, unknown>;
+}
+
+// Hooks read body-free metadata directly, using the same explicit daemon
+// selection as the SDK-backed proxy.
+function hookStateDir(): string {
+  if (process.env.OURS_STATE_DIR) return resolve(process.env.OURS_STATE_DIR);
+  const home = homedir();
+  if (process.env.OURS_CONFIG) {
+    const config = readJsonObject(process.env.OURS_CONFIG);
+    return resolve(typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'));
+  }
+  if (process.env.OURS_PORT || process.env.OURS_API_TOKEN) {
+    throw new Error('explicit port/token requires OURS_STATE_DIR or OURS_CONFIG');
+  }
+  return resolve(home, '.ours');
+}
+
+const STATE_DIR: string | null = (() => {
+  try { return hookStateDir(); }
+  catch { return null; } // corrupt explicit selection: fail closed with a benign hook no-op
+})();
 
 // A workspace can pin itself to an identity by dropping this file at the repo
 // root (NOT under .claude/ — keeping it top-level lets users gitignore it by its
@@ -52,7 +73,7 @@ type NotifyMeta = { from: string; msg_id: number | string; date: string };
 type Unread = { name: string; count: number; recent: NotifyMeta[] };
 
 // The daemon writes a content-free unread snapshot per identity (unread.json),
-// re-derived from the packet (the authority for read/processed state) after each
+// re-derived from the identity history database (the authority for unread/read state) after each
 // change. We just read it — no message bodies ever touch this hook.
 function readUnreadSnapshot(dir: string): Unread | null {
   let raw: string;
@@ -79,12 +100,17 @@ function readUnreadSnapshot(dir: string): Unread | null {
 }
 
 function collectUnread(): Unread[] {
+  if (!STATE_DIR) return [];
   let names: string[];
   try {
-    names = fs
-      .readdirSync(STATE_DIR, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name);
+    const appPath = process.env.OURS_MCP_CONFIG || join(homedir(), '.ours-mcp', 'config.json');
+    const config = readJsonObject(appPath);
+    if (config.version !== 1) throw new Error('unsupported ours-mcp application identity config version');
+    const daemons = config.daemons as Record<string, unknown> | undefined;
+    const selected = daemons?.[resolve(STATE_DIR)] as { identities?: unknown } | undefined;
+    names = Array.isArray(selected?.identities)
+      ? selected.identities.filter((name): name is string => typeof name === 'string' && name.length > 0)
+      : [];
   } catch {
     return [];
   }
@@ -110,7 +136,7 @@ function renderContext(unread: Unread[]): string {
   return (
     `ours — ${total} unread message(s) across ${unread.length} ` +
     `identit${unread.length === 1 ? 'y' : 'ies'} (arrived while you were away; ` +
-    `senders shown, bodies stay in the packet):\n` +
+    `senders shown, bodies stay in owner-private history storage):\n` +
     `${lines.join('\n')}\n\n` +
     `This is informational — surface it to the user; do not bind an identity, read ` +
     `mail, or arm a monitor on your own. If the user wants the messages: ` +
@@ -167,6 +193,7 @@ function findPinnedIdentity(start: string): IdentityPin | null {
 // An identity is "known" once the daemon has a state dir for it. Lets us tell
 // the agent whether to choose_identity (exists) or create_identity (new).
 function identityExists(name: string): boolean {
+  if (!STATE_DIR) return false;
   try {
     return fs.statSync(join(STATE_DIR, name)).isDirectory();
   } catch {
@@ -184,6 +211,7 @@ function identityExists(name: string): boolean {
 // (Tradeoff: bindings are daemon-global, so a concurrent session's binding also
 // suppresses it; the session-start directive still covers that session.)
 function anyIdentityBound(): boolean {
+  if (!STATE_DIR) return false;
   let snap: { pid?: unknown; bound?: unknown };
   try {
     snap = JSON.parse(fs.readFileSync(join(STATE_DIR, 'bindings.json'), 'utf8'));

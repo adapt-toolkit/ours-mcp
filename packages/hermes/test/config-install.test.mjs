@@ -22,9 +22,12 @@ test('config without our top-level keys -> append', () => {
   assert.equal(planConfigInstall(cfg).action, 'append');
 });
 
-test('already-installed config (sentinel present) -> noop', () => {
-  const cfg = `model:\n  provider: nous\n\n${SENTINEL}\nmcp_servers:\n  ours:\n    command: ours-mcp\n`;
-  assert.equal(planConfigInstall(cfg).action, 'noop');
+test('already-associated managed block is idempotent; legacy block is migrated', () => {
+  assert.equal(planConfigInstall(BLOCK).action, 'noop');
+  const legacy = BLOCK.replace('args: ["proxy"]', 'args: ["proxy", "--application", "hermes"]');
+  assert.equal(planConfigInstall(legacy).action, 'replace');
+  const incomplete = `model:\n  provider: nous\n\n${SENTINEL}\nmcp_servers:\n`;
+  assert.equal(planConfigInstall(incomplete).action, 'manual');
 });
 
 test('existing mcp_servers: top-level -> manual (never corrupt)', () => {

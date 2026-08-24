@@ -1,136 +1,93 @@
 # @ours.network/mcp
 
-Agent-agnostic MCP server for **ours** — a native ADAPT node exposing secure
-agent-to-agent messaging tools. It is platform-neutral (no Claude Code / Codex /
-Cursor specifics); per-platform plugins depend on this package and run its
-`proxy` to reach the daemon.
+The agent-facing MCP adapter for the shared ours daemon.
 
-The server **is** the node: on startup it boots a single ADAPT packet (a MUFL
-messenger), restores prior state from the state dir, connects to the broker, and
-exposes the messaging tools — each a thin wrapper over one MUFL user transaction:
+`ours-mcp` does not contain, start, configure, or install a daemon. Install
+`@ours.network/cli@2.2.0`, configure it with `ours config setup`, and start the
+single shared service with `ours daemon start` (or `ours daemon install-service`).
 
-- `generate_invite` — invite to share out-of-band (optionally named; `mode`
-  `"one_time"` default or `"public"` for a reusable open-posting invite)
-- `list_invites` / `revoke_invite` — outstanding invites; revocation is the only
-  way to close a public invite (idempotent)
-- `add_contact` — add a contact from an invite blob (TOFU)
-- `list_contacts`
-- `remove_contact` — contacts-layer forget + one best-effort authenticated
-  "remove me" notice to the peer (fire-and-forget; remote removal NOT guaranteed)
-- `create_temporary_identity` / `close_temporary_identity` — session-scoped,
-  ephemeral role delegated under the existing Human/root and owned by exactly one
-  session lease. Normal Codex/Claude SessionEnd waits for best-effort remove-me
-  notices and complete local deletion. Abrupt process death is the only stale path;
-  the daemon reclaims it on a bounded five-second detection interval (configurable
-  for tests with `OURS_SESSION_REAPER_INTERVAL_MS`). Permanent identities never sweep.
-- `send_message` — end-to-end encrypted; optional `reply_to_wire_id` (+ `reply_to_sentence`) to reply to a specific message
-- `get_messages` — return unread messages (bodies, each with its `wire_id` + any `reply_to`) + mark read; delivered exactly once
-- `mark_processed` / `defer_messages` — remove handled messages, or re-queue read ones for another session
-- `list_incoming_messages` — full inbox with ids + status (read-only)
-- `list_incoming_files` — byte-free structured preauthorization metadata, including authenticated sender CID (`from.id`), separate display name, stable IDs, size/date/status, filename and MIME
-- `get_files({ wire_ids? })` — atomically retrieve only approved unread wire IDs; omitting `wire_ids` preserves legacy all-unread retrieval. Results include safe local paths, actual size/hash, provenance/status, and structured voice transcription outcomes
+## MCP configuration
 
-File wake events are content-free but correlation-complete: authenticated `sender_id`,
-`file_id`, `wire_id`, display name, filename, MIME, byte count, and received date. A caller
-must authorize against `sender_id`, never the untrusted display label. Selected IDs are
-unique 64-hex wire IDs (maximum 32); malformed, duplicate, unknown, or stale selections
-fail atomically without retrieving or writing any file.
-
-## Configuration
-
-| Env var | Default | Meaning |
-|---------|---------|---------|
-| `OURS_STATE_DIR` | `~/.ours` | Node identity + serialized state. Distinct per node. |
-| `OURS_BROKER_URL` | `wss://broker1.ours.network` | The ADAPT broker to connect through. Set to `ws://localhost:9000` for a local broker. |
-
-### Voice-message transcription
-
-Voice transcription is off until a provider and key (plus provider-required fields) are
-configured. Check readiness without exposing credentials:
-
-```sh
-ours-mcp voice-setup
-ours-mcp voice-status --json
+```json
+{
+  "mcpServers": {
+    "ours": {
+      "command": "ours-mcp",
+      "args": ["proxy"]
+    }
+  }
+}
 ```
 
-`voice-setup` presents a keyboard-driven single-choice provider selector and reads the
-provider key with hidden input. It writes config atomically with mode `0600`, preserves
-unrelated fields, and rolls back if the managed daemon cannot restart and report ready.
-It never accepts a key in command arguments. For environment-only service configuration
-use `OURS_STT_PROVIDER`, `OURS_STT_API_KEY`, `OURS_STT_MODEL`, `OURS_STT_BASE_URL`, and
-`OURS_STT_LANGUAGE`; environment values override file fields.
+`proxy` attaches through `@ours.network/sdk@3.2.2`. It uses the SDK's coherent
+daemon selection (`OURS_CONFIG`, or matching `OURS_PORT` and `OURS_STATE_DIR`)
+and verifies `/state-dir` before credentials are sent. An unavailable daemon is
+reported with install/start guidance; it is never started inside the MCP process.
 
-The supported providers are `openai-compatible` (explicit base URL + model),
-`elevenlabs` (model), `deepgram`, and `custom` (`stt.custom.url`). Incoming voice remains
-a file and is transcribed only when its real `audio/*` MIME also carries
-`x-ours-kind=voice-message` (or its legacy filename starts `voice-message-`). The original
-bytes are saved whether transcription succeeds, is unconfigured, exceeds the size cap, or
-the provider fails. `get_files` preserves the human transcript/fallback line and also returns
-a secret-free structured outcome (`configured`, `attempted`, `status`, `provider`, `text`,
-`error_category`, `audio_path`, and `file_wire_id`). Provider error text is scrubbed if it
-echoes the configured key and raw provider diagnostics are not copied into structured output.
+Legacy daemon variables such as `OURS_AUTOSTART`, `OURS_TRANSPORT`, and
+`OURS_UNIT_DIR` are rejected. Named `--application` selections are also rejected;
+use the SDK daemon selection variables instead.
 
-Telegram fallback preserves its original OGG/Opus bytes and `.ogg` filename and advertises
-`audio/ogg; x-ours-kind=voice-message`; the connector's v2 message envelope correlates the
-separate file using `attachment.wire_id`.
+## Application identity list
 
-## Daemon lifecycle
+The daemon hosts all identities. ours-mcp keeps only the identities adopted by
+this application and filters global listings through that set. Fresh installs
+start empty. Creating an identity or successfully calling `choose_identity`
+adopts it; closing or removing one deletes it from the application list.
 
-This package is the **single owner of the daemon lifecycle**. `ours-mcp start`
-runs one long-lived HTTP daemon per host (default port 3050) that hosts every
-identity's packet, the broker socket, and file locks — a shared singleton that
-cannot be run per session. Each session instead runs a thin `ours-mcp proxy`
-(stdio ⇄ the daemon's HTTP endpoint), which auto-starts the daemon if it is down.
-Platform plugins ship only the proxy invocation; they never own or restart the
-daemon.
+The file defaults to `~/.ours-mcp/config.json` and can be overridden for tests
+with `OURS_MCP_CONFIG`. Its versioned shape is:
 
-Temporary identities require an existing Human/root and are delegated before the
-create call succeeds. Older unassociated records are migration input, not a runtime
-identity kind: a host with a Human/root delegates them during boot; otherwise they
-remain quarantined and cannot be bound or advertised until the Human/root is created.
-For name-level management compatibility, `/identities` reports such a record as
-`{ name, status: "quarantined" }`; it deliberately has no identity `kind`, container
-ID, routing metadata, or lease surface.
-The `ours-mcp session-end` hook seam opens a short transport with the same lease token
-as the session and sends MCP DELETE. The daemon awaits every temporary role owned by
-that token—including roles switched away from—before acknowledging normal close.
-
-`ours-mcp start` and `ours-mcp restart` do not treat an open socket as readiness.
-They wait for an authenticated response from the daemon's normal control
-surface (`/identities`) after the protocol runtime, contact-book registrar,
-persisted identities, and boot reconciliation are complete. In owner mode the
-CLI dynamically discovers the mode-`0600` token minted by the daemon before it
-declares readiness; shared and open modes preserve their configured auth
-semantics. During that wait the daemon publishes a mode-`0600`
-`startup-progress.json` in its state directory. The structured record contains
-only a phase, timestamps, process/boot identifiers, and identity counts — never
-identity names, container IDs, keys, packet contents, or state paths.
-
-Interactive terminals update one progress line; redirected/noninteractive runs
-emit concise stable lines such as `startup: Restoring identities 3/12`. A
-heartbeat distinguishes active work from a frozen process: 30 seconds without
-an update is a failure, and an absolute three-minute bound prevents an
-event-loop-active stall from waiting forever. Immediate daemon failure remains
-nonzero. The same daemon bootstrap/reporting path is used by foreground
-`serve`, Linux systemd, macOS launchd, and either native or WASM-backed ADAPT
-runtimes; service managers keep their existing lifecycle behavior.
-
-On connect, the proxy runs a compatibility handshake against the daemon's
-`/state-dir` report (`{ version, compat }`). `compat` is the wire-contract
-version (`src/protocol.ts`) — distinct from the package version, bumped only on
-breaking proxy↔daemon changes. Matching `compat` proceeds; a differing package
-version warns (stderr); an incompatible `compat` refuses with guidance to run
-`ours-mcp stop`. The proxy never kills the shared daemon itself, since it may
-be hosting other sessions' identities.
-
-## Build
-
-```sh
-npm run build        # esbuild → minified dist/{index,cli}.js + dist/mufl_code/*.muflo
-npm run build:dev    # readable build (unminified, intact stack traces)
-npm run typecheck
-npm run dev          # run the daemon under tsx
+```json
+{
+  "version": 1,
+  "daemons": {
+    "/absolute/daemon/state-dir": {
+      "identities": ["BuildBot"]
+    }
+  }
+}
 ```
 
-See the [repo README](https://github.com/adapt-toolkit/ours-mcp#readme) for install
-and quickstart.
+This list is application bookkeeping, not authorization. `choose_identity`
+remains able to select any daemon identity and adopts it on success. Vanished
+names remain recorded but are not rendered; idempotent close/remove cleans them.
+
+## Compatibility CLI
+
+Former ours-mcp lifecycle entry points remain compatibility aliases that
+delegate argv, stdio, and exit status to `ours daemon`. The `ours` executable
+must be on `PATH`, or its exact path may be provided through `OURS_CLI`. No
+command falls back to an embedded daemon.
+
+`ours-mcp watch [identity]` streams inbound JSON Lines. With no identity argument,
+only live identities in the selected daemon's ours-mcp application list are
+watched.
+
+## Message and file history
+
+The daemon stores application payloads outside the protocol packet: message bodies
+in an owner-private per-identity SQLite database and file bytes in immutable
+content-addressed blobs. `get_messages` and `get_files` consume bounded unread
+batches and mark them read. `list_history` / `get_history_item` and `list_files` /
+`get_file_info` provide persistent read-only history with authenticated-peer,
+direction, and cursor filters. `save_file` streams a stored blob to a caller-owned
+path without placing bytes in MCP content.
+
+This storage epoch is a breaking reset with no migration or fallback. A daemon
+that finds old packet state refuses startup without changing it. Operators may
+back it up and must remove it themselves before starting clean; installers never
+delete identity state implicitly.
+
+The external-history integration requires the published `@ours.network/sdk@3.2.2`
+and `@ours.network/cli@2.2.0` artifacts. Both are pinned exactly so registry-only
+installs use the validated contract; there is no compatibility fallback.
+
+## Development
+
+```sh
+npm install
+npm run build --workspace @ours.network/mcp
+npm run typecheck --workspace @ours.network/mcp
+npm test --workspace @ours.network/mcp
+```

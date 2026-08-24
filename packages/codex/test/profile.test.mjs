@@ -6,54 +6,64 @@ import { tmpdir } from 'node:os';
 
 import { parseOursArgs, resolveDaemonProfile } from '../src/profile.mjs';
 
-test('ours port flag wins and is removed from Codex args', async () => {
-  const calls = [];
+const daemonFetch = (stateDir, calls = []) => async (url, init = {}) => {
+  calls.push([String(url), init.headers]);
+  if (String(url).endsWith('/state-dir')) return Response.json({ stateDir, version: '2.0.1', compat: 1 });
+  if (String(url).endsWith('/info')) return Response.json({ name: 'ours', version: '2.0.1', protocol: 1, stateDir });
+  return Response.json({ identities: [] });
+};
+
+test('ours port flag is removed from Codex args and requires coherent state selection', async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'ours-codex-state-'));
   const profile = await resolveDaemonProfile({
     argv: ['--model', 'gpt-5', '--ours-port', '4050', '--full-auto'],
-    env: { OURS_PORT: '3051', OURS_API_TOKEN: 'token' },
-    readConfig: async () => ({ port: 3052 }),
-    fetch: async (url, init = {}) => {
-      calls.push([String(url), init.headers]);
-      return String(url).endsWith('/info')
-        ? Response.json({ name: 'ours', port: 4050, pid: 42, version: '0.9.1', protocol: 1, stateDir: '/tmp/state' })
-        : Response.json({ identities: [] });
-    },
+    env: { OURS_STATE_DIR: stateDir, OURS_API_TOKEN: 'token' },
+    fetch: daemonFetch(stateDir),
   });
   assert.equal(profile.port, 4050);
-  assert.equal(profile.source, '--ours-port');
   assert.equal(profile.token, 'token');
   assert.deepEqual(profile.codexArgs, ['--model', 'gpt-5', '--full-auto']);
-  assert.deepEqual(calls[1][1], { 'x-ours-api-token': 'token' });
+
+  await assert.rejects(
+    resolveDaemonProfile({ argv: ['--ours-port', '4050'], env: {}, fetch: daemonFetch(stateDir) }),
+    /state directory/i,
+  );
 });
 
-test('profile precedence is flag, env, explicit config, default config, built-in', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'ours-profile-'));
-  const explicit = join(dir, 'custom.json');
-  await writeFile(explicit, JSON.stringify({ port: 4011, apiToken: 'cfg-token', apiVisibility: 'shared' }));
-  const fetch = async (url) => String(url).endsWith('/info')
-    ? Response.json({ name: 'ours', version: '0.9.1', protocol: 1, stateDir: dir })
-    : Response.json({ identities: [] });
-
-  assert.equal((await resolveDaemonProfile({ argv: [], env: { OURS_PORT: '4010' }, readConfig: async () => ({ port: 4012 }), fetch })).port, 4010);
-  assert.equal((await resolveDaemonProfile({ argv: [], env: { OURS_CONFIG: explicit }, fetch })).port, 4011);
-  assert.equal((await resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({ port: 4012 }), fetch })).port, 4012);
-  assert.equal((await resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch })).port, 3050);
+test('explicit config selects and verifies one shared daemon without associations', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ours-codex-config-'));
+  const stateDir = join(root, 'state');
+  const configPath = join(root, 'config.json');
+  await writeFile(configPath, JSON.stringify({ port: 4060, stateDir, apiToken: 'selected-token' }));
+  const calls = [];
+  const profile = await resolveDaemonProfile({
+    env: { OURS_CONFIG: configPath },
+    fetch: daemonFetch(stateDir, calls),
+  });
+  assert.equal(profile.port, 4060);
+  assert.equal(profile.stateDir, stateDir);
+  assert.equal(profile.configPath, configPath);
+  assert.equal(profile.token, 'selected-token');
+  assert.deepEqual(calls.at(-1)[1], { 'x-ours-api-token': 'selected-token' });
 });
 
-test('rejects malformed flags, unreachable and incompatible daemons', async () => {
+test('selection and capability failures stay loud', async () => {
   assert.throws(() => parseOursArgs(['--ours-port', '0']), /valid TCP port/);
   assert.throws(() => parseOursArgs(['--ours-port']), /requires a value/);
-  await assert.rejects(() => resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch: async () => { throw new Error('refused'); } }), /not reachable.*never starts/i);
-  await assert.rejects(() => resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch: async () => Response.json({ name: 'other', protocol: 99 }) }), /incompatible/);
-  await assert.rejects(() => resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch: async (url) => String(url).endsWith('/info') ? Response.json({ name: 'ours', protocol: 1, stateDir: '/tmp/x' }) : new Response('no', { status: 401 }) }), /authentication failed/);
-  await assert.rejects(() => resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch: async (url) => {
-    if (String(url).endsWith('/info')) return Response.json({ name: 'ours', protocol: 1, stateDir: '/tmp/x' });
-    if (String(url).endsWith('/identities')) return Response.json({ identities: [] });
-    return new Response('missing', { status: 404 });
-  } }), /unread API/);
-  await assert.rejects(() => resolveDaemonProfile({ argv: [], env: {}, readConfig: async () => ({}), fetch: async (url) => {
-    if (String(url).endsWith('/info')) return Response.json({ name: 'ours', protocol: 1, stateDir: '/tmp/x' });
-    if (String(url).endsWith('/identities')) return Response.json({ identities: [] });
-    throw new Error('daemon vanished');
-  } }), /unread capability check failed.*daemon vanished/);
+  const stateDir = await mkdtemp(join(tmpdir(), 'ours-codex-fail-'));
+  await assert.rejects(
+    resolveDaemonProfile({ env: { OURS_STATE_DIR: stateDir }, fetch: async () => { throw new Error('refused'); } }),
+    /not available|no ours daemon|refused/i,
+  );
+  await assert.rejects(
+    resolveDaemonProfile({
+      env: { OURS_STATE_DIR: stateDir },
+      fetch: async (url) => String(url).endsWith('/state-dir')
+        ? Response.json({ stateDir, version: '2.0.1', compat: 1 })
+        : String(url).endsWith('/info')
+          ? Response.json({ name: 'ours', protocol: 1, stateDir })
+          : new Response('no', { status: 401 }),
+    }),
+    /authentication failed/,
+  );
 });

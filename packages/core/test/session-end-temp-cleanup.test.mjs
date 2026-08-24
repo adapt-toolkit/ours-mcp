@@ -85,6 +85,10 @@ const env = {
   OURS_STATE_DIR: stateDir,
   OURS_TRANSPORT: 'http',
 };
+const proxyEnv = { ...env };
+delete proxyEnv.OURS_AUTOSTART;
+delete proxyEnv.OURS_BROKER_URL;
+delete proxyEnv.OURS_TRANSPORT;
 
 const daemon = spawn(process.execPath, [CLI, 'serve'], { env, stdio: 'ignore' });
 let proxy;
@@ -94,14 +98,17 @@ try {
     await sleep(100);
   }
 
-  let connected = await connectProxy(env, 'claude-session-end-test');
+  let connected = await connectProxy(proxyEnv, 'claude-session-end-test');
   proxy = connected.child;
   let call = connected.call;
   ok(connected.initialized, 'Claude-style proxy session initialized');
 
-  ok(!(await call('create_identity', { name: 'Human', expose_local: false })).result?.isError, 'Human/root created');
-  ok(!(await call('create_temporary_identity', { name: 'EphemeralOne' })).result?.isError, 'first delegated temporary role created');
-  ok(!(await call('create_temporary_identity', { name: 'EphemeralTwo' })).result?.isError, 'second delegated temporary role created after switching away');
+  const human = await call('create_identity', { name: 'Human', expose_local: false });
+  ok(Boolean(human.result) && !human.result.isError, 'Human/root created');
+  const first = await call('create_temporary_identity', { name: 'EphemeralOne' });
+  ok(Boolean(first.result) && !first.result.isError, 'first delegated temporary role created');
+  const second = await call('create_temporary_identity', { name: 'EphemeralTwo' });
+  ok(Boolean(second.result) && !second.result.isError, 'second delegated temporary role created after switching away');
   ok(existsSync(join(stateDir, 'EphemeralOne')) && existsSync(join(stateDir, 'EphemeralTwo')), 'both temporary role states exist before SessionEnd');
 
   const hook = spawn(process.execPath, [CLI, 'session-end'], { env, stdio: 'ignore' });
@@ -117,14 +124,16 @@ try {
 
   // Codex has no CLAUDE_CODE_SESSION_ID, so both proxy and hook derive the
   // same lease from the stable OURS_CLIENT_PID supplied by the harness shim.
-  const codexEnv = { ...env, OURS_CLIENT_PID: String(process.pid) };
+  const codexEnv = { ...proxyEnv, OURS_CLIENT_PID: String(process.pid) };
   delete codexEnv.CLAUDE_CODE_SESSION_ID;
   connected = await connectProxy(codexEnv, 'codex-session-end-test');
   proxy = connected.child;
   call = connected.call;
   ok(connected.initialized, 'Codex-style proxy session initialized from a stable client pid');
-  ok(!(await call('create_temporary_identity', { name: 'CodexEphemeralOne' })).result?.isError, 'Codex first delegated temporary role created');
-  ok(!(await call('create_temporary_identity', { name: 'CodexEphemeralTwo' })).result?.isError, 'Codex second delegated temporary role created after switching away');
+  const codexFirst = await call('create_temporary_identity', { name: 'CodexEphemeralOne' });
+  ok(Boolean(codexFirst.result) && !codexFirst.result.isError, 'Codex first delegated temporary role created');
+  const codexSecond = await call('create_temporary_identity', { name: 'CodexEphemeralTwo' });
+  ok(Boolean(codexSecond.result) && !codexSecond.result.isError, 'Codex second delegated temporary role created after switching away');
   const codexHook = spawn(process.execPath, [CLI, 'session-end'], { env: codexEnv, stdio: 'ignore' });
   const [codexCode, codexSignal] = await once(codexHook, 'exit');
   ok(codexCode === 0 && codexSignal === null, `Codex session-end hook exits cleanly (code=${codexCode}, signal=${codexSignal})`);

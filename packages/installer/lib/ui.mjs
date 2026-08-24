@@ -63,6 +63,21 @@ export const info = (s) => `  ${c.gray('•')} ${s}`;
 export const warn = (s) => `  ${c.yellow('!')} ${s}`;
 export const why = (s) => `    ${c.gray('why: ' + s)}`;
 
+// --- install progress --------------------------------------------------------------------------
+// A stable progress bar rather than cursor animation. It stays readable in CI/curl logs,
+// while a real terminal gets colour through the ordinary theme helpers. The explanatory
+// sentence is part of the progress event so a user always knows what the current stage does.
+export function progress(current, total, label, explanation = '') {
+  const count = Math.max(1, Number.parseInt(total, 10) || 1);
+  const position = Math.min(count, Math.max(0, Number.parseInt(current, 10) || 0));
+  const width = 24;
+  const filled = Math.round((position / count) * width);
+  const bar = c.cyan('█'.repeat(filled)) + c.gray('·'.repeat(width - filled));
+  const percent = String(Math.round((position / count) * 100)).padStart(3);
+  const detail = explanation ? `\n    ${c.gray(explanation)}` : '';
+  return `\n  ${bar}  ${c.bold(`${percent}%`)}  ${c.bold(label)}${detail}`;
+}
+
 // --- framed panel -------------------------------------------------------------------------------
 // A boxed block for the one moment that must stand out (the post-first-install next steps).
 // Content lines must be PLAIN strings (no ANSI) so the width math stays honest — only the frame

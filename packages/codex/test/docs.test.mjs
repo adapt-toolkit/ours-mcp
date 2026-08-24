@@ -15,10 +15,7 @@ test('Codex docs contain no obsolete Claude or polling claims', () => {
   for (const pattern of [/Monitor\(\{/, /TaskStop/, /Codex has no SessionStart hook/i, /blocking `ours-mcp watch/i, /polls? `get_messages` every ~?5s/i, /host-wide singleton/i, /daemon is a singleton/i]) assert.doesNotMatch(docs, pattern);
 });
 
-test('Codex docs describe secret-safe idempotent voice setup', () => {
-  for (const pattern of [
-    /voice-status --json/, /ours-install/, /hidden input/, /mode\s+`0600`/,
-    /never request a provider key/i, /audio\/ogg; x-ours-kind=voice-message/,
-    /attachment\.wire_id/,
-  ]) assert.match(docs, pattern);
+test('Codex docs describe the shared-daemon boundary', () => {
+  for (const pattern of [/ours daemon status/, /ours config setup/, /never starts a daemon/i, /coherent selection/i]) assert.match(docs, pattern);
+  assert.doesNotMatch(docs, /ours-mcp voice-status|installer-profiles\.json/);
 });

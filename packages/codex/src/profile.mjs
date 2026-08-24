@@ -1,8 +1,7 @@
-import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
 
-const DEFAULT_PORT = 3050;
+import { assertDaemonStateDir, resolveDaemonConfig } from '@ours.network/sdk';
 
 function validPort(value) {
   const port = Number(value);
@@ -13,11 +12,11 @@ function validPort(value) {
 export function parseOursArgs(argv = []) {
   const codexArgs = [];
   let port;
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
     if (arg === '--ours-port') {
-      if (argv[i + 1] == null) throw new Error('ours: --ours-port requires a value');
-      port = validPort(argv[++i]);
+      if (argv[index + 1] == null) throw new Error('ours: --ours-port requires a value');
+      port = validPort(argv[++index]);
     } else if (arg.startsWith('--ours-port=')) {
       port = validPort(arg.slice('--ours-port='.length));
     } else {
@@ -27,52 +26,41 @@ export function parseOursArgs(argv = []) {
   return { port, codexArgs };
 }
 
-async function readJson(path) {
-  try { return JSON.parse(await readFile(path, 'utf8')); } catch { return {}; }
-}
-
-async function readOwnerToken(stateDir) {
-  try { return (await readFile(join(stateDir, 'daemon-token'), 'utf8')).trim() || null; } catch { return null; }
-}
-
-export async function resolveDaemonProfile({ argv = [], env = process.env, readConfig, fetch: fetchImpl = globalThis.fetch } = {}) {
+export async function resolveDaemonProfile({ argv = [], env = process.env, fetch: fetchImpl = globalThis.fetch } = {}) {
   const parsed = parseOursArgs(argv);
-  const configPath = env.OURS_CONFIG || join(env.HOME || homedir(), '.ours', 'config.json');
-  const config = await (readConfig ? readConfig(configPath) : readJson(configPath));
-  let source = 'default';
-  let port = DEFAULT_PORT;
-  if (config?.port != null) { port = validPort(config.port); source = env.OURS_CONFIG ? 'OURS_CONFIG' : 'config'; }
-  if (env.OURS_PORT != null && env.OURS_PORT !== '') { port = validPort(env.OURS_PORT); source = 'OURS_PORT'; }
-  if (parsed.port != null) { port = parsed.port; source = '--ours-port'; }
+  const selection = resolveDaemonConfig({
+    ...(parsed.port == null ? {} : { port: parsed.port }),
+    env,
+    homeDir: env.HOME || homedir(),
+  });
+  await assertDaemonStateDir(selection, { fetch: fetchImpl, timeoutMs: 2000 });
 
-  const baseUrl = `http://127.0.0.1:${port}`;
-  let response;
-  try { response = await fetchImpl(`${baseUrl}/info`, { signal: AbortSignal.timeout(2000) }); }
-  catch (error) {
-    throw new Error(`ours daemon on port ${port} is not reachable; ours-codex never starts it. Start the selected daemon first. (${error?.message || error})`);
-  }
-  if (!response.ok) throw new Error(`ours daemon on port ${port} returned HTTP ${response.status}`);
-  const info = await response.json();
-  if (info?.name !== 'ours' || !Number.isInteger(info?.protocol) || info.protocol < 1 || typeof info?.stateDir !== 'string') {
-    throw new Error(`incompatible service on port ${port}; expected an ours daemon with notification protocol 1`);
-  }
-  const stateDir = resolve(info.stateDir);
-  const token = env.OURS_API_TOKEN?.trim() || config?.apiToken?.trim() || await readOwnerToken(stateDir);
+  const baseUrl = selection.baseUrl.value;
+  const token = selection.token?.value ?? null;
   const headers = token ? { 'x-ours-api-token': token } : {};
-  let capability;
-  try { capability = await fetchImpl(`${baseUrl}/identities`, { headers, signal: AbortSignal.timeout(2000) }); }
-  catch (error) { throw new Error(`ours daemon capability check failed: ${error?.message || error}`); }
-  if (capability.status === 401 || capability.status === 403) throw new Error(`ours daemon authentication failed on port ${port}; supply the matching OURS_API_TOKEN/config`);
-  if (!capability.ok) throw new Error(`selected daemon lacks the notification API (HTTP ${capability.status})`);
-  let unread;
-  try { unread = await fetchImpl(`${baseUrl}/unread`, { headers, signal: AbortSignal.timeout(2000) }); }
-  catch (error) { throw new Error(`ours daemon unread capability check failed: ${error?.message || error}`); }
-  if (unread.status === 401 || unread.status === 403) throw new Error(`ours daemon authentication failed on port ${port}; supply the matching OURS_API_TOKEN/config`);
-  if (!unread.ok) throw new Error(`selected daemon lacks the body-free unread API (HTTP ${unread.status}); install the testing daemon build and restart that daemon explicitly`);
+  const response = await fetchImpl(`${baseUrl}/info`, { signal: AbortSignal.timeout(2000) });
+  if (!response.ok) throw new Error(`ours daemon at ${baseUrl} returned HTTP ${response.status}`);
+  const info = await response.json();
+  if (info?.name !== 'ours' || !Number.isInteger(info?.protocol) || info.protocol < 1) {
+    throw new Error(`incompatible service at ${baseUrl}; expected an ours daemon with notification protocol 1`);
+  }
+  for (const path of ['/identities', '/unread']) {
+    const capability = await fetchImpl(`${baseUrl}${path}`, { headers, signal: AbortSignal.timeout(2000) });
+    if (capability.status === 401 || capability.status === 403) {
+      throw new Error(`ours daemon authentication failed at ${baseUrl}; supply the matching coherent selection`);
+    }
+    if (!capability.ok) throw new Error(`selected daemon lacks ${path} (HTTP ${capability.status})`);
+  }
 
   return {
-    port, stateDir, token: token || null,
-    visibility: env.OURS_API_VISIBILITY || config?.apiVisibility || 'owner',
-    source, info, baseUrl, configPath, codexArgs: parsed.codexArgs,
+    port: selection.port.value,
+    stateDir: selection.expectStateDir,
+    token,
+    visibility: 'owner',
+    source: selection.baseUrl.source,
+    info,
+    baseUrl,
+    configPath: selection.configPath?.value ?? join(selection.expectStateDir, 'config.json'),
+    codexArgs: parsed.codexArgs,
   };
 }

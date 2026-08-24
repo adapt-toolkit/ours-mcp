@@ -4,8 +4,8 @@
 // run is a no-op that does not duplicate the block (idempotent).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,5 +44,30 @@ test('install.sh sets up skills + the ours MCP server (no route/secret); second 
     assert.equal((cfg2.match(/# >>> ours\.network plugin/g) || []).length, 1, 'block not duplicated');
   } finally {
     rmSync(H, { recursive: true, force: true });
+  }
+});
+
+test('install.sh fails when a stopped daemon cannot be started', () => {
+  const root = mkdtempSync(join(tmpdir(), 'hermes-daemon-failure-'));
+  const bin = join(root, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'npm'), '#!/usr/bin/env bash\nexit 0\n');
+  writeFileSync(join(bin, 'ours'), `#!/usr/bin/env bash
+case "$*" in
+  version) echo 1.0.0 ;;
+  "daemon status"|"daemon start") exit 1 ;;
+esac
+`);
+  writeFileSync(join(bin, 'ours-mcp'), '#!/usr/bin/env bash\nexit 0\n');
+  for (const name of ['npm', 'ours', 'ours-mcp']) chmodSync(join(bin, name), 0o755);
+  try {
+    const result = spawnSync('bash', [INSTALL], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HERMES_DIR: join(root, '.hermes') },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /could not start the ours daemon/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

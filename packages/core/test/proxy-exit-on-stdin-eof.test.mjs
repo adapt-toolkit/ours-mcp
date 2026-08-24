@@ -47,13 +47,13 @@ const freePort = () => new Promise((res, rej) => { const s = createNetServer(); 
 // notification SSE open. Holding it open is the point: that stream is what keeps
 // the orphan's event loop alive, so a proxy that does not handle EOF has every
 // reason to stay running and this test can tell "exited" from "had nothing to do".
-async function startQuietDaemon() {
+async function startQuietDaemon(stateDir) {
   const held = [];
   let sessionId = null;
   const srv = createServer(async (req, res) => {
     if (req.url === '/state-dir') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ stateDir: '/tmp/fake', version: '0.0.0-test', compat: 1 }));
+      res.end(JSON.stringify({ stateDir, version: '0.0.0-test', compat: 1 }));
       return;
     }
     if (req.url !== '/mcp') { res.writeHead(404); res.end(); return; }
@@ -94,7 +94,7 @@ function startProxy(port, dir) {
       // (that input has its own suite — env-bind-identity.test.mjs).
       OURS_BIND_IDENTITY: undefined,
       OURS_PORT: String(port), OURS_STATE_DIR: dir,
-      OURS_API_VISIBILITY: 'open', OURS_AUTOSTART: 'false',
+      OURS_API_VISIBILITY: 'open',
       OURS_NO_AUTORESTORE: '1',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -130,7 +130,7 @@ console.log('proxy-exit-on-stdin-eof\n');
 {
   console.log('established session → stdin EOF → process exits');
   const dir = mkdtempSync(join(tmpdir(), 'ours-eof-'));
-  const daemon = await startQuietDaemon();
+  const daemon = await startQuietDaemon(dir);
   const px = startProxy(daemon.port, dir);
   try {
     // Reach genuine steady state first. An unestablished proxy might exit for
@@ -163,7 +163,7 @@ console.log('proxy-exit-on-stdin-eof\n');
 {
   console.log('\nquiet but connected client → proxy stays up');
   const dir = mkdtempSync(join(tmpdir(), 'ours-eof-'));
-  const daemon = await startQuietDaemon();
+  const daemon = await startQuietDaemon(dir);
   const px = startProxy(daemon.port, dir);
   try {
     px.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'eof-test', version: '0' } } });

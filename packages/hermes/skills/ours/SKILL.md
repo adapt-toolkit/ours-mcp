@@ -1,6 +1,6 @@
 ---
 name: ours
-description: Use when the user wants to set up or configure ours or ours-fleet, onboard onto the ours network, create or switch an identity, connect with another agent or person, exchange encrypted messages or files, check incoming mail, arm live monitoring, bind a web-messenger control proxy, or spawn/configure/oversee a persistent or temporary fleet agent. Trigger phrases include "set up ours", "set up ours-fleet", "configure fleet", "spawn fleet agent", "use identity X", "send a message", "check my messages", "watch for messages", "wake me on new mail", "bind the monitoring proxy", and "set up the control panel".
+description: Use when the user wants to set up or configure ours or ours-fleet, onboard onto the ours network, create or switch an identity, connect with another agent or person, exchange encrypted messages or files, check incoming mail, arm live monitoring, or spawn/configure/oversee a persistent or temporary fleet agent. Trigger phrases include "set up ours", "set up ours-fleet", "configure fleet", "spawn fleet agent", "use identity X", "send a message", "check my messages", "watch for messages", "wake me on new mail".
 metadata:
   hermes:
     tags: [ours, ours.network, a2a, adapt, e2e, messaging, identity]
@@ -21,8 +21,9 @@ are three surfaces:
 
 - **Layer 1 — identities** (global): create / bind / switch the identity you act as.
 - **Layer 2 — messaging** (per the bound identity): invites, contacts, send/read.
-- **Control plane** (the host's **Human identity**): bind a human's web-messenger as a
-  **monitoring & control proxy** that can oversee and command a fleet of agents.
+- **Control plane** (the host's **Human identity**): a human's web-messenger acting as a
+  **monitoring & control proxy** over a fleet of agents. **Not available in this release** —
+  its MCP tools were removed; see "Control plane" below before offering anything.
 
 Identities come in exactly two kinds, in a fixed order:
 
@@ -76,19 +77,19 @@ control plane. This skill never creates or exposes such state.
 
 Walk the user through these, checking each. Stop and help at the first one that isn't done.
 
-1. **Daemon running.** The MCP tools talk to a local background daemon. Check it:
-   `ours-mcp status`. If the command is missing, install it: `npm i -g
-   @ours.network/mcp`, then `ours-mcp start`. For boot-persistence offer
-   `ours-mcp install-service`. To change broker / port / state dir, run the
-   interactive `ours-mcp setup` (this edits config only — it is NOT identity setup).
-   These run on the user's machine; if a step needs them at a terminal, suggest they
-   type `! ours-mcp status` etc.
-   Then check optional voice support with `ours-mcp voice-status --json`. If it is
-   not ready and the user wants voice transcription, ask them to run `ours-install`
-   in a terminal: it re-detects incomplete setup and reads the provider key with
-   hidden input. **Never ask for, paste, echo, or put the key in chat/tool arguments.**
-   Environment-only operators may set `OURS_STT_*` themselves. Troubleshooting and
-   the exact Telegram OGG/Opus fallback contract are in `references/configuration.md`.
+For a first-time or complete host setup, prefer `ours-install`. It installs the
+CLI, one shared daemon, MCP, cowork, Telegram, Fleet, the Human identity, and
+every safely detected harness plugin in one progress-driven flow. It starts the
+daemon and cowork, but deliberately leaves Telegram and Fleet stopped. If
+`~/fleet.yaml` does not exist, it writes a conservative stopped starter with a
+`FleetCoordinator`, watchdog, and coordinator health loop; it never overwrites an
+existing file.
+
+1. **Daemon running.** Check it with `ours daemon status`. If the stack is
+   missing or incomplete, ask the user to run `ours-install`; use the manual CLI
+   package/config/start commands only as a troubleshooting fallback. These are
+   operator commands; explain the shared blast radius and obtain consent before
+   changing configuration or lifecycle.
 2. **Plugin installed.** Run this package's `install.sh` (from `@ours.network/hermes`).
    It ensures the daemon, writes the `ours` MCP server into `~/.hermes/config.yaml`, and
    installs this skill into `~/.hermes/skills/`. That's all — no identities, no webhook route,
@@ -103,8 +104,9 @@ Walk the user through these, checking each. Stop and help at the first one that 
    via the `terminal` tool and react to each new message from that loop (see *Getting woken on new mail*
    below). **Be honest that this BLOCKS the session** (unlike Claude Code's background Monitor) —
    don't sell it as "just works". The installer never sets this up.
-6. **(Optional) Oversight.** If they want to watch/command a fleet from a phone or
-   browser, set up the **control-plane monitoring proxy**.
+6. **Oversight.** If they ask to watch/command a fleet from a phone or browser, say the
+   **control-plane monitoring proxy is not available in this release** — there is no tool
+   to call. See "Control plane" below.
 
 - **Configuration.** Port, state dir, broker, and GC interval are configurable
   (env > `~/.ours/config.json` > default; port default 3050). Daemon config is
@@ -125,6 +127,19 @@ the version-matched source of truth:
    release does not provide `docs`, use `ours-fleet --help` and the relevant
    subcommand's `--help`, and recommend upgrading. Do not ask the user to
    explain available flags or rely on a copied fleet workflow from this skill.
+
+After `ours-install`, review `~/fleet.yaml` with the user before activation. Do
+not start Fleet or Telegram merely because installation finished. With explicit
+approval, the exact activation commands are:
+
+```sh
+ours-fleet doctor && ours-fleet config && ours-fleet up
+ours-fleet ls
+ours-tg-connector install-service
+```
+
+For Telegram, first guide bot and route setup locally. Never ask the user to put
+a bot token in chat, a tool argument, or a transcript.
 
 ## Layer 1 — identities (global)
 
@@ -233,8 +248,8 @@ ephemeral delegated role under it, binds it to this session, and marks it **temp
 If a notice says your plugin and the running daemon are different
 versions, it is **advisory** — everything still works. Relay it to the user and,
 if they want matching versions, tell them: the daemon is shared and is not
-restarted automatically, so run `ours-mcp stop` when no other session is
-mid-task (the next session starts the new version), or update the lagging side.
+restarted automatically, so run `ours daemon restart` only when no other session
+is mid-task, or update the lagging side.
 Do **not** stop work, refuse, or restart anything on your own over this.
 
 ### Workspace identity pin (`.ours-identity`)
@@ -293,21 +308,23 @@ automatically (cert- or registrar-verified introduction + key exchange) and the 
 delivered with it — no invite ceremony.
 
 ### Reply to a specific message
-Every message carries a stable cross-side `wire_id`, shown by `get_messages` as `{…}`. To
+Every message carries a stable cross-side `wire_id`, shown by `get_messages` and
+`list_history`. To
 answer one precisely: `send_message({ contact: "Bob", text: "…", reply_to_wire_id:
 "<wire_id>" })`, optionally `reply_to_sentence: <n>` (1-based) to point at a sentence. The
 recipient sees `↳re <wire_id>·s<n>`. It's a lightweight reference, not a thread object.
 
 ### Check / read messages
-- "check messages" / "any new messages" → `get_messages()` returns the messages you
-  haven't seen (status "unread") **with their bodies** and marks them "processed". This is
-  the **only** call that returns message text; each message is delivered exactly once, so
-  reading and acting immediately never double-processes — no acknowledgement step.
-- Handled messages are garbage-collected automatically (two-generation GC on a timer), so
-  there is **no** mark-processed step. To hand a message to *another* session — or if you
-  might crash before acting — `defer_messages({ msg_ids: [...] })` flips it back to "unread"
-  (works even after it is queued for deletion, so it stays recoverable across a GC cycle).
-- "show my inbox" → `list_incoming_messages()` (full inbox, ids + status, read-only).
+- "check messages" / "any new messages" → `get_messages()` returns the oldest 50 unread
+  messages with bodies, marks that batch `read`, and reports how many remain. Use
+  `get_messages({ limit: 200 })` for a larger bounded drain. There is no defer operation;
+  persistent history remains available after the read commit.
+- "show/search message history" → `list_history({ peer_cid, direction, before_seq, limit })`.
+  Results are newest first; pass `next_cursor` back as `before_seq`. Filter by authenticated
+  `peer_cid`, not a display name. Use `get_history_item({ wire_id })` for one exact message.
+  These calls are read-only and include bodies plus local read and remote delivery state.
+- History storage and protocol receipts are not transactional. There is no packet fallback,
+  outbox, hidden retry queue, automatic receipt retry, or defer path.
 - Hermes has no SessionStart hook, so there is no auto-injected unread-backlog summary (that
   is a Claude-Code seam). When the user returns to ours after a gap, offer to check: for each
   relevant identity, `choose_identity` it and `get_messages()`. Autonomous watch mode (below)
@@ -325,10 +342,13 @@ tools, a separate store. To caption a file, also `send_message`.
 - "show received files" → `list_incoming_files()` — structured metadata only: authenticated
   sender CID in `from.id`, untrusted display label in `from.name`, file/wire IDs, filename,
   MIME, size, date and status; no bytes and no status change. Authorize by CID, not name.
-- "get approved files" → `get_files({ wire_ids: ["<approved 64-hex id>"] })` writes only those
-  unread files under `<state>/<identity>/files/<wire_id>-<name>` and returns structured paths,
-  hashes, provenance and status. Invalid/duplicate/unknown/stale IDs fail closed. Omitting
-  `wire_ids` preserves the legacy behavior of retrieving every unread file.
+- "get approved unread files" → `get_files({ wire_ids: ["<approved 64-hex id>"] })` marks
+  only those unread rows read and returns immutable blob paths, hashes, provenance and
+  status. Invalid/duplicate/unknown/stale IDs fail closed. Omitting `wire_ids` retrieves the
+  oldest 50 unread files; pass `limit` from 1 to 200 for another bounded batch.
+- "show/search file history" → `list_files({ peer_cid, direction, before_seq, limit })`;
+  use `get_file_info({ wire_id })` for exact metadata. Both return no bytes. Use
+  `save_file({ wire_id, dest_path })` to stream any stored file daemon→disk without chat bytes.
 - Voice records also carry structured transcription configuration/attempt/status, provider,
   transcript or categorized fallback, and their audio-path association; prose remains intact.
 - The wake signal stays **body-free** but carries authenticated sender CID, file/wire IDs,
@@ -367,58 +387,33 @@ When you bind an identity, offer the user, in plain language:
 - **Auto-wake** → arm the monitor: you hold a live `ours-mcp watch <id>` and react to each message as it arrives. **Be upfront:** while watching, this session is **busy** — you can't send it new prompts. To do something else: press **ESCAPE** to interrupt the watch, type your prompt, then ask it to **resume** watching. *(On Claude Code this same monitor runs non-blocking in the background — a Claude Code advantage.)*
 - **Manual** → don't arm it; ask it to check `get_messages` whenever you want. No blocking.
 
-## Control plane — bind a monitoring proxy (human oversight of a fleet)
+## Control plane — human oversight of a fleet
 
-This is **separate** from the wake-on-mail watch above. The control plane lets a **person's
-web-messenger account** (the ours web messenger, shipping as part of the upcoming ours-control-plane)
-oversee and command all agents under this host's **Human identity** from a **Control
-Panel**: view a **live monitoring feed** of monitored agents' traffic, create agents, edit
-their bios **and personas**, toggle each agent's monitoring, open a chat with any agent (the
-Human identity commands the agent to mint an invite — no out-of-band step), and remove agents. A
-coordinator can also set a worker's local persona via the cluster; the agent still asks the
-user before adopting it. All of it rides the same
-e2e channels as messages but in a separate control queue agents never see; monitoring bodies
-are never written to disk on the host.
+**NOT AVAILABLE IN THIS RELEASE. Do not offer it, and do not call a tool for it.**
+The `bind_monitoring_proxy` and `get_monitoring_status` MCP tools were removed with the
+daemon-side control plane; there is no tool behind them and a call will fail. Nothing has
+replaced them yet.
 
-**Prerequisites**
-- The **Human identity** exists (`create_root_identity` — the onboarding step). The
-  proxy binds to the Human identity.
-- The messenger account is already a **contact of the Human identity** — do the normal
-  invite exchange first: bind the Human identity, `generate_invite`, and have the
-  messenger redeem it (or redeem the messenger's invite with `add_contact`).
+The capability itself is not cancelled: the monitoring/control surface remains in the
+**protocol core**, untouched, for whenever it is reimplemented. What is gone is this
+plugin's exposure of it as MCP tools.
 
-**Binding ceremony (6-digit code, out-of-band)**
-1. "bind my messenger account as the monitoring proxy" →
-   `bind_monitoring_proxy({ contact: "<the messenger contact>" })`. This automatically
-   targets the host's Human identity (you do **not** need to be bound as it). It returns a
-   **6-digit code** (valid 5 minutes, 3 attempts) and shows it **here**.
-2. **Read the code to the user.** They open the messenger → the conversation with the Human identity →
-   **Control Panel** → enter the code. The code must travel **out-of-band** — reading it off
-   this terminal is what proves you control both ends. **Never send the code over ours.**
-3. On success the contact becomes the proxy. Confirm with `get_monitoring_status`.
-
-**Per-agent monitoring is controller-gated.** Once a proxy is bound, the proxy (Control
-Panel) turns an agent's monitoring on/off — there is **no local enable/disable tool**. A
-monitored agent reports a signed copy of every message it sends/receives to the Human
-identity's node, which forwards it to the proxy's feed.
-
-**Status** — "what's the monitoring/control state" → `get_monitoring_status()` reports the
-Human identity's bound proxy (if any), a pending code verification, queued copies/control
-requests, and each agent's monitoring ON/off. Works whenever the Human identity exists.
-
+If a user asks to bind a web-messenger account as a monitoring/control proxy, to open a
+Control Panel, or to check monitoring status — say plainly that it is not available in this
+release, and do not improvise a substitute. Per-identity wake-on-mail is a **different**
+feature and still works; it is described above.
 ## Notes
 
-- Identities and their state (contacts, inbox, keys) persist under the daemon's state dir
+- Identities and their state (contacts, history, keys) persist under the daemon's state dir
   (`OURS_STATE_DIR`, default `~/.ours`) and survive restarts. The daemon is a singleton
   shared by all your Hermes agents and sessions on this host.
 - Inbound messages from unknown (non-contact) senders are rejected — only peers added via an
   invite handshake, same-host agents under the same Human identity, or registrar-verified
   local-contact-book introductions can reach you.
-- Message **bodies never touch disk in plaintext**: a new arrival appends only a content-free
-  event (sender + id + date) to `$OURS_STATE_DIR/<identity>/notifications.log` (the wake
-  signal `ours-mcp watch` reads) and refreshes a body-free `unread.json`. Text lives in the
-  packet and leaves it solely via `get_messages`.
-- **The wake signal is uniform.** `ours-mcp watch <identity>` is the common stream; each harness
+- Message bodies persist in owner-private, mode-0600 `history.sqlite3`; file bytes persist
+  as immutable content-addressed blobs. The wake path stays body-free:
+  `notifications.log` and `unread.json` contain metadata only.
+- **The wake signal is uniform.** `ours-mcp watch <identity>` is the explicitly named stream; each harness
   drives it in-session. Claude Code uses its native `Monitor` tool; **Hermes uses autonomous watch
   mode** — the agent holds a blocking `ours-mcp watch` via the `terminal` tool and reacts from that
   loop (see *Getting woken on new mail*). The ours daemon, identities, and tools are identical across

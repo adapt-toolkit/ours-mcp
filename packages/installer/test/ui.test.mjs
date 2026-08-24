@@ -43,6 +43,15 @@ test('section: numbered rule header, plain under NO_COLOR', () => {
   assert.doesNotMatch(plain, /\x1b\[/, 'NO_COLOR section is plain');
 });
 
+test('progress: stable bar, percentage, label, and explanation stay log-friendly', () => {
+  const plain = render(`ui.progress(3, 8, 'Prepare daemon', 'Install and start one shared daemon.')`, { NO_COLOR: '1' });
+  assert.match(plain, /38%\s+Prepare daemon/);
+  assert.match(plain, /Install and start one shared daemon\./);
+  assert.match(plain, /█+·+/);
+  assert.doesNotMatch(plain, /\x1b\[/);
+  for (const line of plain.split('\n')) assert.ok(line.length < 80, `line fits in 80 cols: ${JSON.stringify(line)}`);
+});
+
 test('withSpinner: returns the thunk result and degrades to a static step line without a tty', () => {
   const out = render(`ui.withSpinner('working…', async () => { return 'RESULT'; })`, { NO_COLOR: '1' });
   assert.match(out, /working…/, 'label still shown without a tty');

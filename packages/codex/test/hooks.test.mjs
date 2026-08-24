@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleHook } from '../src/hooks/runner.mjs';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,10 +10,18 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
 test('SessionStart registers the thread and injects body-free unread context', async () => {
   const commands = [];
+  const home = mkdtempSync(join(tmpdir(), 'ours-codex-hook-'));
+  const stateDir = join(home, 'state');
+  const appConfig = join(home, 'ours-mcp.json');
+  writeFileSync(appConfig, JSON.stringify({ version: 1, daemons: { [stateDir]: { identities: ['Alice'] } } }));
   const result = await handleHook({ hook_event_name: 'SessionStart', source: 'startup', session_id: 'thr', cwd: '/repo' }, {
-    env: { OURS_CODEX_CONTROL_SOCKET: '/tmp/s', OURS_CODEX_CAPABILITY: 'cap', OURS_PORT: '4050', OURS_API_TOKEN: 'tok' },
+    env: { HOME: home, OURS_CODEX_CONTROL_SOCKET: '/tmp/s', OURS_CODEX_CAPABILITY: 'cap', OURS_PORT: '4050', OURS_STATE_DIR: stateDir, OURS_API_TOKEN: 'tok', OURS_MCP_CONFIG: appConfig },
     send: async (...args) => { commands.push(args); return { state: {} }; },
-    fetch: async () => Response.json({ identities: [{ name: 'Alice', count: 2, recent: [{ from: 'Bob', msg_id: 1, date: 'today', body: 'SECRET' }] }] }),
+    fetch: async (url) => String(url).endsWith('/state-dir')
+      ? Response.json({ stateDir, version: '2.0.1', compat: 1 })
+      : String(url).endsWith('/info')
+        ? Response.json({ name: 'ours', protocol: 1, stateDir })
+        : Response.json({ identities: [{ name: 'Alice', count: 2, recent: [{ from: 'Bob', msg_id: 1, date: 'today', body: 'SECRET' }] }] }),
     findPin: async () => ({ identity: 'Alice' }),
   });
   assert.equal(commands[0][2].command, 'register_session');

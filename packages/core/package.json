@@ -1,7 +1,7 @@
 {
   "name": "@ours.network/mcp",
   "version": "0.17.2",
-  "description": "MCP server daemon for ours — one native ADAPT wrapper hosting N self-sovereign identities, exposing secure agent-to-agent messaging tools over HTTP (Streamable HTTP). Run `ours-mcp start`.",
+  "description": "MCP adapter for the shared ours daemon, with application-local identity bookkeeping and secure agent-to-agent messaging tools over stdio.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "author": "Adapt Toolkit",
@@ -40,19 +40,14 @@
     "build": "node build.mjs",
     "build:dev": "OURS_BUILD_DEV=1 node build.mjs",
     "build:tsc": "tsc -p tsconfig.json",
-    "dev": "tsx src/cli.ts serve",
-    "dev:stdio": "OURS_TRANSPORT=stdio tsx src/index.ts",
-    "start": "node dist/cli.js start",
-    "stop": "node dist/cli.js stop",
-    "status": "node dist/cli.js status",
-    "serve": "node dist/cli.js serve",
+    "dev": "tsx src/cli.ts proxy",
     "prepublishOnly": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "bash ../../scripts/test-receipts-mufl.sh && bash ../../scripts/test-notifications-mufl.sh && bash ../../scripts/test-contact-uniqueness-mufl.sh && bash ../../scripts/test-temp-remove-me-mufl.sh && node test/contact-lines.test.mjs && node test/loopback-bind.test.mjs && node test/lease-binding.test.mjs && node test/proxy-request-failback.test.mjs && node test/proxy-exit-on-stdin-eof.test.mjs && node test/proxy-dead-stderr.test.mjs && node test/session-restore.test.mjs && node test/env-bind-identity.test.mjs && node test/daemon-restart-resume.test.mjs && node test/sse-keepalive.test.mjs && node test/version-advisory.test.mjs && node test/files-helpers.test.mjs && node test/inbox-encryption.test.mjs && node test/validate-name.test.mjs && node test/port-visibility.test.mjs && node test/notify-http-api.test.mjs && node test/file-save-stream.test.mjs && node test/unread-http-api.test.mjs && node test/create-root-cli.test.mjs && node test/session-reaper.test.mjs && node test/session-end-temp-cleanup.test.mjs && node test/mig1867-verify.test.mjs && node test/single-root-policy.test.mjs && node test/pre137-blob-import-regression.test.mjs && node test/transcribe-detect.test.mjs && node test/transcribe-stt.test.mjs && node test/voice-status-cli.test.mjs && node test/process-state.test.mjs && node test/voice-setup-config.test.mjs && node test/voice-setup-cli.test.mjs && node test/startup-progress.test.mjs && node test/startup-cli.test.mjs && node test/contact-uniqueness-daemon.test.mjs && node test/contact-uniqueness-import.test.mjs && node test/contact-uniqueness-book.test.mjs && node test/invite-modes.test.mjs && node test/temp-identities.test.mjs"
+    "test": "node test/application-identities.test.mjs && node test/cli-delegation.test.mjs && node test/sdk-pin.test.mjs && node test/skill-tool-vocabulary.test.mjs && node test/inbox-push.test.mjs && node test/contact-lines.test.mjs && node test/env-bind-identity.test.mjs && node test/proxy-exit-on-stdin-eof.test.mjs && node test/proxy-dead-stderr.test.mjs && node test/session-end-temp-cleanup.test.mjs"
   },
   "dependencies": {
-    "@adapt-toolkit/sdk": "0.10.12",
-    "@adapt-toolkit/sdk-native": "0.10.12"
+    "@ours.network/cli": "2.2.0",
+    "@ours.network/sdk": "3.2.2"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

@@ -120,7 +120,7 @@ To get woken on new mail, ask the `ours` skill in-session to wake you: it tails
 
 ## Verify
 
-- `ours-mcp status` — daemon up.
+- `ours daemon status` — shared daemon up.
 - In Hermes: *"which mcp_ours tools are available?"* — should list ours tools.
 - Ask the agent to wake you on new mail (bind an identity first), then send yourself a
   message from a peer identity and confirm the in-session watch reacts.

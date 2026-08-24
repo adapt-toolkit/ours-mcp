@@ -1,174 +1,124 @@
 # @ours.network/install — `ours-install`
 
-The **unified ours.network stack installer**. ONE guided ~3-minute flow that installs the WHOLE
-stack for someone who already has Claude Code, Codex, and/or Hermes, safely offers optional
-voice-message transcription, then hands back a single copy-paste prompt for remaining setup.
-
-## Install
-
-**Recommended — a persistent, versioned, integrity-checked command on your PATH:**
+The all-in-one installer for the ours.network stack. One run installs and
+configures the shared daemon, MCP adapter, cowork, Telegram connector, Fleet,
+and plugins for every safely detected agent harness.
 
 ```sh
-npm i -g @ours.network/install && ours-install
-```
-
-Re-run (or update / add a skipped piece) any time with just `ours-install`.
-
-**One-off, no global install:**
-
-```sh
-npx @ours.network/install
+npm install --global @ours.network/install
+ours-install
 ```
 
 ### Stable and nightly channels
 
-The installer package selects the channel for the stack it installs. No extra environment
-variable is required:
+Installing `@ours.network/install@latest` selects the stable channel; installing
+`@ours.network/install@nightly` selects the nightly channel. Before changing the
+machine, the installer resolves `@ours.network/mcp`,
+`@ours.network/claude-code`, and `@ours.network/codex`, verifies that their
+selected dist-tags expose one exact lockstep version, and fails closed if they
+do not. MCP and the Codex launcher are installed by exact version, and local
+Claude Code and Codex marketplace manifests pin the corresponding plugin
+packages to that same version.
+
+`OURS_CHANNEL=latest|nightly` (or the legacy `OURS_INSTALL_CHANNEL`) remains an
+explicit override. Without an override, the installed package's own version
+selects the channel.
+
+The normal flow uses one daemon at `~/.ours` on port 3050, shows an eight-stage
+progress bar, and asks only for information it cannot safely infer (normally the
+Human identity's display name). Existing daemon conflicts and moving a Telegram
+connector from another daemon still require explicit confirmation.
+
+## What the installer does
+
+- Installs `@ours.network/cli`, `@ours.network/mcp`,
+  `@ours.network/tg-connector`, `@ours.network/cowork`, and
+  `@ours.network/fleet` on one release channel.
+- Configures, starts, and enables the single shared daemon.
+- Creates the daemon's Human identity (historically called the root identity),
+  or preserves the existing one on a re-run.
+- Installs the ours plugin into safely detected Claude Code, Codex, and Hermes
+  installations.
+- Configures and starts cowork as a durable shim over the shared daemon.
+- Configures and starts Telegram as a durable shim over the same daemon.
+- Runs Fleet's host initialization and, when `~/fleet.yaml` is absent, writes a
+  conservative stopped starter with `FleetCoordinator`, a `fleet-health`
+  watchdog, and a ten-minute `coordinator_health` loop. An existing
+  `~/fleet.yaml` is never overwritten.
+
+The operator CLI owns daemon configuration, lifecycle, and boot persistence.
+The MCP package is only the stdio adapter spawned by agent harnesses; the
+installer never asks `ours-mcp` to start a daemon.
+
+Daemon state is temporarily scoped to its package major version. On a same-major
+update, the installer refreshes the packages and runs `ours daemon restart`; the
+CLI streams structured startup phases until restore is complete instead of
+appearing to hang. A different-major update is detected before package
+replacement. The installer explains the incompatibility and, only in an
+interactive run, offers to stop the CLI-managed daemon, copy the complete state
+directory to a timestamped directory under `~/.ours-backups/`, remove the
+managed service and old state, then initialize the new major. The default answer is no, and
+`OURS_ASSUME_YES` never authorizes this purge.
+
+## What remains stopped
+
+Only Fleet is intentionally not started. Review and activate it when ready:
 
 ```sh
-# Stable (the default)
-npm i -g @ours.network/install@latest && ours-install
-
-# Nightly
-npm i -g @ours.network/install@nightly && ours-install
+# After reviewing ~/fleet.yaml:
+ours-fleet doctor
+ours-fleet config
+ours-fleet up
+ours-fleet ls
 ```
 
-A clean `X.Y.Z` installer resolves the `latest` dist-tags; an
-`X.Y.Z-nightly.N` installer resolves the `nightly` dist-tags. Before changing the machine,
-`ours-install` resolves `@ours.network/mcp`, `@ours.network/claude-code`, and
-`@ours.network/codex`, validates that npm returned exact versions from the selected channel,
-and requires all three to be the same lockstep version. It then installs MCP and the Codex
-launcher by exact version and generates exact-version local marketplace sources for Claude Code
-and Codex under `~/.ours/install/marketplaces/`. A moving `latest` or `nightly` selector is never
-left in a plugin installation source after resolution.
+The final installer screen repeats these commands and provides a copy-paste
+prompt for Claude Code, Codex, or Hermes. The agent should guide local bot-token
+entry without asking the user to paste the secret into chat.
 
-Existing automation may still set `OURS_CHANNEL=latest|nightly` (or the legacy
-`OURS_INSTALL_CHANNEL`) explicitly; that override continues to win. With no override, stable is
-still the safe default for a local checkout or an unreadable package version.
-
-**Fallback for machines without npm** (least secure — pipes a script straight into your shell):
+## Preview and automation
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/install.sh | bash
+ours-install --dry-run
+OURS_ASSUME_YES=1 ours-install
+ours-install --state-dir /absolute/path --port 3070
 ```
 
-The `curl … | bash` bootstrap simply gets Node.js/npm sorted, then does the `npm i -g
-@ours.network/install` and runs `ours-install` for you. `ours-install` is the single front door;
-`ours-codex-install` is kept as a **thin alias** that hands off to it (use
-`ours-codex-install --codex-only` for the legacy Codex-only path).
+Dry-run walks the real plan without writing files, installing packages, starting
+processes, or changing services. `OURS_ASSUME_YES=1` uses the OS username for a
+new Human identity and asks no ordinary setup questions, but it never bypasses
+selection conflicts, connector moves, or destructive safeguards.
 
-The installer is a small **self-contained** Node package (Node built-ins only — no runtime
-dependency on the things it installs): an ASCII banner, tasteful colour (degrades under `NO_COLOR`
-/ no-tty), and plain-language **what + why** for every step.
-
-## The flow (what the user sees)
-
-1. **Pre-flight** — a short checklist, not a wall of logs: platform (Linux / macOS / WSL; native
-   Windows prints a WSL pointer and exits), Node.js, and **harness detection with alias-safety**.
-   Before ever calling `claude` / `codex`, it confirms each resolves to a **real executable** that
-   answers `--version` promptly. A shell alias / hanging wrapper is **never called** (that would
-   hang the run) — it's reported plainly with a fix, and a manual-install path is always offered.
-   If neither harness exists it says so and exits.
-2. **Config-first** (first install only) — the daemon's two base settings, up front:
-   the **broker** (end-to-end encrypted; the broker never sees message content — almost everyone
-   just presses Enter) and the **port** (probes `3050`; only asks if it's busy; never hands out
-   `3051`, reserved for the Telegram connector). Applied once, then the stack is built with it.
-3. **Four consent gates**, each paced with a clean `✓ … No problems.` line + an explicit
-   **Continue?** — never a start-twice-then-ask, never a silent failure:
-   - **1/4 ours core (the daemon)** — install the exact version resolved for this installer's
-     stable/nightly channel → write config → optional voice setup → start ONCE
-     → boot service. On a re-run it reuses the running config (no re-ask) and only updates when
-     you say yes. Complete voice setup is kept without prompting. Missing/incomplete setup is
-     offered before the first start or pending update restart, then delegated to the canonical
-     `ours-mcp voice-setup` provider selector and hidden API-key prompt. Accepted setup owns the
-     one restart/readiness transaction; declining or already-ready setup preserves the normal
-     core lifecycle. The secret is written atomically to mode-`0600` config; a failed daemon
-     reload rolls back.
-   - **2/4 harness plugins** — the installer **drives the plugin CLIs itself** using generated,
-     exact-version local marketplace sources
-     (`claude plugin marketplace add …` + `claude plugin install ours@ours.network`;
-     `codex plugin marketplace add …` + `codex plugin add ours@ours-codex-marketplace`). Choosing
-     Codex also installs the `ours-codex` live launcher in the same step. Any failure / alias
-     prints the exact manual commands and continues — it **never dead-ends**.
-   - **3/4 ours-fleet** — makes your harnesses persistent, always-online agent teams that survive
-     a reboot; runs `ours-fleet init`. Default **Yes**.
-   - **4/4 Telegram connector** — install-only (no bot tokens here), then optionally as a
-     boot service.
-4. **Summary + hand-off** — a recap (skipped/failed rows call out the fix), then a **literal
-   copy-paste prompt** (root identity + fleet + Telegram) with the steps for any skipped/failed
-   component dropped out. Copied to the clipboard where supported.
-
-The human identity is created idempotently after the daemon becomes reachable. Because
-`curl … | bash` gives the script its input over the pipe, every prompt is read from the
-controlling terminal (`/dev/tty`), so the flow still works piped.
-
-## Non-interactive / CI / safe dry-run
-
-```sh
-OURS_ASSUME_YES=1 bash install.sh          # accept every default, no prompts
-OURS_INSTALL_DRY_RUN=1 bash install.sh     # walk the WHOLE flow, install/change NOTHING
-```
-
-`OURS_INSTALL_DRY_RUN=1` routes every side-effecting action through a print-only seam — it shows
-exactly the commands it *would* run (npm installs, `ours-mcp start`, plugin adds, `ours-fleet
-init`, service installs) without executing them. That is the safe way to preview the flow on a
-machine you don't want to touch, and how the integration tests drive it.
-
-Non-interactive runs never prompt for or synthesize voice credentials. Supply a complete
-`OURS_STT_*` environment configuration yourself, or rerun interactively later; missing setup
-is reported and left unchanged.
-
-| var | meaning |
-|---|---|
-| `OURS_ASSUME_YES` | accept every default, never prompt (implies no tty needed) |
-| `OURS_INSTALL_DRY_RUN` | walk the flow without installing or changing anything |
-| `OURS_NPM` | npm binary to use (default `npm`) |
-| `OURS_CONFIG` | daemon config file location (default `~/.ours/config.json`) |
-| `OURS_CHANNEL` | optional explicit `latest` or `nightly` override; otherwise follows the installer package version |
-| `OURS_INSTALL_CHANNEL` | legacy alias for `OURS_CHANNEL` |
+A non-default daemon must be selected coherently with a config file or matching
+port and state directory. Hermes and the generated Fleet role persist that
+selection through `OURS_CONFIG`. Claude Code and Codex plugin registrations
+cannot store an environment value; for those harnesses the installer prints the
+exact `export OURS_CONFIG=...` line that must be added to the shell profile
+before starting the harness. There is no per-application daemon.
 
 ## Uninstall
 
-The companion `uninstall.sh` reverses what the installers created — same thin-bootstrap +
-Node treatment (banner, colour, a clear explanation of what will be removed). Run it from a
-checkout:
-
 ```sh
-bash packages/installer/uninstall.sh
+ours-uninstall --state-dir "$HOME/.ours"
+ours-uninstall --state-dir "$HOME/.ours" --purge
 ```
 
-or over the same raw-URL pattern as `install.sh` (pointing at `uninstall.sh`):
+The uninstaller delegates service and daemon removal to the `ours` CLI. Identity
+state is retained by default. Purging requires the existing destructive gates and
+targets only the explicit state directory.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-mcp/main/packages/installer/uninstall.sh | bash
-```
+## Release channel
 
-It uses the **same toggle UI** to pick what to remove — per-harness plugins, the ours data
-directory (`~/.ours`), and the `ours-mcp` daemon. It removes **only** what the installers
-created, and guards the two destructive items — the data directory and the daemon — behind
-an explicit typed `yes`.
+`OURS_CHANNEL=nightly` (or `OURS_INSTALL_CHANNEL`) selects the packages' nightly
+dist-tags. Without an override, the installer's own version selects the channel.
+The operator CLI intentionally has no nightly dist-tag and remains untagged on
+both channels.
 
-Headless (no terminal), drive it with environment variables:
+## Environment
 
-```sh
-OURS_UNINSTALL="hermes codex" \
-OURS_UNINSTALL_DATA=yes \
-OURS_UNINSTALL_DAEMON=yes \
-  bash uninstall.sh
-```
-
-| var | meaning |
-|---|---|
-| `OURS_UNINSTALL` | harnesses to remove (space/comma list of `claude-code codex hermes`, or `all`) |
-| `OURS_UNINSTALL_DATA` | `yes` — remove the ours data directory (`~/.ours`) |
-| `OURS_UNINSTALL_DAEMON` | `yes` — remove the `ours-mcp` daemon |
-
-## Notes
-
-- This package is published to npm as `@ours.network/install` and exposes the `ours-install` bin.
-  It remains self-contained (Node built-ins only). The hosted `install.sh` is the stable/latest
-  bootstrap; install `@ours.network/install@nightly` directly for the nightly channel.
-- **Idempotent + safe to re-run.** A re-run adds a skipped piece, re-points the plugins, or (only
-  when you say yes) updates a component; an already-current daemon is left untouched, its running
-  port and complete voice setup are reused everywhere. Bot tokens and fleet roles remain in the
-  copy-paste hand-off; provider keys never enter that prompt or agent chat.
+- `OURS_ASSUME_YES=1`: accept safe defaults without prompting.
+- `OURS_INSTALL_DRY_RUN=1`: preview without mutation.
+- `OURS_NPM`: npm executable.
+- `OURS_CONFIG`: explicit daemon configuration file.
+- `OURS_STATE_DIR`: explicit daemon state directory.
+- `OURS_CHANNEL`: `latest` or `nightly`.

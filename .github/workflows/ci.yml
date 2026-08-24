@@ -36,26 +36,18 @@ jobs:
     name: Gates (typecheck · build · test)
     timeout-minutes: 30
     steps:
-      # The packet compiles from packages/core/mufl_code/ incl. the core/
-      # submodule (public repo; if it ever goes private, checkout needs an
-      # org-readable token here).
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
       - run: npm ci
-      - name: Compile MUFL packet
-        run: scripts/compile-mufl.sh
       - run: npm run typecheck
       - run: npm run build
-      - name: Verify build output (compiled .muflo + bundles ship)
+      - name: Verify build output
         run: |
-          test -f packages/core/dist/index.js
+          test -f packages/core/dist/connector.js
           test -f packages/core/dist/cli.js
-          ls packages/core/dist/mufl_code/*.muflo
           test -f packages/claude-code/dist/hooks/runner.js
       - run: npm test
 
@@ -111,7 +103,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version-bump.outputs.new-sha }}
-          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -153,8 +144,6 @@ jobs:
           const pkg = require(`${process.cwd()}/packages/installer/package.json`);
           if (pkg.bin['ours-install'] !== 'install.mjs') throw new Error('@ours.network/install must expose the ours-install bin');
           NODE
-      - name: Compile MUFL packet
-        run: scripts/compile-mufl.sh
       - run: npm run build
       # FAIL-CLOSED before ANY stable publish: asserts we are on main and every managed
       # package carries a clean X.Y.Z (no pre-release suffix). A nightly build can never
@@ -232,8 +221,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -246,14 +233,11 @@ jobs:
       - name: Compute + set nightly version
         id: nightly
         run: OURS_RELEASE_MODE=nightly bash .github/workflows/scripts/bump-versions.sh
-      - name: Compile MUFL packet
-        run: scripts/compile-mufl.sh
       - run: npm run build
-      - name: Verify build output (compiled .muflo + bundles ship)
+      - name: Verify build output
         run: |
-          test -f packages/core/dist/index.js
+          test -f packages/core/dist/connector.js
           test -f packages/core/dist/cli.js
-          ls packages/core/dist/mufl_code/*.muflo
           test -f packages/claude-code/dist/hooks/runner.js
       # Each publish goes through publish-nightly.sh, which runs the fail-closed
       # guard (version must be -nightly.N) and then `npm publish --tag nightly`

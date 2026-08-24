@@ -4,8 +4,8 @@
 // no-op that neither duplicates the MCP table nor the pointer (idempotent).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,5 +63,39 @@ test('install.sh sets up skills, config.toml, and AGENTS.md; second run is idemp
   } finally {
     rmSync(CODEX, { recursive: true, force: true });
     rmSync(SKILLS, { recursive: true, force: true });
+  }
+});
+
+test('install.sh fails when an upgraded daemon can neither restart nor start', () => {
+  const root = mkdtempSync(join(tmpdir(), 'codex-daemon-failure-'));
+  const bin = join(root, 'bin');
+  const state = join(root, 'upgraded');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'npm'), '#!/usr/bin/env bash\ntouch "$FAKE_UPGRADE_STATE"\n');
+  writeFileSync(join(bin, 'ours'), `#!/usr/bin/env bash
+case "$*" in
+  version) if [ -f "$FAKE_UPGRADE_STATE" ]; then echo 2.0.0; else echo 1.0.0; fi ;;
+  "daemon status") exit 0 ;;
+  "daemon restart"|"daemon start") exit 1 ;;
+esac
+`);
+  writeFileSync(join(bin, 'ours-mcp'), '#!/usr/bin/env bash\nexit 0\n');
+  for (const name of ['npm', 'ours', 'ours-mcp']) chmodSync(join(bin, name), 0o755);
+  try {
+    const result = spawnSync('bash', [INSTALL], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        FAKE_UPGRADE_STATE: state,
+        CODEX_DIR: join(root, '.codex'),
+        SKILLS_DIR: join(root, 'skills'),
+        OURS_CODEX_SKIP_NATIVE: '1',
+      },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /could not restart or start the upgraded daemon/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

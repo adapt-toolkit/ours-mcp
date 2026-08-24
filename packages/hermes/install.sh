@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the ours.network plugin into Hermes:
-#   1. ensure the ours daemon (@ours.network/mcp) is installed + running
+#   1. ensure the ours operator CLI and MCP adapter are installed; start the shared daemon
 #   2. install the ours + writing-agent-bios skills into ~/.hermes/skills/
 #   3. write the `ours` MCP server into ~/.hermes/config.yaml (idempotent, never corrupts
 #      existing YAML)
@@ -31,18 +31,23 @@ say(){ printf 'ours-install: %s\n' "$1"; }
 ensure_daemon_latest(){
   if [ "${OURS_INSTALL_SKIP_DAEMON:-}" = "1" ]; then say "skipping daemon step (OURS_INSTALL_SKIP_DAEMON=1)"; return 0; fi
   local before after
-  before="$(ours-mcp --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-  say "ensuring @ours.network/mcp@latest…"
-  npm i -g @ours.network/mcp@latest
-  after="$(ours-mcp --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-  if ! ours-mcp status >/dev/null 2>&1; then
-    say "starting the ours daemon…"; ours-mcp start || say "could not auto-start; run 'ours-mcp start' if the tools error."
+  before="$(ours version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  say "ensuring @ours.network/cli@latest and @ours.network/mcp@latest…"
+  npm i -g @ours.network/cli@latest @ours.network/mcp@latest
+  after="$(ours version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  if ! ours daemon status >/dev/null 2>&1; then
+    say "starting the ours daemon…"
+    if ! ours daemon start; then say "could not start the ours daemon; installation stopped."; return 1; fi
   elif [ -n "$before" ] && [ "$before" != "$after" ]; then
-    say "daemon upgraded (v${before} → v${after}) — restarting…"; ours-mcp restart || ours-mcp start || true
+    say "operator CLI upgraded (v${before} → v${after}) — restarting its daemon…"
+    if ! ours daemon restart; then
+      say "restart failed; trying a clean start…"
+      if ! ours daemon start; then say "could not restart or start the upgraded daemon; installation stopped."; return 1; fi
+    fi
   else
     say "daemon already current (v${after:-unknown})."
   fi
-  say "daemon: $(command -v ours-mcp) (v${after:-unknown})"
+  say "operator CLI: $(command -v ours) (v${after:-unknown}); MCP adapter: $(command -v ours-mcp)"
 }
 
 # Idempotent, GUARDED cleanup of legacy connector-era artifacts earlier (0.2.0/0.3.0) installers
@@ -93,7 +98,7 @@ say "done. Run /reload-mcp in Hermes to load the mcp_ours_* tools."
 # --- version echo: show the user they are on latest ---
 if [ "${OURS_INSTALL_SKIP_DAEMON:-}" != "1" ]; then
   say "versions:"
-  say "  daemon: $(ours-mcp --version 2>/dev/null | head -1 || echo 'unknown')"
+  say "  MCP adapter: $(ours-mcp --version 2>/dev/null | head -1 || echo 'unknown')"
   say "  plugin: $(npm ls -g @ours.network/hermes 2>/dev/null | grep -oE '@ours\.network/hermes@[0-9][0-9.]*' | head -1 || echo '@ours.network/hermes (not a global install)')"
 fi
 say "next: in your agent, bind (or create) an identity and ask the ours skill to \"wake me on new"

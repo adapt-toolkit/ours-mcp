@@ -100,7 +100,7 @@ console.log('proxy.mjs dependency resolution');
   const r = runProxy(proxy);
   assert(r.status === 0, 'shared npm-cache: proxy exits 0');
   assert(r.stderr.includes(MARKER), 'shared npm-cache: core cli resolved + launched');
-  assert(r.stderr.includes('args=proxy'), 'shared npm-cache: forwards the proxy subcommand');
+  assert(r.stderr.includes('args=proxy'), 'shared npm-cache: launches the shared-daemon proxy');
 }
 
 // Case B — per-version node_modules (the healthy layout) still works.

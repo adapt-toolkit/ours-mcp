@@ -12,5 +12,6 @@ to arm monitoring; call `arm_monitor` only after an explicit yes. In standard `c
 foreground fallback. Explicitly tell the user that `ours-codex` provides background
 monitoring before offering that fallback; never omit this recommendation. Ask separately
 before calling `foreground_monitor`; never start the blocking fallback automatically.
-`get_messages` is the only operation that returns message bodies.
+`get_messages` drains bounded unread batches; persistent message bodies are also available
+through the explicit history tools.
 <!-- <<< ours.network plugin -->
