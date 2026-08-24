@@ -107,7 +107,7 @@ export function resolveChannel(raw, selfVersion = '') {
 
 // A published nightly carries the `-nightly.N` prerelease suffix the bump script writes.
 export function isNightlyVersion(version) {
-  return /-nightly\.\d+/.test(String(version || ''));
+  return /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-nightly\.(?:0|[1-9]\d*)$/.test(String(version || ''));
 }
 
 // The npm dist-tag to install for one package key under a channel. Looks the key
@@ -207,15 +207,13 @@ export function planTgDaemonConfig(existing, { daemonUrl, daemonStateDir, broker
 }
 
 // ── Rooms / ours-cowork ────────────────────────────────────────────────────────
-// ours-cowork was a purely standalone daemon: its shipped 0.4.0 bundle has no
-// daemonUrl / daemonStateDir / /api/v1 anywhere and its docs said it "has no
-// dependency on another agent daemon". ours-cowork PR #9 (head 030b71df…) adds an
-// EXTERNAL daemon mode, so Rooms can now answer the same common-vs-dedicated
-// question the Telegram connector does. Its exact contract, as reported:
+// cowork supports an external-daemon mode, so Rooms can use the same
+// common-vs-dedicated selection as the Telegram connector. Its public config
+// contract is:
 //
 //   ~/.ours-cowork/config.json carries an OPTIONAL `daemon` block.
 //     absent  ⇒ EMBEDDED — cowork hosts its own daemon (what every install
-//               before PR #9 does, and still the safe answer for one already
+//               before external mode existed, and still the safe answer for one already
 //               running that way).
 //     present ⇒ { mode: 'external', endpoint: 'http://127.0.0.1:<port>',
 //                 stateDir: '<absolute ours-daemon state dir>' }
@@ -236,19 +234,12 @@ export const COWORK_DEFAULT_PORT = 3052;
 export const COWORK_DAEMON_MODES = ['embedded', 'external'];
 
 // Which cowork builds understand the `daemon` block. Its config is a STRICT
-// document, so handing an unknown key to a build that predates PR #9 is not a
+// document, so handing an unknown key to a build that predates external mode is not a
 // harmless no-op — and cowork's boot is fail-closed, so the failure surfaces as a
 // Rooms daemon that will not start rather than a warning.
 //
-// The FIRST published cowork that implements the external-daemon mode. Verified
-// against the registry rather than taken on trust:
-//   @ours.network/cowork@nightly = 0.4.1-nightly.20260816.4aaf940
-//   gitHead 4aaf9406016098704d06b52352f7a38adc2ef160
-//   dist.shasum 5a6422409b1203a9bcc6aca33965fe47e9a5c17c
-//   depends on @ours.network/sdk 1.3.1; `latest` still 0.4.0
-// and the packed tarball really carries it — dist/daemon.js and dist/cli.js
-// contain the mode enum ["embedded","external"], the endpoint+stateDir pairing
-// check, OURS_COWORK_DAEMON_MODE/_ENDPOINT/_STATE_DIR, and the daemon-token read.
+// The first published cowork version whose package contains external-daemon
+// config parsing, endpoint/state-directory pairing, and daemon-token loading.
 export const COWORK_EXTERNAL_MIN_VERSION = '0.4.1-nightly.20260816.4aaf940';
 
 // Does the cowork build actually on this machine support an external daemon?

@@ -1,4 +1,4 @@
-// ours-install v3 stage 1 — argument handling and daemon detection (spec §§1-3).
+// ours-install v3 stage 1 — argument handling and daemon detection.
 // Pure: the probe, the file reads and the port check are injected, so nothing
 // here opens a socket, starts a daemon or touches a real state directory.
 import { test } from 'node:test';
@@ -209,7 +209,7 @@ test('something that is not an ours daemon on the RECORDED port: also REFUSED', 
 });
 
 test('a foreign daemon on the GUESSED default port means ABSENT, so a second daemon can be created', async () => {
-  // AMENDS #56, and this is the case that made spec §7 unreachable. A fresh
+  // Regression guard: a fresh
   // second state directory records no port, so the candidate is the built-in
   // default — which is exactly where the FIRST daemon answers. Refusing there
   // meant no second daemon could ever be created while the first was up, and
@@ -247,7 +247,7 @@ test('absent + no --port: a free port is searched from 3050, skipping reserved d
 test('absent + explicit --port: used exactly as typed and NEVER moved', async () => {
   const r = await target({ port: 3051, portExplicit: true });
   assert.equal(r.action, 'create');
-  assert.equal(r.port, 3051, "the owner's `--port 3051` must keep working");
+  assert.equal(r.port, 3051, 'an explicit `--port 3051` must keep working');
   assert.equal(r.reservedNotice, 3051, 'but the operator is told it is the connector default');
 });
 
@@ -265,7 +265,7 @@ test('creating after a stale PID record reports why', async () => {
 });
 
 test('a re-run with the same state dir can never reach the foreign-daemon refusal', async () => {
-  // The owner's correction: the directory is looked up first and its own daemon
+  // The directory is looked up first and its own daemon
   // is found on its own port, so an auto-picked port is never in play on a re-run.
   const readJson = files({ [join(OURS, DAEMON_CONFIG)]: { port: 3060 } });
   const probe = net({ 3060: { ok: true, stateDir: OURS }, [INSTALL_DEFAULT_PORT]: { ok: true, stateDir: TG } });

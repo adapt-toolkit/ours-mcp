@@ -1,14 +1,14 @@
 // ours-install v3 — the four retained extras, re-pointed at the v3 arrangement.
 //
 // The v3 installer keeps harness plugins, ours-fleet, voice setup and the
-// copy-paste hand-off prompt; spec v3's silence about them was an oversight.
+// copy-paste hand-off prompt.
 //
 // The shared daemon belongs to the operator CLI. ours-mcp is only a per-session
 // stdio adapter with no unit, and these extra phases preserve that boundary.
 //
 // Pure, like target.mjs / plan.mjs / components.mjs: no I/O, no subprocess, no
 // terminal. Every function takes what was observed and returns a plan; the
-// orchestrator (a later PR) is what performs it.
+// orchestrator performs it.
 
 import { dirname, join, resolve } from 'node:path';
 import { pkgSpec } from './logic.mjs';
@@ -16,7 +16,7 @@ import { pkgSpec } from './logic.mjs';
 const cfgPath = (stateDir) => join(resolve(stateDir), 'config.json');
 
 // -----------------------------------------------------------------------------
-// §5 — harness plugins
+// Harness plugins
 // -----------------------------------------------------------------------------
 
 export const CLAUDE_MARKET = 'adapt-toolkit/ours-claude-marketplace';
@@ -29,13 +29,12 @@ export const HARNESSES = [
 ];
 
 /**
- * SPEC §5 PROMISES SOMETHING TWO OF THE THREE REGISTRATIONS CANNOT DO.
+ * TWO OF THE THREE REGISTRATIONS CANNOT PERSIST AN ENVIRONMENT VALUE.
  *
- * §5: "For any other state directory the installer registers the harness MCP
- * entry with OURS_CONFIG=<state-dir>/config.json in its environment, so the pair
- * travels together." planMcpAttachment already returns exactly that harnessEnv —
- * and the orchestrator only PRINTS it. That is not an oversight to be fixed by
- * wiring it up harder; none of the three registrations can carry a value:
+ * For a non-default state directory, planMcpAttachment exposes the required
+ * OURS_CONFIG value. Claude Code and Codex cannot persist that value in their
+ * plugin registrations, so the installer prints an explicit shell export and
+ * never claims it was applied automatically:
  *
  *   Claude Code  the marketplace plugin's mcpServers.ours is command+args, with
  *                no env key, and `claude plugin install` injects nothing per
@@ -46,9 +45,7 @@ export const HARNESSES = [
  *   Hermes       renderConfigBlock is OUR writer, and now emits an `env:` block
  *                carrying OURS_CONFIG — so for Hermes the pair is real.
  *
- * So §5's guarantee is ALREADY unmet today for every non-default state
- * directory, silently: the harness attaches to ~/.ours while the operator was
- * told the run targeted somewhere else. The shape is:
+ * The supported behavior is:
  *
  *   default state directory   today's behaviour, byte for byte.
  *   Hermes, non-default       real: the pair is handed to ours-hermes-install's
@@ -56,7 +53,7 @@ export const HARNESSES = [
  *                             as the ours server's own env block.
  *   Claude / Codex, non-def   install the plugin (it is still the right plugin)
  *                             and PRINT the exact line the operator must add.
- *                             Never claim §5's guarantee in the screen text.
+ *                             Never claim automatic configuration in the screen text.
  *
  * Deliberately NOT done: registering a second, user-scoped `ours` MCP server via
  * `claude mcp add --env`. Two `ours` servers in front of one harness, and which
@@ -94,7 +91,7 @@ const driveSteps = {
   codex: (channel) => [
     ['codex', 'plugin', 'marketplace', 'add', CODEX_MARKET],
     ['codex', 'plugin', 'add', 'ours@ours-codex-marketplace'],
-    // Owner-mandated in v2 and kept: choosing the Codex plugin also installs the
+    // Product requirement in v2 and kept: choosing the Codex plugin also installs the
     // ours-codex live launcher, in the same step.
     ['npm', 'i', '-g', pkgSpec('codex', channel)],
   ],
@@ -122,7 +119,7 @@ const driveSteps = {
  * `env` is what an invocation must carry, and it is EMPTY unless the harness can
  * genuinely apply it. `envLine` is what the operator is told. `claimsPair` is
  * false whenever the pair is only printed — the screen text renderer reads it so
- * §5's guarantee cannot be claimed where it does not hold.
+ * the screen cannot claim that the pair was persisted where it was only printed.
  */
 export function planHarnessPlugins({
   harnesses = [],
@@ -170,7 +167,7 @@ export function planHarnessPlugins({
 }
 
 // -----------------------------------------------------------------------------
-// §5 — what the operator has to do BEFORE any of this works
+// Preconditions the operator must satisfy before installation
 // -----------------------------------------------------------------------------
 
 /**

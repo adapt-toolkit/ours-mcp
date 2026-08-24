@@ -1,7 +1,7 @@
 // ours-install v3 — component selection and attachment.
 //
-// Spec: installer-spec-v3 §5 (and the repoint half of §7, which cannot be
-// separated from attaching the connector without making a silent move possible).
+// Component selection and attachment planning. Repoint decisions stay beside
+// attachment decisions so an existing connector can never move silently.
 // Pure, like target.mjs and plan.mjs: the caller injects the current file
 // contents and the installed versions, and every function returns a plan.
 //
@@ -101,7 +101,7 @@ export const tgConfigPath = (home, env = {}) => env.OURS_TG_CONFIG ?? join(home,
 export const coworkConfigPath = (home, env = {}) => env.OURS_COWORK_CONFIG ?? join(home, '.ours-cowork', 'config.json');
 
 // -----------------------------------------------------------------------------
-// §5 — selection
+// Component selection
 // -----------------------------------------------------------------------------
 
 /**
@@ -133,7 +133,7 @@ export function planComponentSelection({ answers = {}, installed = {}, assumeYes
 }
 
 // -----------------------------------------------------------------------------
-// §5 — the MCP server
+// MCP server attachment
 // -----------------------------------------------------------------------------
 
 /**
@@ -159,7 +159,7 @@ export function planMcpAttachment({ stateDir, isDefaultStateDir, channel = 'late
 }
 
 // -----------------------------------------------------------------------------
-// §5 / §7 — the Telegram connector
+// Telegram connector attachment and repointing
 // -----------------------------------------------------------------------------
 
 /**
@@ -217,12 +217,12 @@ export function planTgAttachment({ existing, endpoint, stateDir, brokerUrl, assu
     to: { daemonUrl: endpoint, daemonStateDir: dir },
     prompt: `The Telegram connector currently uses ${current.daemonUrl ?? 'an unrecorded daemon'} (${current.daemonStateDir ?? 'unrecorded state directory'}).\nPoint it at ${endpoint} (${dir}) instead? This MOVES the connector; it does not add a second one.`,
   };
-  // Never repointed without a human, in any mode (spec §9).
+  // Never repoint an existing connector without a human, in any mode.
   return assumeYes ? { ...repoint, action: 'skip-repoint', reason: 'never repointed non-interactively' } : repoint;
 }
 
 // -----------------------------------------------------------------------------
-// §5 — cowork
+// cowork attachment
 // -----------------------------------------------------------------------------
 
 /**
@@ -341,7 +341,7 @@ export function planCoworkAttachment({ existing, endpoint, stateDir, installedVe
 }
 
 // -----------------------------------------------------------------------------
-// §5 — one component failing does not stop the others
+// Component failures are isolated so the remaining components can continue.
 // -----------------------------------------------------------------------------
 
 /**

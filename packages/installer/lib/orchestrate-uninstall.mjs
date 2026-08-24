@@ -40,7 +40,7 @@ async function perform(effects, dryRun, label, thunk) {
 
 /**
  * Which components are being removed alongside this daemon. Asked once, before
- * anything is touched, so the §8 step 1 refusal can be resolved in the same run
+ * anything is touched, so a referenced-component refusal can be resolved in the same run
  * rather than sending the operator away and back.
  *
  * Non-interactively the answer is NO — assume-yes never consents to removing
@@ -81,7 +81,7 @@ export async function runUninstall(argv, effects) {
   effects.out(heading(`ours-uninstall --state-dir ${dir}`));
   if (args.dryRun) effects.out(info('dry-run: nothing will be removed or stopped'));
 
-  // §9 — the documented OURS_UNINSTALL_* contract (item 10.9), read BEFORE any
+  // Read the documented OURS_UNINSTALL_* contract before any
   // file is opened. A variable this uninstaller cannot deliver stops the run
   // here, naming itself and naming the replacement, rather than being silently
   // ignored while the operator's script reports success.

@@ -69,9 +69,9 @@ function readTextFile(path) {
   }
 }
 
-function installedVersionOf(pkg) {
+function installedVersionOf(pkg, npmBin = 'npm') {
   try {
-    const out = execFileSync('npm', ['ls', '-g', '--depth', '0', '--json', pkg], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const out = execFileSync(npmBin, ['ls', '-g', '--depth', '0', '--json', pkg], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     return JSON.parse(out)?.dependencies?.[pkg]?.version ?? null;
   } catch {
     // Unreadable is NOT "new enough": the cowork gate fails closed on null.
@@ -79,8 +79,8 @@ function installedVersionOf(pkg) {
   }
 }
 
-function packageDependenciesOf(pkgSpec) {
-  const probe = capture('npm', ['view', pkgSpec, 'dependencies', '--json'], { timeout: 15_000 });
+function packageDependenciesOf(pkgSpec, npmBin = 'npm') {
+  const probe = capture(npmBin, ['view', pkgSpec, 'dependencies', '--json'], { timeout: 15_000 });
   if (!probe.ok) return null;
   try {
     const parsed = JSON.parse(probe.stdout);
@@ -88,6 +88,33 @@ function packageDependenciesOf(pkgSpec) {
   } catch {
     return null;
   }
+}
+
+function resolvePackageVersion(pkg, channel, npmBin = 'npm') {
+  const tag = channel === 'nightly' ? 'nightly' : 'latest';
+  const probe = capture(npmBin, ['view', `${pkg}@${tag}`, 'version', '--json'], { timeout: 15_000 });
+  if (!probe.ok) return '';
+  try {
+    const parsed = JSON.parse(probe.stdout);
+    return typeof parsed === 'string' ? parsed : '';
+  } catch {
+    return /^\S+$/.test(probe.stdout.trim()) ? probe.stdout.trim() : '';
+  }
+}
+
+function codexMarketplace() {
+  const probe = capture('codex', ['plugin', 'marketplace', 'list', '--json'], { timeout: 6_000 });
+  if (!probe.ok) return null;
+  try {
+    return JSON.parse(probe.stdout)?.marketplaces?.find((m) => m?.name === 'ours-codex-marketplace') ?? null;
+  } catch { return null; }
+}
+
+function hasClaudePlugin() {
+  const probe = capture('claude', ['plugin', 'list', '--json'], { timeout: 6_000 });
+  if (!probe.ok) return false;
+  try { return JSON.parse(probe.stdout)?.some((p) => p?.id === 'ours@ours.network') ?? false; }
+  catch { return false; }
 }
 
 /**
@@ -223,6 +250,7 @@ function knownStateDirsIn(home) {
  * the orchestrator never reaches for a terminal itself.
  */
 export function realEffects({ write, ttyFd, env = process.env, home = homedir(), out, version = null } = {}) {
+  const npmBin = env.OURS_NPM?.trim() || 'npm';
   return {
     home,
     env,
@@ -297,14 +325,15 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
       // effects object a caller constructed and not of whatever ambient shell
       // the installer happened to start in.
       const childEnv = { ...env, ...(extraEnv ?? {}) };
-      const r = spawnSync(cmd, args, {
+      const executable = cmd === 'npm' ? npmBin : cmd;
+      const r = spawnSync(executable, args, {
         encoding: 'utf8',
         stdio: stream ? ['ignore', 'inherit', 'inherit'] : ['ignore', 'pipe', 'pipe'],
         env: childEnv,
       });
       if (r.status !== 0) {
         const detail = (r.stderr || r.stdout || '').trim().split('\n').slice(-3).join('; ');
-        throw new Error(`${cmd} ${args.join(' ')} exited ${r.status}${detail ? `: ${detail}` : ''}`);
+        throw new Error(`${executable} ${args.join(' ')} exited ${r.status}${detail ? `: ${detail}` : ''}`);
       }
       return { ok: true, code: r.status, stdout: r.stdout ?? '' };
     },
@@ -317,8 +346,11 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
       const r = spawnSync(cmd, args, { stdio: 'inherit', env: { ...env, ...(extraEnv ?? {}) } });
       return { ok: !r.error && r.status === 0, code: r.status ?? -1 };
     },
-    installedVersion: installedVersionOf,
-    packageDependencies: packageDependenciesOf,
+    installedVersion: (pkg) => installedVersionOf(pkg, npmBin),
+    packageDependencies: (spec) => packageDependenciesOf(spec, npmBin),
+    resolvePackageVersion: (pkg, channel) => resolvePackageVersion(pkg, channel, npmBin),
+    codexMarketplace,
+    hasClaudePlugin,
     out: out ?? ((line) => process.stdout.write(`${line}\n`)),
     // Never called when assumeYes: the orchestrator takes the default itself.
     ask: async (prompt, def = false) => (ttyFd == null ? def : askYesNo(write, ttyFd, `  ${prompt}  `, def)),
@@ -326,7 +358,7 @@ export function realEffects({ write, ttyFd, env = process.env, home = homedir(),
   };
 }
 
-export const __testables = { probePort, portTakenSync, readJsonFile, readTextFile, installedVersionOf, packageDependenciesOf, knownStateDirsIn };
+export const __testables = { probePort, portTakenSync, readJsonFile, readTextFile, installedVersionOf, packageDependenciesOf, resolvePackageVersion, codexMarketplace, hasClaudePlugin, knownStateDirsIn };
 
 // -----------------------------------------------------------------------------
 // THE PAIR
@@ -335,7 +367,7 @@ export const __testables = { probePort, portTakenSync, readJsonFile, readTextFil
 /**
  * The environment that names ONE daemon, for a single child invocation.
  *
- * Spec §2's rule is that a state directory and an endpoint always travel
+ * A state directory and its endpoint always travel
  * together; "endpoint selected, state directory defaulted" must be unreachable.
  * Every consumer downstream — ours-mcp's proxy, ours-fleet's per-role resolver,
  * ours-hermes-install — reads these three names and falls back to `~/.ours` for

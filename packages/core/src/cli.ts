@@ -52,7 +52,7 @@ async function runOurs(args: string[]): Promise<void> {
     child.once('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') {
         reject(new Error(
-          `Cannot find the ${JSON.stringify(executable)} CLI. Install @ours.network/cli@1.0.1, ` +
+          `Cannot find the ${JSON.stringify(executable)} CLI. Install @ours.network/cli@2.2.0, ` +
           'put `ours` on PATH, or set OURS_CLI to its executable path.',
         ));
         return;
@@ -81,6 +81,11 @@ async function runProxy(): Promise<void> {
     version: VERSION,
     bindIdentity: BIND_IDENTITY,
   });
+}
+
+async function runSessionEnd(): Promise<void> {
+  const client = await attachOursClient({ leaseToken: LEASE_TOKEN, clientPid: CLIENT_PID });
+  await client.releaseLease();
 }
 
 function jsonNotification(identity: string, event: NotificationEvent): string {
@@ -125,13 +130,14 @@ function usage(): void {
   out('');
   out('Usage: ours-mcp <command> [options]');
   out('  proxy                 run the stdio MCP server (never starts a daemon)');
+  out('  session-end           release this harness session and clean up its temporary identities');
   out('  watch [identity]      stream inbound JSON Lines; without a name, only ours-mcp identities');
   out('  start|stop|restart|serve|status');
   out('  install-service|uninstall-service');
   out('                        compatibility aliases for `ours daemon <command>`');
   out('  version               print the ours-mcp package version');
   out('');
-  out('Daemon configuration and identity CLI operations moved to @ours.network/cli@1.0.1:');
+  out('Daemon configuration and identity CLI operations moved to @ours.network/cli@2.2.0:');
   out('  ours config setup');
   out('  ours identity --help');
 }
@@ -150,6 +156,10 @@ async function main(): Promise<void> {
     case 'proxy':
       if (args.length) throw new Error('Usage: ours-mcp proxy');
       await runProxy();
+      return;
+    case 'session-end':
+      if (args.length) throw new Error('Usage: ours-mcp session-end');
+      await runSessionEnd();
       return;
     case 'watch':
       await runWatch(args);

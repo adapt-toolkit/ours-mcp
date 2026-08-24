@@ -1,6 +1,6 @@
 // ours-install v3 — daemon creation and boot-service installation.
 //
-// Spec: installer-spec-v3 §§3-4. Pure, like lib/target.mjs: the orchestrator
+// Pure planning code, like lib/target.mjs: the orchestrator
 // injects file reads, and every function returns a PLAN the caller renders and
 // executes. Nothing here writes, spawns, or runs systemctl.
 
@@ -11,7 +11,7 @@ export const SYSTEMD_USER_DIR = ['.config', 'systemd', 'user'];
 export const DEFAULT_SYSTEMD_UNIT = 'ours.service';
 
 // -----------------------------------------------------------------------------
-// §4 — which unit file does this state directory own?
+// Which unit file does this state directory own?
 // -----------------------------------------------------------------------------
 
 // 1–32 chars, alphanumeric with interior hyphens/underscores, no dots.
@@ -59,7 +59,7 @@ export function unitPathForStateDir(stateDir, home) {
  *   legacy      — the unit published ours-mcp wrote: NO marker, ExecStart running
  *                 ours-mcp. This is the migration blocker. `ours daemon
  *                 install-service` refuses to overwrite an unmarked unit without
- *                 --force, so spec §4 step 4 fails for every existing Linux user.
+ *                 --force, so service installation fails for every existing Linux user.
  *   foreign     — unmarked and NOT recognisably ours-mcp's. Someone else's file.
  *
  * THE legacy/foreign SPLIT IS NOW THE ENTIRE SAFETY BOUNDARY. A `legacy` unit is
@@ -85,7 +85,7 @@ export function classifyUnit(text) {
 }
 
 /**
- * What this run should do about the boot service (spec §4 step 4).
+ * Decide what this run should do about the boot service.
  *
  * Returns one of:
  *   { action: 'install' }                        — call the CLI; it does the rest
@@ -202,9 +202,9 @@ export function legacyReplacedNotice(unitPath, stateDir) {
 
 /**
  * The CLI invocation that installs the boot service. The unit NAME is not passed:
- * ours-sdk #20 made the CLI derive it from --state-dir itself, which is why spec
- * §4's "the installer must either pass a per-instance unit name or write the unit
- * itself" no longer applies — neither, it selects the daemon and the CLI names
+ * ours-sdk #20 made the CLI derive it from --state-dir itself, so the installer
+ * neither passes a per-instance unit name nor writes the unit itself: it selects
+ * the daemon and the CLI names
  * the unit. One derivation, in one place.
  */
 export function serviceInstallCommand({ stateDir, adoptLegacyUnit = false }) {
@@ -221,7 +221,7 @@ export function serviceInstallCommand({ stateDir, adoptLegacyUnit = false }) {
 }
 
 // -----------------------------------------------------------------------------
-// §3(a) step 2 / §4 step 2 — the daemon config file
+// Daemon configuration file
 // -----------------------------------------------------------------------------
 
 /**
@@ -247,7 +247,7 @@ export function planDaemonConfig(existing, { port, stateDir, brokerUrl }) {
 }
 
 /**
- * The ordered, announced steps for the daemon half of a run (spec §4). Each is
+ * The ordered, announced steps for the daemon half of a run. Each is
  * idempotent, and an `update` skips creation entirely: it never moves a port and
  * never creates a second daemon.
  */

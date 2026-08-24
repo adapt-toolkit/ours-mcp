@@ -1,4 +1,4 @@
-// ours-install v3 — the four retained extras (owner ruling 2026-08-17).
+// ours-install v3 — the four retained extras (Product contract 2026-08-17).
 //
 // Pure functions only: nothing here spawns, writes, probes or touches a
 // terminal. The point of each test is a decision that is easy to get wrong in
@@ -40,7 +40,7 @@ test('the default state directory changes NOTHING about a harness install', () =
 });
 
 test('a non-default state directory: Hermes carries the pair, Claude and Codex only print it', () => {
-  // Spec §5 promises the registration carries OURS_CONFIG. Two of the three
+  // The desired registration carries OURS_CONFIG. Two of the three
   // registrations cannot carry a value at all, so this pins WHICH one is real —
   // and pins that the other two never claim the guarantee.
   const plans = planHarnessPlugins({ harnesses: all(), stateDir: TG, isDefaultStateDir: false });
@@ -56,7 +56,7 @@ test('a non-default state directory: Hermes carries the pair, Claude and Codex o
     assert.equal(p.envSupport, 'printed', `${name} cannot carry a value`);
     assert.deepEqual(p.env, {}, `${name} must never be handed an env it cannot apply`);
     assert.equal(p.envLine, `export OURS_CONFIG=${TG_CFG}`);
-    assert.equal(p.claimsPair, false, `${name} must never claim spec §5's guarantee`);
+    assert.equal(p.claimsPair, false, `${name} must never claim automatic daemon selection`);
   }
 });
 

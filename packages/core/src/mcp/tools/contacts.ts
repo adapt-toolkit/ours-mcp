@@ -2,9 +2,8 @@
 // add_contact, list_contacts, list_local_contact_book, set_local_book_policy,
 // respond_to_introduction, remove_contact, rename_contact.
 //
-// Converted from the handlers in `createMcpServer` (index.ts:4110-4371,
-// 4463-4499 and 4722-4795, baseline 22ffb646) onto `@ours.network/sdk`. Per
-// src/mcp/tool.ts: take the zod arguments, call ONE SDK operation with the
+// These handlers adapt MCP arguments to `@ours.network/sdk`. Per
+// src/mcp/tool.ts they call one SDK operation with the
 // session context, render the typed result.
 //
 // THREE THINGS THAT USED TO LIVE HERE AND NOW DO NOT — do not put them back:
@@ -19,7 +18,7 @@
 // All three are the SDK's now, and none of them is observable from this file —
 // which is the point of the split.
 //
-// The descriptions and zod schemas are the baseline's, character for character.
+// Tool descriptions and zod schemas are compatibility-sensitive and kept byte-stable.
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
@@ -32,9 +31,8 @@ type ContactRoot = Awaited<ReturnType<OursClient['listContacts']>>['roots'][stri
 
 // One-line verified-linkage tag for a contact: who is behind it, as what.
 //
-// Moved verbatim from index.ts:3452 — list_contacts (index.ts:4298) was its only
-// caller, so it belongs with the handler rather than in the daemon.
-// Developer-2: this is the copy; delete index.ts's when its handlers go.
+// list_contacts is the only caller, so this formatter belongs with the handler
+// rather than in the daemon.
 function fmtContactRoot(r: ContactRoot | undefined): string {
   if (!r) return '';
   const who = r.root_name || r.root_cid;
@@ -217,7 +215,7 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
         clientFor(),
         (c) => c.setLocalBookPolicy({ expose, auto_accept }),
         // `changes` arrives already worded and already ORDERED (policy before
-        // exposure) because that wording and that order are baseline UX; this layer
+        // exposure) because clients rely on both the wording and order; this layer
         // adds only the frame.
         (r) => textResult(`Updated "${r.identity}": ${r.changes.join('; ')}.`),
       ),

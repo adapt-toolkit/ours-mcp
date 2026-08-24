@@ -1,4 +1,4 @@
-// ours-install v3 — which daemons are on this machine (C1, owner ruling).
+// ours-install v3 — which daemons are on this machine (C1, Product contract).
 //
 // Pure: the directory listing and the file reads are injected. Nothing here
 // touches a filesystem, a socket or a terminal.
@@ -113,7 +113,7 @@ test('several detected are shown, with "create a new one" as the last option', (
 
 // -------------------------------------------------------- deriving, not asking --
 
-test('a new state directory is DERIVED, because spec §2 forbids asking for a path', () => {
+test('a new state directory is DERIVED without asking for a path', () => {
   assert.equal(deriveNewStateDir(HOME, []), OURS);
   assert.equal(deriveNewStateDir(HOME, [OURS]), resolve(HOME, '.ours-2'));
   assert.equal(deriveNewStateDir(HOME, [OURS, resolve(HOME, '.ours-2')]), resolve(HOME, '.ours-3'));
@@ -123,8 +123,8 @@ test('a new state directory is DERIVED, because spec §2 forbids asking for a pa
 // ------------------------------------------------------- reading the answer ---
 
 test('an answer that is not one of the numbers offered is REFUSED, never interpreted', () => {
-  // Accepting free text here would be the "type a state directory" prompt spec §2
-  // forbids, arriving through the back door.
+  // Accepting free text here would reintroduce the forbidden "type a state
+  // directory" prompt through the back door.
   const plan = planDaemonSelection({ candidates: TWO, home: HOME });
   for (const answer of ['/etc/passwd', '~/.ours-other', 'yes', '', '0', '9', '1.5']) {
     assert.equal(resolveSelection(answer, plan).action, 'invalid', `${JSON.stringify(answer)} is not a choice`);

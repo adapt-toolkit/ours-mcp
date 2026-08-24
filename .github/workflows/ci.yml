@@ -136,7 +136,7 @@ jobs:
           const pack = require('/tmp/ours-install-pack.json')[0];
           const files = new Set(pack.files.map((entry) => entry.path));
           for (const path of [
-            'install.mjs', 'install.sh', 'lib/ui.mjs', 'lib/logic.mjs', 'lib/prompt.mjs',
+            'install.mjs', 'install.sh', 'lib/ui.mjs', 'lib/logic.mjs', 'lib/marketplace.mjs', 'lib/prompt.mjs',
             'uninstall.mjs', 'uninstall.sh', 'README.md', 'LICENSE',
           ]) {
             if (!files.has(path)) throw new Error(`@ours.network/install package is missing ${path}`);
@@ -178,6 +178,24 @@ jobs:
         run: npm publish --workspace @ours.network/install --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # The installer is published LAST, after the exact MCP/Claude/Codex versions it
+      # resolves. Read the public registry back before calling the stable release done:
+      # all three runtime/plugin tags and the installer tag must expose this exact suite.
+      - name: Verify installer channel (stable/latest lockstep)
+        run: |
+          v="${{ needs.version-bump.outputs.unified-version }}"
+          for n in @ours.network/mcp @ours.network/claude-code @ours.network/codex @ours.network/install; do
+            actual=""
+            for attempt in 1 2 3 4 5 6 7 8; do
+              actual="$(npm view "$n" dist-tags.latest --registry=https://registry.npmjs.org 2>/dev/null || echo '')"
+              [ "$actual" = "$v" ] && break
+              echo "  ($n latest tag not yet '$v' — got '${actual:-<empty>}', retry $attempt/8)"
+              sleep 10
+            done
+            echo "$n -> latest=$actual"
+            test "$actual" = "$v" || { echo "::error::$n latest tag is '$actual', expected '$v' after retries"; exit 1; }
+            case "$actual" in *-*) echo "::error::$n @latest '$actual' is not a stable version"; exit 1 ;; esac
+          done
       - name: Summary
         run: |
           {

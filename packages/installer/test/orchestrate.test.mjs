@@ -1,4 +1,4 @@
-// ours-install v3 — the orchestrator (spec §§2-5, 9).
+// ours-install v3 — the orchestrator.
 //
 // Every side effect arrives through one injected `effects` object, so this walks
 // the WHOLE flow without a socket, a filesystem, a subprocess or a terminal.
@@ -23,7 +23,7 @@ test('NO code path this orchestrator takes ever runs systemctl, or splits the da
   // The one rule that outranks every feature here. systemd is reached only
   // through `ours daemon install-service`, which owns its own refusals.
   //
-  // Extended with the second host constraint (spec §2): now that run() can carry
+  // Second host constraint: now that run() can carry
   // an environment, EVERY invocation must carry the whole daemon pair or none of
   // it. A half pair is the quiet failure — the child falls back to ~/.ours and
   // attaches to a daemon the operator did not choose.
@@ -54,7 +54,7 @@ test('a --dry-run mutates NOTHING: no command, no write', async () => {
   assert.match(said(e), /\[dry-run\] would: /, 'and it says what it would have done');
 });
 
-// ------------------------------------------------------------- §2 refusals --
+// ---------------------------------------------------------------------- refusals --
 
 test('a bad argument exits 2 before anything happens', async () => {
   const e = fx();
@@ -62,6 +62,18 @@ test('a bad argument exits 2 before anything happens', async () => {
   assert.deepEqual(e.recorder.ran, []);
   assert.deepEqual(e.recorder.wrote, []);
   assert.match(said(e), /unknown option: --nope/);
+});
+
+test('a mismatched release suite exits 2 before any mutation', async () => {
+  const e = fx({ registryVersions: {
+    '@ours.network/mcp@latest': '0.17.2',
+    '@ours.network/claude-code@latest': '0.17.2',
+    '@ours.network/codex@latest': '0.17.3',
+  } });
+  assert.equal(await runInstall([], e), EXIT_REFUSED);
+  assert.deepEqual(e.recorder.ran, []);
+  assert.deepEqual(e.recorder.wrote, []);
+  assert.match(said(e), /not lockstep.*Nothing was changed/);
 });
 
 test('a foreign daemon on the RECORDED port exits 2 and names the other directory', async () => {
@@ -86,7 +98,7 @@ test('a --port disagreeing with the running daemon exits 2 and writes nothing', 
   assert.match(said(e), /Nothing was written/);
 });
 
-// ------------------------------------------------------- §§3-4 the daemon ----
+// -------------------------------------------------------------------- the daemon ----
 
 test('creating a daemon: the MCP server, the CLI, config, start, then service', async () => {
   const e = fx();
@@ -132,7 +144,7 @@ test('an existing daemon found only by its PID record is still an update', async
   assert.equal(r.target.port, 3060);
 });
 
-// ------------------------------------------------------------- §4 the unit ---
+// ---------------------------------------------------------------------- the unit ---
 
 test('a legacy ours-mcp unit is adopted silently, with --force and one line', async () => {
   // --force is back with the SDK CLI's install-service, and so is the marker check
@@ -141,7 +153,7 @@ test('a legacy ours-mcp unit is adopted silently, with --force and one line', as
   const e = fx({ text: { [unitPath('ours.service')]: LEGACY_UNIT } });
   const r = await runServicePhase({ dryRun: false }, e, OURS, 3050);
   assert.equal(r.plan.action, 'adopt');
-  assert.deepEqual(e.recorder.asked, [], 'no prompt — the owner ruled it silent');
+  assert.deepEqual(e.recorder.asked, [], 'no prompt — the operation is intentionally non-interactive');
   const cmd = e.recorder.ran.find((x) => x.includes('install-service'));
   assert.ok(cmd.includes('--force'), 'adoption needs --force, and this is the only place it is passed');
   assert.match(said(e), /replaced .*ours\.service/);
@@ -167,7 +179,7 @@ test('a clean install passes no --force at all', async () => {
   assert.ok(!cmd.includes('--force'));
 });
 
-// ---------------------------------------------------------- §5 components ----
+// -------------------------------------------------------------------- components ----
 
 test('assume-yes installs the complete stack, runs both durable shims, stages Fleet, and asks nothing', async () => {
   const e = fx({ env: { OURS_ASSUME_YES: '1' }, versions: { '@ours.network/cowork': '0.5.0' } });
@@ -280,7 +292,7 @@ test('lib/effects.mjs never reaches for systemctl or a unit file', async () => {
   }
 });
 
-// ----------------------------------------------------------------- §5 channel --
+// ----------------------------------------------------------------------- channel --
 
 test('CHANNEL=nightly installs the NIGHTLY component packages, not stable ones beside nightly plugins', async () => {
   // The whole point, asserted on the recorded invocation rather than on a screen
@@ -290,7 +302,10 @@ test('CHANNEL=nightly installs the NIGHTLY component packages, not stable ones b
   const e = fx({ env: { OURS_CHANNEL: 'nightly', OURS_ASSUME_YES: '1' } });
   await runInstall([], e);
   const installs = e.recorder.ran.filter((c) => c.join(' ').startsWith('npm i -g')).map((c) => c[c.length - 1]);
-  assert.ok(installs.includes('@ours.network/mcp@nightly'), `mcp must be nightly, got: ${installs.join(', ')}`);
+  assert.ok(
+    installs.some((spec) => /^@ours\.network\/mcp@\d+\.\d+\.\d+-nightly\.\d+$/.test(spec)),
+    `mcp must be pinned to the resolved nightly suite, got: ${installs.join(', ')}`,
+  );
   assert.ok(installs.includes('@ours.network/cli'), `the CLI intentionally stays on its only published channel, got: ${installs.join(', ')}`);
   assert.ok(!installs.includes('@ours.network/cli@nightly'), 'the CLI has no nightly dist-tag');
   assert.ok(
@@ -648,7 +663,7 @@ test('several daemons are SHOWN and the operator picks — never asked to type a
   assert.match(screen, /using the ours daemon at .*\.ours-work/);
   assert.ok(
     e.recorder.askedLines.every((p) => !/state directory|path/i.test(p)),
-    'the prompt asks for a NUMBER; spec §2 forbids asking for a path',
+    'the prompt asks for a NUMBER and never asks for a path',
   );
 });
 
@@ -836,10 +851,14 @@ test('a NIGHTLY installer with NO env var installs nightly, not latest', async (
   assert.ok(installs.length > 0, 'something was installed');
   for (const spec of installs) {
     // @ours.network/cli is exempt and must stay exempt: it publishes only `latest`,
-    // so pinning it to a nightly tag would 404. Everything that HAS a nightly tag
-    // must use it.
+    // so pinning it to a nightly tag would 404. Suite-managed packages are resolved
+    // to one exact nightly version; other packages continue to use the nightly tag.
     if (spec === '@ours.network/cli') continue;
-    assert.match(spec, /@nightly$/, `every package with a nightly tag must use it, got ${spec}`);
+    if (spec.startsWith('@ours.network/mcp@') || spec.startsWith('@ours.network/codex@')) {
+      assert.match(spec, /@\d+\.\d+\.\d+-nightly\.\d+$/, `suite package must use an exact nightly, got ${spec}`);
+    } else {
+      assert.match(spec, /@nightly$/, `every other package with a nightly tag must use it, got ${spec}`);
+    }
   }
 });
 

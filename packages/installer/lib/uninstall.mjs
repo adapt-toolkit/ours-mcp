@@ -1,6 +1,6 @@
 // ours-uninstall v3 — removing ONE daemon, and the non-interactive contract.
 //
-// Spec: installer-spec-v3 §§8-9. Pure, like every other stage: the caller
+// Pure uninstall planning, like every other stage: the caller
 // injects the file reads and this returns a plan.
 //
 //   ours-uninstall [--state-dir PATH] [--purge] [--dry-run]
@@ -11,7 +11,7 @@
 // THE BIAS OF THIS WHOLE FILE IS TOWARD KEEPING THINGS. State is kept by default,
 // a component's config file is kept even when its daemon keys are removed, and
 // global packages are kept while any other daemon still needs them. The one
-// destructive operation, --purge, is separately gated (§8 step 5) because
+// destructive operation, --purge, is separately gated because
 // it deletes identity keys, and no other step here is irreversible.
 
 import { join, resolve } from 'node:path';
@@ -22,9 +22,9 @@ import { canonHarnesses } from './logic.mjs';
 /**
  * Does this directory even look like an ours state directory?
  *
- * WHY THIS EXISTS. The owner removed the "created by an installer run" gate —
- * purge means purge, on any state directory. That was a deliberate ruling and
- * this does not reintroduce it: this asks "is this a state directory at all",
+ * Purge applies to any explicitly selected ours state directory, not only one
+ * created by this installer. This does not add a provenance gate: it asks
+ * "is this a state directory at all",
  * not "is it ours". With provenance gone, the typed path would otherwise be the
  * only thing between `ours-uninstall --state-dir ~ --purge` and a deleted home
  * directory, and a typed path is no protection against a path typed exactly as
@@ -85,7 +85,7 @@ export function inspectComponentConfig(path, { readText } = {}) {
 }
 
 /**
- * §8 step 1 — refuse if a component still points at this daemon.
+ * Refuse if a component still points at this daemon.
  *
  * Read the connector's and cowork's config files; if either names this daemon's
  * endpoint or its state directory, list them and stop. Exit 2, nothing removed.
@@ -160,7 +160,7 @@ export function planComponentDetach(key, existing) {
 }
 
 /**
- * §8 steps 3-4 — the boot service, then the daemon itself.
+ * Stop the boot service, then the daemon itself.
  *
  * Both delegate their refusals rather than reimplementing them: `ours daemon
  * uninstall-service` refuses to remove a unit not marked as CLI-managed, and
@@ -186,14 +186,13 @@ export function planDaemonRemoval({ stateDir, cliStartedIt }) {
 }
 
 /**
- * §8 step 5 — state. Kept unless every gate opens.
+ * State is kept unless every purge gate opens.
  *
  *   --purge given      — never the default; deleting identity keys is opt-in.
- *   interactive        — an unattended run never deletes state (§9).
+ *   interactive        — an unattended run never deletes state.
  *   looks like a state directory — see looksLikeStateDir.
- *   typed confirmation — the full path, not a y/N. The owner removed the
- *                        provenance condition, not the deliberateness, and with
- *                        provenance gone this is the last thing standing between
+ *   typed confirmation — the full path, not a y/N. Without a provenance
+ *                        condition, this is the last thing standing between
  *                        a mistyped command and someone's identity keys.
  *
  * Returns the exact directory, never a glob or a parent, and only when every gate
@@ -219,7 +218,7 @@ export function planStatePurge({ stateDir, purge = false, assumeYes = false, exi
 }
 
 /**
- * §8 step 6 — global packages are shared. Remove them only when no OTHER state
+ * Global packages are shared. Remove them only when no other state
  * directory on this machine still has a daemon config; otherwise keep them and
  * say which daemon still needs them.
  */
@@ -257,7 +256,7 @@ export function planGlobalPackages({ stateDir, otherStateDirsWithConfig = [], pl
 }
 
 // -----------------------------------------------------------------------------
-// §8 — the harness plugins the installer wrote
+// Harness plugins written by the installer
 // -----------------------------------------------------------------------------
 
 /**
@@ -397,7 +396,7 @@ export function planPluginRemoval({ home, env = {}, exists = () => false, lastDa
 }
 
 /**
- * §8 — WHICH harnesses to detach (inventory item 9.5).
+ * Decide which harnesses to detach using the documented environment contract.
  *
  * The nightly uninstaller let the operator choose: a `checkboxSelect` picker on a
  * terminal, `OURS_UNINSTALL` without one, and NOTHING removed when it had
@@ -472,7 +471,7 @@ export function selectHarnesses(plugins, chosen) {
 }
 
 /**
- * The whole §8 order, refusing at step 1 rather than starting and stopping
+ * Preserve the full uninstall order, refusing before any mutation rather than stopping
  * half-way.
  */
 export function planUninstall({ home, env = {}, endpoint, stateDir, purge = false, assumeYes = false, confirmedComponents = [], readJson, readText, exists = () => true, cliStartedIt = true, otherStateDirsWithConfig = [], typedConfirmation = null, explicitHarnessSelection = false, platform = 'linux' }) {
@@ -528,7 +527,7 @@ export function planUninstall({ home, env = {}, endpoint, stateDir, purge = fals
 }
 
 // -----------------------------------------------------------------------------
-// §9 — the non-interactive contract
+// Non-interactive behavior
 // -----------------------------------------------------------------------------
 
 /**
@@ -565,7 +564,7 @@ export function refusalSurvivesAssumeYes(refusal) {
 }
 
 // -----------------------------------------------------------------------------
-// §9 — the OURS_UNINSTALL_* contract (inventory item 10.9)
+// Documented OURS_UNINSTALL_* environment contract
 // -----------------------------------------------------------------------------
 
 /**
@@ -592,13 +591,13 @@ export function refusalSurvivesAssumeYes(refusal) {
  *                           that matters most.
  *   OURS_UNINSTALL_TELEGRAM
  *   OURS_UNINSTALL_ROOMS    at the value `detach`, which is exactly the
- *                           confirmation §8 step 1 asks a human for and which an
+ *                           confirmation that the interactive flow asks a human for and which an
  *                           unattended run otherwise cannot give, so today the
  *                           run refuses instead of detaching.
  *
  * REFUSED
  *   OURS_UNINSTALL_DATA=yes         v3 never deletes state without a human
- *                                   present (§9), and that rule protects private
+ *                                   present; that rule protects private
  *                                   keys that exist nowhere else.
  *   OURS_UNINSTALL_PROFILE          names an entry in the daemon registry. v3
  *                                   has no registry; the selector is --state-dir.

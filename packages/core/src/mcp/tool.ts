@@ -8,17 +8,15 @@
 import { OursError } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 
-/** The MCP content shape every ours tool returns. Was `index.ts:3458`. */
+/** The MCP content shape every ours tool returns. */
 // A TYPE ALIAS, NOT AN INTERFACE, AND THAT IS NOT A STYLE CHOICE.
 // `server.tool()`'s callback must return something assignable to the MCP SDK's
 // CallToolResult, which carries an `[x: string]: unknown` index signature.
 // TypeScript gives an implicit index signature to an object type ALIAS and to an
 // inferred type, but NEVER to an interface — so declaring this as an interface
 // makes every single registration fail with TS2769 "Index signature for type
-// 'string' is missing in type 'McpTextResult'". The baseline never met this
-// because index.ts:3458's textResult declares no return type at all and its
-// inferred type is assignable. Both Developer-4 and Developer-5 hit it
-// independently on their first compile; do not "tidy" it back to an interface.
+// 'string' is missing in type 'McpTextResult'". Inferred object types are
+// assignable for the same reason. Do not "tidy" this back to an interface.
 export type McpTextResult = {
   content: Array<{ type: 'text'; text: string }>;
   isError: boolean;

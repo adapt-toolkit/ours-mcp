@@ -1,7 +1,7 @@
 // The three PROFILE tools — set_bio, advertise_migrate, set_persona.
 //
-// Converted from the handlers in `createMcpServer` (index.ts:4373-4462, baseline
-// 22ffb646) onto `@ours.network/sdk`. Each handler now does exactly what
+// These handlers adapt MCP arguments to `@ours.network/sdk`. Each handler does
+// exactly what
 // src/mcp/tool.ts says a handler does: take its zod arguments, call ONE SDK
 // operation with the session context, render the typed result. The packet
 // transactions, the root-profile re-pin loop and the error text all live in the
@@ -14,8 +14,8 @@
 // contract that never enters an invite. That is why only SetBioResult has a
 // `rolesRefreshed` count to render.
 //
-// The descriptions and zod schemas below are the baseline's, character for
-// character. They are the product, and the ux-strings gate freezes them.
+// Tool descriptions and zod schemas are compatibility-sensitive. The ux-strings
+// gate keeps them byte-stable.
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 

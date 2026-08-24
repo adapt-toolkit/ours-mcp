@@ -53,15 +53,15 @@ Walk the user through it, explaining as you go:
    every one is automatically associated with the Human identity, and its invites carry
    the verified "agent X of person Y" chain.
 
-**Do not create an agent identity on a host with no Human identity.** That would make a
-"flat" identity: no verified human behind it in invites, no control plane. The tool
-allows it for legacy reasons; this skill does not.
+**Do not create an agent identity on a host with no Human identity.** Older servers may
+accept that as unassociated legacy state: no verified human behind it in invites, no
+control plane. This skill never creates or exposes such state.
 
 | Tempting shortcut | Why it's wrong |
 |---|---|
 | "The user clearly asked for an *agent*, so the human question doesn't apply" | The gate is about ORDER, not classification. Create the Human identity first, then the agent they asked for. |
 | "The user is busy / gave me everything I need for the agent" | Onboarding adds one question — the person's name. Ask it. |
-| "`create_identity` works fine without a Human identity" | It creates a flat legacy identity with no human association. Never do it. |
+| "`create_identity` works fine without a Human identity" | Older servers may create unassociated legacy state with no human association. Never do it. |
 | "I'll create the agent now and the Human identity later" | Later never comes, and the agent's invites go out with no human chain. Human first. |
 
 ## Setup — "set up ours" / "set up the plugin"
@@ -208,7 +208,8 @@ authored the bio, so a persona prompt is only needed if they want to role-play i
 
 For scratch/one-off work ("make a temporary identity", "throwaway identity"):
 `create_temporary_identity({ name? , bio?, expose_local? })` — name optional (omitted → a
-random public-safe `tmp-…` name), binds it to this session, and marks it **temporary**:
+random public-safe `tmp-…` name), requires an existing Human identity, creates an
+ephemeral delegated role under it, binds it to this session, and marks it **temporary**:
 
 - **Session-scoped local lifetime.** When this session ends — an explicit
   `close_temporary_identity()`, releasing the connection, or the client process dying —
@@ -220,8 +221,9 @@ random public-safe `tmp-…` name), binds it to this session, and marks it **tem
   owning session lives — not even with `force`. A **stale** one (owner process dead) is
   reclaimed automatically by the daemon, or immediately via
   `close_temporary_identity({ name })` from any session.
-- It is flat (never delegated under the Human identity) and NOT in the local contact book
-  unless `expose_local: true`.
+- Its verified Human/root delegation is part of creation; the tool fails closed rather
+  than creating unassociated state. It is NOT in the local contact book unless
+  `expose_local: true`.
 - `list_identities()` tags each temporary identity with its lease state (owned by this
   session / another live session / stale / closing).
 

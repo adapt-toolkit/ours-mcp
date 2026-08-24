@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, exist
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { backupLegacySkill } from '../bin/codex-legacy-cleanup.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const install = join(root, 'install.sh');
@@ -48,6 +49,20 @@ test('plugin failure preserves all legacy wiring', () => {
     assert.match(readFileSync(join(f.codex, 'config.toml'), 'utf8'), /mcp_servers\.ours/);
     assert.ok(existsSync(join(f.skills, 'ours/SKILL.md')));
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('legacy skill backup failure preserves the source and surfaces the error', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ours-legacy-backup-'));
+  const source = join(dir, 'ours');
+  mkdirSync(source);
+  writeFileSync(join(source, 'SKILL.md'), 'keep me');
+  try {
+    assert.throws(
+      () => backupLegacySkill(source, `${source}.backup`, () => { throw new Error('injected rename failure'); }),
+      /injected rename failure/,
+    );
+    assert.equal(readFileSync(join(source, 'SKILL.md'), 'utf8'), 'keep me');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('orphaned closing marker removes only old ours MCP tables', () => {

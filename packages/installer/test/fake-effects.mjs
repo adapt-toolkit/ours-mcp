@@ -20,7 +20,8 @@ export function fx({
   json = {}, text = {}, net = {}, taken = [], versions = {}, env = {}, answers = [],
   unitUnchanged = false, harnesses = [], lines = [], platform = 'linux', nodeVersion = '22.0.0',
   runFails = [], voiceReady = false, interactiveOk = true, restoreFails = [], known = [],
-  restoreDoesNotTake = [], restoreChangesMode = [], packageDeps = {},
+  restoreDoesNotTake = [], restoreChangesMode = [], packageDeps = {}, registryVersions = {},
+  codexMarket = null, claudePluginInstalled = false,
 } = {}) {
   // A restore that RETURNS without the bytes landing — the case a read-back
   // catches and a returning call cannot. Distinct from `restoreFails`, which
@@ -103,6 +104,9 @@ export function fx({
     },
     installedVersion: (pkg) => versions[pkg] ?? null,
     packageDependencies: (spec) => packageDeps[spec] ?? null,
+    resolvePackageVersion: (pkg, channel) => registryVersions[`${pkg}@${channel}`] ?? (channel === 'nightly' ? '9.10.0-nightly.1' : '9.9.9'),
+    codexMarketplace: async () => codexMarket,
+    hasClaudePlugin: async () => claudePluginInstalled,
     installedVersions: versions,
     out: (line) => recorder.out.push(String(line)),
     ask: async (prompt) => { recorder.asked.push(prompt); return answers[answerIndex++] ?? false; },

@@ -1,5 +1,5 @@
-// ours-install v3 stage 3 — component selection and attachment (spec §5, plus
-// the repoint half of §7). Pure: current file contents and installed versions
+// ours-install v3 stage 3 — component selection, attachment, and repointing.
+// Pure: current file contents and installed versions
 // are injected. Nothing installs, writes, or starts anything.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -57,7 +57,7 @@ test('THE CONNECTOR REGISTRY IS NEVER WRITTEN BY THE INSTALLER', () => {
   // NOT by asking the daemon — a daemon's identity list is flat and carries no
   // attribution to the app that created it. Nothing here is reconstructible from
   // the daemon side, so anything the installer clears is gone for good, and the
-  // route migration the owner is considering would lose the route -> identity
+  // route migration without this mapping would lose the route -> identity
   // mapping it depends on.
   assert.deepEqual(TG_REGISTRY_FILES, ['bots.json']);
   assert.deepEqual(TG_ROUTE_FILES, ['identity.key', 'state_data.bin', 'connection.json']);

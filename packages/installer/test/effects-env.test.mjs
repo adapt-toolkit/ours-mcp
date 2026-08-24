@@ -1,6 +1,6 @@
 // ours-install v3 — the daemon pair, and the one place it can be built.
 //
-// Spec §2: a state directory and an endpoint always travel together, and
+// A state directory and its endpoint always travel together, and
 // "endpoint selected, state directory defaulted" must be unreachable. Downstream
 // every consumer FALLS BACK to ~/.ours for whichever name is missing, so a half
 // pair does not fail loudly — it silently attaches to the wrong daemon. These
@@ -80,4 +80,10 @@ test('effects.run applies the pair to the CHILD only, never to the installer its
   assert.deepEqual(JSON.parse(without.stdout), ['', '', ''], 'no env asked for, none handed over');
 
   assert.deepEqual(DAEMON_ENV_KEYS.map((k) => process.env[k]), before, 'the installer process is unchanged');
+});
+
+test('OURS_NPM selects the npm executable used by installer mutations', async () => {
+  const effects = realEffects({ env: { ...process.env, OURS_NPM: process.execPath }, out: () => {} });
+  const result = await effects.run('npm', ['-e', 'process.stdout.write("custom-npm")']);
+  assert.equal(result.stdout, 'custom-npm');
 });

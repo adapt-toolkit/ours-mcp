@@ -1,5 +1,5 @@
 // ours-install v3 stage 2 — daemon creation and boot-service installation
-// (spec §§3-4). Pure: file reads are injected. NOTHING here installs, enables or
+// Pure: file reads are injected. NOTHING here installs, enables or
 // starts a service, and no systemctl is invoked in any path.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -228,4 +228,3 @@ test('planDaemonSteps: a version change restarts only a daemon the CLI started',
   assert.ok(step, '`ours daemon stop` refuses to signal a daemon it did not start');
   assert.equal(step.command, null, 'the screen names the launcher; the installer runs nothing');
 });
-

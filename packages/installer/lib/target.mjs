@@ -1,6 +1,6 @@
 // ours-install v3 — argument handling and daemon detection.
 //
-// Spec: installer-spec-v3 §§1-3. Everything here is PURE: the orchestrator
+// Pure argument handling and daemon-target selection. The orchestrator
 // injects the probe, the file reads and the port check, so the whole decision
 // table is testable without a socket, a daemon or a filesystem.
 //
@@ -19,17 +19,15 @@ export const FREE_PORT_SPAN = 1000;
 
 // Ports that are other components' DEFAULTS, not facts about the machine: 3051
 // is the Telegram connector's, 3052 is cowork's loopback console. The free-port
-// search skips them; an explicit --port is still honoured as typed (spec §2).
+// search skips them; an explicit --port is still honoured exactly as typed.
 //
-// NOTE, deliberately not silently reconciled: lib/logic.mjs's RESERVED_PORTS is
-// [3051] on this branch, while spec §2 states [3051, 3052] citing the
-// dev4/version-plumbing branch. This constant follows the spec. The two should
-// be merged once someone decides whether cowork's 3052 belongs in the shipped
-// list — flagged rather than assumed.
+// Keep both component defaults out of automatic selection: 3051 belongs to the
+// Telegram connector and 3052 to cowork. Explicit operator selections remain
+// valid.
 export const INSTALL_RESERVED_PORTS = [3051, 3052];
 
 // The CLI-owned PID record that proves a daemon belongs to a state directory
-// even when nothing is recorded in its config (spec §1).
+// even when nothing is recorded in its config.
 export const CLI_PID_RECORD = 'ours-cli-daemon.json';
 // The SAME record, written by a different daemon. `ours daemon start` writes
 // ours-cli-daemon.json; prerelease ours-mcp wrote daemon.pid (packages/core
@@ -77,7 +75,7 @@ export function samePath(a, b) {
 }
 
 // -----------------------------------------------------------------------------
-// §2 — arguments
+// Arguments
 // -----------------------------------------------------------------------------
 
 const VALUE_FLAGS = new Set(['--state-dir', '--port']);
@@ -143,14 +141,14 @@ export function parseInstallArgs(argv = [], env = {}, { home = homedir() } = {})
 }
 
 // -----------------------------------------------------------------------------
-// §§1, 3 — is there a daemon at this state directory?
+// Is there a daemon at this state directory?
 // -----------------------------------------------------------------------------
 
 /**
  * The port to probe first: the one recorded in <state-dir>/config.json, else the
  * built-in default. An explicit --port does NOT change where we look — the
  * question is which daemon owns this directory, and that is answered by the
- * directory's own record, not by what the operator typed (spec §2 step 2).
+ * directory's own record, not by what the operator typed.
  */
 export function candidatePort(config) {
   const recorded = config && typeof config.port === 'number' && Number.isFinite(config.port) ? config.port : null;
@@ -158,7 +156,7 @@ export function candidatePort(config) {
 }
 
 /**
- * Classify one probe result against the target state directory (spec §3).
+ * Classify one probe result against the target state directory.
  *
  *   present — an ours daemon answered and reports THIS state directory
  *   foreign — something answered, but it is not an ours daemon, or it is one
@@ -246,12 +244,12 @@ export async function findDaemon({ stateDir, probe, readJson, readText }) {
   }
   // A FOREIGN DAEMON ON A PORT WE GUESSED IS NOT A REASON TO REFUSE.
   //
-  // AMENDS #56. As first written, any foreign answer on the candidate port
+  // Regression guard. As first written, any foreign answer on the candidate port
   // refused the run. But a state directory with no recorded port has told us
   // nothing, so the candidate is the built-in default — which, on any machine
   // that already runs a daemon, is where the FIRST daemon answers. The result
   // was that a second daemon could never be created while the first was up:
-  // §7 coexistence was unreachable, and the refusal's own advice ("re-run with
+  // coexistence was unreachable, and the refusal's own advice ("re-run with
   // --port for a free port") could not work either, because an explicit --port
   // deliberately does not change where we look.
   //
@@ -280,7 +278,7 @@ export async function findDaemon({ stateDir, probe, readJson, readText }) {
 }
 
 // -----------------------------------------------------------------------------
-// §2 — the derived-port rule
+// Derived-port rule
 // -----------------------------------------------------------------------------
 
 /**

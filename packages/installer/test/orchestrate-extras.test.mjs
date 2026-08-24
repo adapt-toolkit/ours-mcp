@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import {
   runInstall, runHarnessPhase, runFleetPhase, runVoicePhase, runIdentityPhase,
-  runPreflight, endScreen, EXIT_OK, EXIT_REFUSED,
+  runPreflight, endScreen, resolveExactSuite, EXIT_OK, EXIT_REFUSED,
 } from '../lib/orchestrate.mjs';
 import { isWholeDaemonEnv } from '../lib/effects.mjs';
 import { fx, said, HOME, OURS, TG } from './fake-effects.mjs';
@@ -22,6 +22,26 @@ const AT_DEFAULT = { stateDir: OURS, port: 3050, action: 'update' };
 const AT_TG = { stateDir: TG, port: 3051, action: 'create' };
 const ranAsText = (e) => e.recorder.ran.map((c) => c.join(' '));
 const envFor = (e, needle) => e.recorder.ranEnv[e.recorder.ran.findIndex((c) => c.join(' ').includes(needle))];
+
+test('release suite resolves one exact version and rejects a partial publication', async () => {
+  const stable = fx({ registryVersions: {
+    '@ours.network/mcp@latest': '0.17.2',
+    '@ours.network/claude-code@latest': '0.17.2',
+    '@ours.network/codex@latest': '0.17.2',
+  } });
+  assert.deepEqual(await resolveExactSuite(ARGS, stable), {
+    ok: true,
+    channel: 'latest',
+    version: '0.17.2',
+    packages: { mcp: '0.17.2', 'claude-code': '0.17.2', codex: '0.17.2' },
+  });
+  const partial = fx({ registryVersions: {
+    '@ours.network/mcp@latest': '0.17.2',
+    '@ours.network/claude-code@latest': '0.17.2',
+    '@ours.network/codex@latest': '0.17.3',
+  } });
+  assert.match((await resolveExactSuite(ARGS, partial)).reason, /not lockstep/);
+});
 
 // ------------------------------------------------------------- the order ----
 
@@ -48,7 +68,7 @@ test('the run walks daemon → components → identity → harness → fleet →
     'the MCP server is installed before the identity step invokes it');
 });
 
-// ---------------------------------------------------------- §5 harnesses ----
+// ---------------------------------------------------------------------- harnesses ----
 
 test('a harness we cannot drive is never called, and never dead-ends either', async () => {
   const e = fx({
@@ -75,7 +95,24 @@ test('a drivable harness is installed automatically, in order', async () => {
     'codex plugin marketplace add adapt-toolkit/ours-codex-marketplace',
     'codex plugin add ours@ours-codex-marketplace',
     'npm i -g @ours.network/codex@latest',
-  ], 'the plugin and the ours-codex launcher, in the owner-mandated order');
+  ], 'the plugin and the ours-codex launcher, in the Product requirement order');
+  assert.equal(rows[0].state, 'installed');
+});
+
+test('an exact suite writes local marketplaces and installs exact plugin versions', async () => {
+  const e = fx({
+    harnesses: [{ name: 'codex', command: 'codex', label: 'Codex', status: 'ok' }],
+    codexMarket: { name: 'ours-codex-marketplace', marketplaceSource: { sourceType: 'git', source: 'moving' } },
+  });
+  const exactSuite = { channel: 'latest', version: '0.17.2', packages: { mcp: '0.17.2', 'claude-code': '0.17.2', codex: '0.17.2' } };
+  const rows = await runHarnessPhase(ARGS, e, { target: AT_DEFAULT, isDefaultStateDir: true, exactSuite });
+  assert.ok(e.recorder.wrote.some(([path, body]) => path.endsWith('/.agents/plugins/marketplace.json') && body.includes('"version": "0.17.2"')));
+  assert.deepEqual(ranAsText(e), [
+    'codex plugin marketplace remove ours-codex-marketplace',
+    `codex plugin marketplace add ${join(HOME, '.ours/install/marketplaces/codex')}`,
+    'codex plugin add ours@ours-codex-marketplace',
+    'npm i -g @ours.network/codex@0.17.2',
+  ]);
   assert.equal(rows[0].state, 'installed');
 });
 
@@ -100,8 +137,8 @@ test('a harness whose install fails still gets its manual path, and the run cont
 });
 
 test('a non-default state directory: Hermes carries the whole pair, Claude and Codex promise nothing', async () => {
-  // The load-bearing one. Spec §5 says a harness registration carries
-  // OURS_CONFIG so the pair travels together — and for two of the three it
+  // The load-bearing case: a harness registration should carry OURS_CONFIG so
+  // the pair travels together — and for two of the three it
   // CANNOT: Claude's marketplace plugin has no env key and Codex's env_vars is
   // an allowlist of names. So the pair is applied where it is real and printed
   // where it is not, and the screen never claims the guarantee it does not have.
@@ -144,13 +181,9 @@ test('ours-fleet is installed, initialised, and given a stopped starter config',
   assert.match(e.recorder.wroteText[0][1], /FleetCoordinator/);
   assert.match(e.recorder.wroteText[0][1], /fleet-health/);
   assert.match(e.recorder.wroteText[0][1], /coordinator_health/);
-  // CHANGED BY THE COORDINATOR'S RULING (2026-08-17), and worth saying why: this
-  // used to assert [null, null] — no daemon environment on either call — which
-  // pinned extras.mjs:180's analysis ("init reads no daemon config; fleet resolves
-  // per role") as though it were a verified fact. It is not: nightly-install.mjs:611
-  // states the opposite, neither was checked against ours-fleet, and ours-fleet is
-  // not in this repo. The INSTALL step still carries nothing, because a package
-  // install needs no daemon; `init` now carries the whole pair as insurance.
+  // Installing a package needs no daemon selection. Initialization may inspect
+  // daemon state, so it receives the complete state-directory/endpoint pair;
+  // passing both also prevents a non-default install from silently falling back.
   assert.equal(e.recorder.ranEnv[0], null, 'the package install needs no daemon');
   assert.deepEqual(e.recorder.ranEnv[1], {
     OURS_CONFIG: join(OURS, 'config.json'), OURS_STATE_DIR: OURS, OURS_PORT: '3050',
@@ -318,7 +351,7 @@ test('the whole extended flow still refuses an incoherent selection before touch
 });
 
 test('a second daemon alongside the first says whose daemon holds the default port', async () => {
-  // The other half of the §7 fix: creating the second daemon is allowed, and
+  // Creating the second daemon is allowed, and
   // the operator is told why it did not get the port they might have expected.
   const e = fx({ env: { OURS_ASSUME_YES: '1' }, net: { 3050: { ok: true, stateDir: OURS } }, taken: [3050] });
   assert.equal(await runInstall(['--state-dir', TG], e), EXIT_OK);

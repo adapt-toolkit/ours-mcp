@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/mcp",
-  "version": "0.17.0",
+  "version": "0.17.2",
   "description": "MCP adapter for the shared ours daemon, with application-local identity bookkeeping and secure agent-to-agent messaging tools over stdio.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -43,11 +43,11 @@
     "dev": "tsx src/cli.ts proxy",
     "prepublishOnly": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node test/application-identities.test.mjs && node test/cli-delegation.test.mjs && node test/sdk-pin.test.mjs && node test/skill-tool-vocabulary.test.mjs && node test/inbox-push.test.mjs && node test/contact-lines.test.mjs"
+    "test": "node test/application-identities.test.mjs && node test/cli-delegation.test.mjs && node test/sdk-pin.test.mjs && node test/skill-tool-vocabulary.test.mjs && node test/inbox-push.test.mjs && node test/contact-lines.test.mjs && node test/env-bind-identity.test.mjs && node test/proxy-exit-on-stdin-eof.test.mjs && node test/proxy-dead-stderr.test.mjs && node test/session-end-temp-cleanup.test.mjs"
   },
   "dependencies": {
     "@ours.network/cli": "2.2.0",
-    "@ours.network/sdk": "3.2.0"
+    "@ours.network/sdk": "3.2.2"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

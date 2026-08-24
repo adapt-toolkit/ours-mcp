@@ -1,7 +1,7 @@
 // ours-install v3 — which daemons are already on this machine, and which one this
 // run is for.
 //
-// Never ask for a state directory or a port to be TYPED (spec §2). When several
+// Never ask for a state directory or port to be typed. When several
 // daemons are DETECTED, show them and let one be picked: selecting from what was
 // found is not prompting for a path.
 //
@@ -91,7 +91,7 @@ export function detectDaemons({ candidates = [], exists, readJson }) {
 /**
  * A state directory for a daemon this run would CREATE, derived and never typed.
  *
- * Spec §2 forbids asking for a path, so "create a new one" has to derive somewhere
+ * The UI does not ask for a path, so "create a new one" has to derive somewhere
  * to put it: `~/.ours` when free, else the first free `~/.ours-2`, `~/.ours-3`…
  * An operator who wants a specific path still has `--state-dir`, which bypasses
  * this screen entirely.
@@ -151,7 +151,7 @@ export function planDaemonSelection({
  *
  * Deliberately strict: an answer that is not a number in range, or the create
  * option, is NOT a state directory to be interpreted. Accepting free text here
- * would be exactly the "type a path" prompt spec §2 forbids, arriving through the
+ * would reintroduce the forbidden "type a path" prompt through the
  * back door.
  */
 export function resolveSelection(answer, { candidates = [], createOption = null } = {}) {

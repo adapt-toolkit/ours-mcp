@@ -1,5 +1,5 @@
-// ours-uninstall v3 stage 5 — removing one daemon (spec §8) and the
-// non-interactive contract (§9). Pure: file reads injected. Nothing is removed,
+// ours-uninstall v3 stage 5 — removing one daemon and handling non-interactive
+// requests. Pure: file reads are injected. Nothing is removed,
 // stopped or deleted by any test here.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,7 +23,7 @@ const files = (map) => (path) => (Object.prototype.hasOwnProperty.call(map, path
 const isStateDir = () => true;   // every purge test targets a real state dir unless it says otherwise
 const notStateDir = () => false;
 
-// ------------------------------------------------ §8 step 1 — the refusal ----
+// ------------------------------------------------ referenced components — the refusal ----
 
 test('a component still pointing here stops the run before anything is removed', () => {
   const readJson = files({ [TG_CFG]: { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: OURS, botToken: 's' } });
@@ -65,7 +65,7 @@ test('confirming a component in the same run lets the uninstall proceed', () => 
   assert.deepEqual(p.detach.map((d) => d.key), ['tg']);
 });
 
-// -------------------------------------------- §8 step 2 — detach, keep file --
+// ---------------------------------------------------------- detach, keep file --
 
 test('detaching the connector removes only the daemon keys and KEEPS the file', () => {
   const p = planComponentDetach('tg', { daemonUrl: 'http://x', daemonStateDir: OURS, botToken: 'secret', stt: { provider: 'x' } });
@@ -84,7 +84,7 @@ test('detaching cowork is a BEHAVIOUR CHANGE and says so before it happens', () 
   assert.equal(planComponentDetach('cowork', { theme: 'dark' }).behaviourChange, null, 'no block, no change to announce');
 });
 
-// ------------------------------------------- §8 steps 3-4 — service, daemon --
+// --------------------------------------------------------- service, daemon --
 
 test('the boot service and the daemon delegate their refusals rather than reimplementing them', () => {
   const [service, stop] = planDaemonRemoval({ stateDir: TG, cliStartedIt: true });
@@ -106,7 +106,7 @@ test('a daemon the CLI did not start is named, not signalled, and the run contin
   assert.equal(stop.continues, true, 'someone else supervising it is not a failure of this uninstall');
 });
 
-// ------------------------------------------------ §8 step 5 — state, purged --
+// ----------------------------------------------------------- state, purged --
 
 test('state is KEPT by default, with the hint', () => {
   const p = planStatePurge({ stateDir: OURS, exists: isStateDir });
@@ -115,7 +115,7 @@ test('state is KEPT by default, with the hint', () => {
 });
 
 test('PURGE MEANS PURGE: provenance is not a gate — any state directory qualifies', () => {
-  // The owner's ruling. A hand-made or pre-existing ~/.ours is purged like any
+  // A hand-made or pre-existing ~/.ours is purged like any
   // other; the installer does not ask whether it made the directory.
   const p = planStatePurge({ stateDir: OURS, purge: true, exists: isStateDir, typedConfirmation: OURS });
   assert.equal(p.action, 'purge');
@@ -162,7 +162,7 @@ test('all four gates open → the exact directory, never a parent or a glob', ()
   assert.ok(!p.paths.includes(HOME), 'never the parent');
 });
 
-// --------------------------------------------- §8 step 6 — global packages --
+// ---------------------------------------------------------- global packages --
 
 test('global packages are kept while another daemon still needs them', () => {
   const p = planGlobalPackages({ stateDir: OURS, otherStateDirsWithConfig: [OURS, TG] });
@@ -177,7 +177,7 @@ test('global packages are removed only when this was the last daemon', () => {
   assert.deepEqual(p.packages, ['@ours.network/cli', '@ours.network/mcp']);
 });
 
-// ------------------------------------------------------------------- §9 ------
+// ---------------------------------------------------------- non-interactive behavior ------
 
 test('assume-yes never turns a component on, never moves one, never deletes state', () => {
   assert.deepEqual(NON_INTERACTIVE_ANSWERS, {
@@ -249,7 +249,7 @@ test('the plugin packages follow the SAME rule as the daemon packages, not a sec
   assert.deepEqual(removed.packages, ['@ours.network/cli', '@ours.network/mcp', '@ours.network/hermes']);
 });
 
-// ------------------------------- §8 step 1 — the config we CANNOT read -------
+// ----------------------------------------------- the config we CANNOT read -------
 //
 // THE DEFECT THESE PIN. effects.readJson swallows every failure into `null`, so a
 // corrupt ~/.ours-telegram/config.json read as "no connector points at this

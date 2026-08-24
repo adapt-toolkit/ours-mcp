@@ -9,6 +9,21 @@ npm install --global @ours.network/install
 ours-install
 ```
 
+### Stable and nightly channels
+
+Installing `@ours.network/install@latest` selects the stable channel; installing
+`@ours.network/install@nightly` selects the nightly channel. Before changing the
+machine, the installer resolves `@ours.network/mcp`,
+`@ours.network/claude-code`, and `@ours.network/codex`, verifies that their
+selected dist-tags expose one exact lockstep version, and fails closed if they
+do not. MCP and the Codex launcher are installed by exact version, and local
+Claude Code and Codex marketplace manifests pin the corresponding plugin
+packages to that same version.
+
+`OURS_CHANNEL=latest|nightly` (or the legacy `OURS_INSTALL_CHANNEL`) remains an
+explicit override. Without an override, the installed package's own version
+selects the channel.
+
 The normal flow uses one daemon at `~/.ours` on port 3050, shows an eight-stage
 progress bar, and asks only for information it cannot safely infer (normally the
 Human identity's display name). Existing daemon conflicts and moving a Telegram
@@ -75,8 +90,11 @@ new Human identity and asks no ordinary setup questions, but it never bypasses
 selection conflicts, connector moves, or destructive safeguards.
 
 A non-default daemon must be selected coherently with a config file or matching
-port and state directory. Harnesses and the generated Fleet role receive that
-selection through `OURS_CONFIG`; there is no per-application daemon.
+port and state directory. Hermes and the generated Fleet role persist that
+selection through `OURS_CONFIG`. Claude Code and Codex plugin registrations
+cannot store an environment value; for those harnesses the installer prints the
+exact `export OURS_CONFIG=...` line that must be added to the shell profile
+before starting the harness. There is no per-application daemon.
 
 ## Uninstall
 

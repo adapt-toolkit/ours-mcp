@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-network/main/ins
 For a manual npm setup:
 
 ```sh
-npm install --global @ours.network/cli@1.0.1 @ours.network/mcp@0.17.0
+npm install --global @ours.network/cli@2.2.0 @ours.network/mcp@0.17.2
 ours config setup
 ours daemon start
 ours daemon status

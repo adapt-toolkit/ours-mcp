@@ -1,27 +1,7 @@
-// The ours MCP server: agent-facing adapters over
-// `@ours.network/sdk`.
-//
-// ============================================================================
-// WHAT THIS FILE REPLACED, AND WHY IT IS SHORT
-// ============================================================================
-// `index.ts`'s `createMcpServer` was ~2000 lines: every tool handler carried its
-// own engine work — `withScopeAsync`, `mutatingTx`, `identities.get`, and a
-// hand-written error string per failure. All of it now lives in the SDK, so what
-// is left here is what ours-mcp is actually for: the MCP vocabulary. Tool names,
-// descriptions, zod schemas, and the rendering of typed facts into prose.
-//
-// The registrars are grouped exactly as the SDK's `src/api/*` modules are —
-// identity, contacts, profile, messaging, files — so a tool and the operation
-// behind it are one import apart.
-//
-// No monitoring tools: they were removed with the daemon-side control plane
-// (ours-sdk 0b84122) and the owner has ruled they stay out. A DEFERRAL, not a
-// deletion of the capability — pairing a messenger to a machine has no route
-// after this, and re-adding it needs an authorization rule that does not exist.
-//
-// The connector owns one SDK client for one MCP session. Registrars receive a
-// thunk so binding-changing operations and later tool calls always use that same
-// live client rather than capturing daemon-side state locally.
+// Agent-facing MCP adapters over `@ours.network/sdk`. The SDK owns identity and
+// transport behavior; this package defines the MCP vocabulary, schemas, and
+// rendering. One SDK client is retained for each MCP session so binding changes
+// and later tool calls share the same live session state.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import type { OursClient } from '@ours.network/sdk';
