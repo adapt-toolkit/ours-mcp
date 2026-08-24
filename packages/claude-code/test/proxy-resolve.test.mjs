@@ -16,7 +16,7 @@
 // Self-contained; no build step. Run with:
 //   npm --workspace @ours.network/claude-code test
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, copyFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,11 +58,20 @@ function makeTree(root, coreBaseRel) {
   return proxy;
 }
 
-function runProxy(proxyPath, env = {}) {
-  return spawnSync(process.execPath, [proxyPath], {
+function runProxy(proxyPath, env = {}, args = []) {
+  return spawnSync(process.execPath, [proxyPath, ...args], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
   });
+}
+
+// The package metadata itself must wire normal harness close to the dedicated
+// session-end command; this is what distinguishes deterministic cleanup from
+// crash-reaper fallback.
+{
+  const hooks = JSON.parse(readFileSync(join(HERE, '..', 'hooks', 'hooks.json'), 'utf8'));
+  assert(Array.isArray(hooks.hooks.SessionEnd), 'Claude Code package declares a SessionEnd hook');
+  assert(/proxy\.mjs session-end/.test(hooks.hooks.SessionEnd[0].hooks[0].command), 'Claude Code SessionEnd invokes deterministic lease release');
 }
 
 const roots = [];
@@ -70,6 +79,15 @@ function freshRoot(prefix) {
   const r = mkdtempSync(join(tmpdir(), prefix));
   roots.push(r);
   return r;
+}
+
+// SessionEnd uses the same dependency resolution but routes to the CLI's
+// dedicated cleanup command rather than starting another proxy.
+{
+  const root = freshRoot('a2a-proxy-session-end-');
+  const proxy = makeTree(root, join('plugins', 'npm-cache'));
+  const r = runProxy(proxy, {}, ['session-end']);
+  assert(r.status === 0 && r.stderr.includes('args=session-end'), 'SessionEnd wrapper forwards the dedicated core CLI command');
 }
 
 console.log('proxy.mjs dependency resolution');

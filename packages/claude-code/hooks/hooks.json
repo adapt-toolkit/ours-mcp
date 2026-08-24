@@ -21,6 +21,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/bin/proxy.mjs session-end",
+            "timeout": 30000
+          }
+        ]
+      }
     ]
   }
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, existsSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, renameSync, realpathSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const codexDir = resolve(process.env.CODEX_DIR || process.env.CODEX_HOME || join(homedir(), '.codex'));
 const skillsDir = resolve(process.env.SKILLS_DIR || join(homedir(), '.agents', 'skills'));
@@ -42,13 +43,22 @@ function stripOrphanedMcpConfig(path) {
   return true;
 }
 
-const configPath = join(codexDir, 'config.toml');
-if (!stripManaged(configPath, '# >>> ours.network plugin', '# <<< ours.network plugin')) stripOrphanedMcpConfig(configPath);
-stripManaged(join(codexDir, 'AGENTS.md'), '<!-- >>> ours.network plugin', '<!-- <<< ours.network plugin -->');
-
-for (const name of ['ours', 'writing-agent-bios']) {
-  const path = join(skillsDir, name);
-  if (!existsSync(path)) continue;
-  const backup = `${path}.ours-legacy-${stamp}`;
-  try { renameSync(path, backup); } catch { rmSync(path, { recursive: true, force: true }); }
+export function backupLegacySkill(path, backup, rename = renameSync) {
+  if (!existsSync(path)) return false;
+  rename(path, backup);
+  return true;
 }
+
+function main() {
+  const configPath = join(codexDir, 'config.toml');
+  if (!stripManaged(configPath, '# >>> ours.network plugin', '# <<< ours.network plugin')) stripOrphanedMcpConfig(configPath);
+  stripManaged(join(codexDir, 'AGENTS.md'), '<!-- >>> ours.network plugin', '<!-- <<< ours.network plugin -->');
+
+  for (const name of ['ours', 'writing-agent-bios']) {
+    const path = join(skillsDir, name);
+    backupLegacySkill(path, `${path}.ours-legacy-${stamp}`);
+  }
+}
+
+const invokedDirectly = process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+if (invokedDirectly) main();

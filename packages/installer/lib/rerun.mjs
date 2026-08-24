@@ -1,14 +1,14 @@
 // ours-install v3 — re-running, and a second daemon alongside the first.
 //
-// Spec: installer-spec-v3 §§6-7. Pure, like the earlier stages.
+// Pure re-run and coexistence planning, like the earlier stages.
 //
 // Two properties this file exists to make checkable rather than hoped for:
 //
-//   IDEMPOTENCE (§6). Running the installer again with the same answers changes
+//   IDEMPOTENCE. Running the installer again with the same answers changes
 //   nothing except refreshed npm packages. Not "changes little" — nothing: no
 //   config written, no unit rewritten, no systemctl run, no daemon restarted.
 //
-//   COEXISTENCE (§7). Two daemons share no per-daemon artefact. Everything keyed
+//   COEXISTENCE. Two daemons share no per-daemon artefact. Everything keyed
 //   to a daemon is derived from its state directory, so two state directories
 //   produce two of everything.
 
@@ -16,8 +16,8 @@ import { join, resolve } from 'node:path';
 import { unitNameForStateDir } from './plan.mjs';
 
 /**
- * Everything that belongs to ONE daemon, derived from its state directory (spec
- * §7's table). Listing them in one place is what makes "these two daemons share
+ * Everything that belongs to one daemon is derived from its state directory.
+ * Listing the artifacts in one place makes "these two daemons share
  * nothing" a property a test can check instead of a claim in a document.
  *
  * `port` is included because it is per-daemon, but note it is NOT what identifies
@@ -55,7 +55,7 @@ export function daemonCollisions(a, b) {
 }
 
 /**
- * The per-component coexistence rule (spec §7), stated so the screen can never
+ * The per-component coexistence rule, stated so the screen can never
  * imply something the design does not do.
  *
  *   mcp    — coexists naturally. Each harness registration carries its own
@@ -107,7 +107,7 @@ export function summarizeRun(steps) {
 }
 
 /**
- * Did a re-run leave the daemon alone? Spec §3(a): update never deletes state,
+ * Did a re-run leave the daemon alone? An update never deletes state,
  * never moves a port, and never creates a second daemon.
  */
 export function assertUpdateLeftDaemonAlone({ before, after }) {

@@ -53,4 +53,12 @@ test('PostToolUse matcher accepts plugin-qualified ours tool names', () => {
   assert.ok(matcher.test('mcp__ours__choose_identity'));
   assert.ok(matcher.test('mcp__ours-local-testing_ours__choose_identity'));
   assert.ok(matcher.test('ours.choose_identity'));
+  assert.ok(matcher.test('mcp__ours__create_temporary_identity'));
+});
+
+test('SessionEnd invokes deterministic temporary-identity cleanup', () => {
+  const config = JSON.parse(readFileSync(join(root, 'hooks/hooks.json'), 'utf8'));
+  assert.ok(Array.isArray(config.hooks.SessionEnd));
+  const command = config.hooks.SessionEnd[0].hooks[0].command;
+  assert.match(command, /^exec node .*proxy\.mjs.*session-end/);
 });

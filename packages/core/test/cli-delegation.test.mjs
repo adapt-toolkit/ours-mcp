@@ -33,7 +33,7 @@ const missing = spawnSync(process.execPath, [cli.pathname, 'status'], {
   env: { ...process.env, OURS_CLI: join(root, 'missing-ours') },
 });
 assert.equal(missing.status, 1);
-assert.match(missing.stderr, /Install @ours\.network\/cli@1\.0\.1/);
+assert.match(missing.stderr, /Install @ours\.network\/cli@2\.2\.0/);
 assert.match(missing.stderr, /OURS_CLI/);
 
 const legacyApplication = spawnSync(
@@ -46,6 +46,6 @@ assert.match(legacyApplication.stderr, /--application.*no longer supported/);
 
 const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
 assert.match(source, /--application.*no longer supported/s, 'obsolete application selection fails with migration guidance');
-assert.match(source, /Install @ours\.network\/cli@1\.0\.1/, 'missing delegated CLI reports exact install guidance');
+assert.match(source, /Install @ours\.network\/cli@2\.2\.0/, 'missing delegated CLI reports exact install guidance');
 
 console.log('cli-delegation: all passed');

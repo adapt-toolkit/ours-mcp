@@ -1,4 +1,4 @@
-// ours-uninstall v3 — the orchestrator (spec §§8-9).
+// ours-uninstall v3 — the orchestrator.
 //
 // Every side effect is injected, so this walks whole removals without deleting
 // anything, stopping anything, or running a command. NOTHING here touches a real
@@ -163,7 +163,7 @@ test('--purge refuses a directory that is not a state directory at all', async (
   assert.match(said(e), /does not look like an ours state directory/);
 });
 
-// ---------------------------------------------------------------------- §9 ---
+// --------------------------------------------------------- non-interactive behavior ---
 
 test('an unattended run never consents to removing a component, so it refuses', async () => {
   const e = fx({
@@ -182,7 +182,7 @@ test('an unattended --purge never deletes state', async () => {
   assert.match(said(e), /never deleted non-interactively/);
 });
 
-// ------------------------------------------------------------- §8 step 6 -----
+// ------------------------------------------------------- global package cleanup -----
 
 test('global packages are kept while another daemon still needs them', async () => {
   const e = fx({ json: { [join(OURS, 'config.json')]: CFG }, known: [OURS, join(HOME, '.ours-tg')] });
@@ -465,7 +465,7 @@ test('OURS_UNINSTALL_DATA=yes refuses the whole run and removes NOTHING', async 
 });
 
 test('OURS_UNINSTALL_TELEGRAM=detach gives the answer an unattended run cannot be asked for', async () => {
-  // Without it this run refuses at §8 step 1: tg points here and nobody can
+  // Without it this run refuses because tg points here and nobody can
   // confirm its removal. The documented value IS that confirmation.
   const attached = { daemonUrl: 'http://127.0.0.1:3050', daemonStateDir: OURS, botToken: 'secret' };
   const refused = fx({
@@ -486,7 +486,7 @@ test('OURS_UNINSTALL_TELEGRAM=detach gives the answer an unattended run cannot b
 });
 
 test('OURS_UNINSTALL_TELEGRAM=reassign refuses on its OWN account, not step 1’s', async () => {
-  // Deliberately with NO connector pointing here, so the §8 step-1 refusal cannot
+  // Deliberately with no connector pointing here, so the referenced-component refusal cannot
   // be what is happening: an unsupported value stops the run by itself. With a
   // connector attached both refusals coincide, and a test written that way would
   // pass against code that never read the variable at all.

@@ -37,11 +37,30 @@ import { configJournal, reportRollback } from './journal.mjs';
 import { detectDaemons, planDaemonSelection, resolveSelection } from './detect.mjs';
 import { detectPlatform, resolveChannel } from './logic.mjs';
 import { daemonEnv } from './effects.mjs';
+import {
+  buildClaudeMarketplace, buildCodexMarketplace, marketplaceJson, marketplacePaths,
+  validateChannelVersion,
+} from './marketplace.mjs';
 import { USAGE } from './usage.mjs';
 import { ok, info, warn, heading, banner, box, c, progress } from './ui.mjs';
 
 export const EXIT_OK = 0;
 export const EXIT_REFUSED = 2;
+
+export async function resolveExactSuite(args, effects) {
+  const packages = {};
+  for (const key of ['mcp', 'claude-code', 'codex']) {
+    const version = await effects.resolvePackageVersion(`@ours.network/${key}`, args.channel);
+    const checked = validateChannelVersion(version, args.channel);
+    if (!checked.ok) return { ok: false, reason: `${key}: ${checked.reason}` };
+    packages[key] = checked.version;
+  }
+  const versions = new Set(Object.values(packages));
+  if (versions.size !== 1) {
+    return { ok: false, reason: `the ${args.channel} dist-tags are not lockstep (${Object.entries(packages).map(([k, v]) => `${k}=${v}`).join(', ')})` };
+  }
+  return { ok: true, channel: args.channel, version: versions.values().next().value, packages };
+}
 
 /**
  * A dry run prints what it WOULD do and performs no mutation. The prefix is the
@@ -200,7 +219,7 @@ function pairFor(plan, target) {
 /**
  * Which daemon is this run for?
  *
- * Never asks for a PATH — spec §2 stands — but when several daemons are DETECTED
+ * Never asks for a path, but when several daemons are detected
  * it shows them and lets the operator pick, because choosing from what was found
  * is not prompting for a state directory.
  *
@@ -242,7 +261,7 @@ export async function runSelectionPhase(args, effects) {
   const chosen = resolveSelection(answer, plan);
   if (chosen.action === 'invalid') {
     // Refused rather than guessed. Interpreting an unrecognised answer as a path
-    // would be the "type a state directory" prompt spec §2 forbids, arriving
+    // would reintroduce the forbidden "type a state directory" prompt through the
     // through the back door.
     effects.out(warn(`ours: ${chosen.reason}. Nothing was changed.`));
     effects.out(info('Re-run and pick one of the numbers, or name a daemon directly with --state-dir.'));
@@ -256,10 +275,10 @@ export async function runSelectionPhase(args, effects) {
 }
 
 /**
- * The daemon half of a run: §§2-4. Returns the target decision plus the step
+ * Run the daemon half of an installation and return the target decision plus step
  * outcomes, or a refusal.
  */
-export async function runDaemonPhase(args, effects) {
+export async function runDaemonPhase(args, effects, exactSuite = null) {
   const target = await resolveTarget({
     stateDir: args.stateDir,
     port: args.port,
@@ -301,8 +320,8 @@ export async function runDaemonPhase(args, effects) {
   // daemon's broker is its own record, and re-asking would invite an operator to
   // change it from a screen that is not about changing it. The broker question
   // stays in v3: it is orthogonal to --state-dir/--port, so it
-  // does not violate spec §2's "nothing about a state directory or a port
-  // appears in any prompt".
+  // does not violate the rule that state-directory and port values never appear
+  // in prompts.
   if (creating) args.brokerUrl = await askBroker(args, effects);
 
   const steps = [];
@@ -310,7 +329,9 @@ export async function runDaemonPhase(args, effects) {
   // The operator CLI owns the shared daemon; ours-mcp is the per-session stdio
   // adapter each harness spawns. Both are required, but only `ours daemon`
   // participates in lifecycle or service management.
-  const mcpPkg = componentSpec(componentByKey('mcp'), args.channel);
+  const mcpPkg = exactSuite?.packages?.mcp
+    ? `@ours.network/mcp@${exactSuite.packages.mcp}`
+    : componentSpec(componentByKey('mcp'), args.channel);
   // The CLI intentionally publishes only `latest`; unlike the lockstep MCP and
   // connector packages it has no nightly dist-tag. Keep this untagged on every
   // installer channel, and inspect that package's SDK dependency for the gate.
@@ -458,7 +479,7 @@ function rollBack(effects, journal, args, why, { packagesInstalled = true, repla
 }
 
 /**
- * The boot service: §4 step 4, including the legacy-unit case.
+ * Install the boot service, including the legacy-unit case.
  *
  * A legacy ours-mcp unit is adopted SILENTLY, with one informational line naming
  * the file. `--force` is passed ONLY here, only for a unit
@@ -545,11 +566,11 @@ export async function askComponents(args, effects) {
 }
 
 /**
- * Components: §5. A component that fails is reported with its retry command and
+ * A component that fails is reported with its retry command and
  * the run CONTINUES — a failed component is never a reason to undo a successful
  * one, or to undo the daemon.
  */
-export async function runComponentPhase(args, effects, target) {
+export async function runComponentPhase(args, effects, target, exactSuite = null) {
   const dir = target.stateDir;
   const endpoint = `http://127.0.0.1:${target.port}`;
   const isDefaultStateDir = dir === join(effects.home, '.ours');
@@ -568,13 +589,15 @@ export async function runComponentPhase(args, effects, target) {
       continue;
     }
     try {
-      results.push(await attachComponent(component, { args, effects, dir, endpoint, isDefaultStateDir }));
+      results.push(await attachComponent(component, { args, effects, dir, endpoint, isDefaultStateDir, exactSuite }));
     } catch (error) {
       // Reported with its reason and the exact manual command; the run continues.
       // The retry carries the CHANNEL — a nightly run that hands the operator a
       // stable retry command sends them straight into the split-brain install
       // this phase exists to avoid.
-      const retry = `npm i -g ${componentSpec(component, args.channel)}`;
+      const retrySpec = component.key === 'mcp' && exactSuite?.packages?.mcp
+        ? `@ours.network/mcp@${exactSuite.packages.mcp}` : componentSpec(component, args.channel);
+      const retry = `npm i -g ${retrySpec}`;
       effects.out(warn(`${component.label} failed: ${error instanceof Error ? error.message : String(error)}`));
       effects.out(info(`retry manually: ${retry}`));
       results.push({ key: component.key, state: 'failed', reason: String(error?.message ?? error), retry });
@@ -583,10 +606,11 @@ export async function runComponentPhase(args, effects, target) {
   return summarizeComponentRun(results);
 }
 
-async function attachComponent(component, { args, effects, dir, endpoint, isDefaultStateDir }) {
+async function attachComponent(component, { args, effects, dir, endpoint, isDefaultStateDir, exactSuite }) {
   if (component.key === 'mcp') {
     const plan = planMcpAttachment({ stateDir: dir, isDefaultStateDir, channel: args.channel });
-    await perform(effects, args.dryRun, `install ${plan.install[3]}`, () => effects.run(plan.install[0], plan.install.slice(1)));
+    const exact = exactSuite?.packages?.mcp ? `@ours.network/mcp@${exactSuite.packages.mcp}` : plan.install[3];
+    await perform(effects, args.dryRun, `install ${exact}`, () => effects.run('npm', ['i', '-g', exact]));
     if (Object.keys(plan.harnessEnv).length > 0) {
       effects.out(info(`harness registration carries OURS_CONFIG=${plan.harnessEnv.OURS_CONFIG}`));
     }
@@ -787,7 +811,7 @@ export async function runIdentityPhase(args, effects, { target, mcpReady }) {
 }
 
 /**
- * The harness plugins (spec §5's other half).
+ * Install harness plugins after the daemon and components are ready.
  *
  * Two things this phase must never do, both inherited rules rather than new
  * ones. It never DRIVES a command it could not identify — an alias or a wrapper
@@ -797,7 +821,7 @@ export async function runIdentityPhase(args, effects, { target, mcpReady }) {
  * get the exact export line and no promise. Hermes' writer is ours, so its
  * invocation carries the whole pair and the claim is true.
  */
-export async function runHarnessPhase(args, effects, { target, isDefaultStateDir }) {
+export async function runHarnessPhase(args, effects, { target, isDefaultStateDir, exactSuite = null }) {
   effects.out(heading('Harness plugins'));
   const detected = await effects.detectHarnesses();
   for (const h of detected) {
@@ -822,6 +846,7 @@ export async function runHarnessPhase(args, effects, { target, isDefaultStateDir
   });
 
   const rows = [];
+  const markets = marketplacePaths(effects.home);
   for (const plan of plans) {
     const row = { key: plan.name, label: `${plan.label} plugin` };
     if (plan.action === 'skip') {
@@ -832,27 +857,65 @@ export async function runHarnessPhase(args, effects, { target, isDefaultStateDir
     if (plan.action === 'manual') {
       // NEVER a dead end: the plugin is still installable, by hand, and the run
       // says so instead of pretending the harness does not exist.
+      let manual = plan.manual;
+      if (exactSuite && (plan.name === 'claude-code' || plan.name === 'codex')) {
+        const isClaude = plan.name === 'claude-code';
+        const root = isClaude ? markets.claudeRoot : markets.codexRoot;
+        const manifest = isClaude ? markets.claudeManifest : markets.codexManifest;
+        const value = isClaude
+          ? buildClaudeMarketplace(exactSuite.packages['claude-code'], exactSuite.channel)
+          : buildCodexMarketplace(exactSuite.packages.codex, exactSuite.channel);
+        await perform(effects, args.dryRun, `write exact ${plan.name} marketplace ${manifest}`, () => effects.writeJson(manifest, marketplaceJson(value)));
+        manual = isClaude
+          ? [`/plugin marketplace add ${root}`, '/plugin install ours']
+          : [`codex plugin marketplace add ${root}`, 'codex plugin add ours@ours-codex-marketplace', `npm i -g @ours.network/codex@${exactSuite.packages.codex}`];
+      }
       effects.out(warn(`${plan.label} — ${plan.reason}; install it yourself with:`));
-      for (const step of plan.manual) effects.out(info(`  ${step}`));
+      for (const step of manual) effects.out(info(`  ${step}`));
       rows.push({ ...row, state: 'skipped', note: plan.reason });
       continue;
     }
 
+    let steps = plan.steps;
+    let manual = plan.manual;
+    if (exactSuite && (plan.name === 'claude-code' || plan.name === 'codex')) {
+      const isClaude = plan.name === 'claude-code';
+      const root = isClaude ? markets.claudeRoot : markets.codexRoot;
+      const manifest = isClaude ? markets.claudeManifest : markets.codexManifest;
+      const value = isClaude
+        ? buildClaudeMarketplace(exactSuite.packages['claude-code'], exactSuite.channel)
+        : buildCodexMarketplace(exactSuite.packages.codex, exactSuite.channel);
+      await perform(effects, args.dryRun, `write exact ${plan.name} marketplace ${manifest}`, () => effects.writeJson(manifest, marketplaceJson(value)));
+      if (!isClaude) {
+        const current = await effects.codexMarketplace();
+        const source = current?.marketplaceSource;
+        if (current && !(source?.sourceType === 'local' && source?.source === root)) {
+          await perform(effects, args.dryRun, 'remove moving Codex marketplace source', () => effects.run('codex', ['plugin', 'marketplace', 'remove', 'ours-codex-marketplace']));
+        }
+      }
+      steps = isClaude
+        ? [['claude', 'plugin', 'marketplace', 'add', root], ['claude', 'plugin', await effects.hasClaudePlugin() ? 'update' : 'install', 'ours@ours.network']]
+        : [['codex', 'plugin', 'marketplace', 'add', root], ['codex', 'plugin', 'add', 'ours@ours-codex-marketplace'], ['npm', 'i', '-g', `@ours.network/codex@${exactSuite.packages.codex}`]];
+      manual = isClaude
+        ? [`/plugin marketplace add ${root}`, '/plugin install ours']
+        : [`codex plugin marketplace add ${root}`, 'codex plugin add ours@ours-codex-marketplace', `npm i -g @ours.network/codex@${exactSuite.packages.codex}`];
+    }
+
     const env = pairFor(plan, target);
     let failed = null;
-    for (const step of plan.steps) {
+    for (const step of steps) {
       const outcome = await attempt(effects, args.dryRun, step.join(' '), () => effects.run(step[0], step.slice(1), env ? { env } : {}));
       if (!outcome.ok) { failed = outcome; break; }
     }
     if (failed) {
       effects.out(info(`${plan.label} can still be installed by hand:`));
-      for (const step of plan.manual) effects.out(info(`  ${step}`));
+      for (const step of manual) effects.out(info(`  ${step}`));
       rows.push({ ...row, state: 'failed', note: 'install step failed' });
       continue;
     }
     if (plan.envLine) {
-      // The honest line. §5's promise does NOT hold for this harness, and the
-      // screen says exactly what is true and exactly what to do about it.
+      // This harness cannot persist the selected daemon pair. Say exactly what is
+      // true and how the operator can configure it explicitly.
       effects.out(warn(`${plan.label}'s registration cannot carry a value, so it will attach to the DEFAULT daemon.`));
       effects.out(info(`Add this to your shell profile so it uses this one instead:  ${plan.envLine}`));
     }
@@ -1035,6 +1098,13 @@ export async function runInstall(argv, effects) {
   // that wrapped the old installer keeps its meaning.
   if (!runPreflight(effects).ok) return EXIT_OK;
 
+  const exactSuite = await resolveExactSuite(args, effects);
+  if (!exactSuite.ok) {
+    effects.out(warn(`Release suite could not be resolved safely: ${exactSuite.reason}. Nothing was changed.`));
+    return EXIT_REFUSED;
+  }
+  effects.out(ok(`Release channel: ${exactSuite.channel} → exact lockstep suite v${exactSuite.version}`));
+
   // Which daemon, before anything is decided about it. Only args.stateDir can
   // change here; every refusal downstream is unaffected.
   effects.out(progress(2, 8, 'Choose one daemon', 'Reuse the only detected daemon or create one coherent shared target.'));
@@ -1042,7 +1112,7 @@ export async function runInstall(argv, effects) {
   if (selection.action === 'refuse') return EXIT_REFUSED;
 
   effects.out(progress(3, 8, 'Prepare the shared daemon', 'Install the CLI, write config, start it, and enable boot persistence.'));
-  const daemon = await runDaemonPhase(args, effects);
+  const daemon = await runDaemonPhase(args, effects, exactSuite);
   if (daemon.refused) return EXIT_REFUSED;
   const target = daemon.target;
   const isDefaultStateDir = target.stateDir === join(effects.home, '.ours');
@@ -1065,7 +1135,7 @@ export async function runInstall(argv, effects) {
   }
 
   effects.out(progress(4, 8, 'Install the complete stack', 'Attach MCP, Telegram, and cowork to the same daemon; run both shims as durable services.'));
-  const components = await runComponentPhase(args, effects, target);
+  const components = await runComponentPhase(args, effects, target, exactSuite);
   for (const component of COMPONENTS) {
     const state = components.installed.includes(component.key) ? 'installed'
       : components.failed.some((f) => f.key === component.key) ? 'failed' : 'skipped';
@@ -1084,7 +1154,7 @@ export async function runInstall(argv, effects) {
   effects.out(progress(5, 8, 'Create the Human identity', 'Create the daemon root identity once, or keep the existing one.'));
   summary.push(await runIdentityPhase(args, effects, { target, mcpReady }));
   effects.out(progress(6, 8, 'Wire detected harnesses', 'Install the ours plugin into each safe Claude Code, Codex, or Hermes installation.'));
-  summary.push(...await runHarnessPhase(args, effects, { target, isDefaultStateDir }));
+  summary.push(...await runHarnessPhase(args, effects, { target, isDefaultStateDir, exactSuite }));
   effects.out(progress(7, 8, 'Stage the fleet', 'Install Fleet and write a stopped coordinator + watchdog + health-loop starter config.'));
   summary.push(await runFleetPhase(args, effects, { target, isDefaultStateDir }));
   summary.push(await runVoicePhase(args, effects, { target, mcpReady }));

@@ -1,5 +1,5 @@
 // ours-install v3 stage 4 — re-running, and a second daemon alongside the first
-// (spec §§6-7). Pure. The idempotence tests drive the REAL plan functions from
+// Pure. The idempotence tests drive the REAL plan functions from
 // the earlier stages and feed each run's output back in as the next run's
 // existing state, so "a repeat run changes nothing" is measured rather than
 // asserted about a mock.
@@ -16,7 +16,7 @@ const OURS = resolve(HOME, '.ours');
 const TG = resolve(HOME, '.ours-tg');
 const SRV_TG = '/srv/ours-tg';
 
-// ------------------------------------------------------- §7 — two daemons ----
+// ------------------------------------------------------------------ two daemons ----
 
 test('two daemons share NO per-daemon artefact', async () => {
   const a = perDaemonArtefacts(OURS, 3050);
@@ -49,7 +49,7 @@ test('componentCoexistence never lets a screen imply two connectors', async () =
   }
 });
 
-// --------------------------------------------- §6 — a repeat run is a no-op --
+// -------------------------------------------------------- a repeat run is a no-op --
 
 test('IDEMPOTENCE: feeding a run\'s own output back in changes nothing', async () => {
   const first = planDaemonConfig({ apiVisibility: 'shared' }, { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' });
@@ -79,7 +79,7 @@ test('IDEMPOTENCE: the cowork block is written once and then left alone', async 
 });
 
 test('IDEMPOTENCE: a re-run finds its own daemon on its own port and updates', async () => {
-  // The owner's correction: a re-run with the same state dir can never reach the
+  // A re-run with the same state dir can never reach the
   // foreign-daemon refusal, because the directory is looked up first.
   const readJson = (p) => (p === join(OURS, DAEMON_CONFIG) ? { port: 3050, stateDir: OURS } : null);
   const probe = (port) => (port === 3050 ? { ok: true, stateDir: OURS } : { ok: false });
@@ -121,7 +121,7 @@ test('an unexplained no-op is caught', async () => {
   assert.equal(summary.allNoopsExplained, false);
 });
 
-// ------------------------------------------- §6 — adding a component later ---
+// -------------------------------------------------- adding a component later ---
 
 test('a later run can ADD a component without disturbing the installed ones', async () => {
   const chosen = planComponentSelection({ answers: { tg: true }, installed: { mcp: true } });

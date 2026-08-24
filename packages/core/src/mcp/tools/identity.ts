@@ -3,8 +3,7 @@
 // define_local_identity_file, choose_identity, list_identities,
 // current_identity, remove_identity.
 //
-// Converted from the handlers in `createMcpServer` (index.ts:3571-4090, baseline
-// 22ffb646) onto `@ours.network/sdk`. Per src/mcp/tool.ts: take the zod
+// These handlers adapt MCP arguments to `@ours.network/sdk`. Per src/mcp/tool.ts they take the zod
 // arguments, call ONE SDK operation with the session context, render the typed
 // result. The single-root policy, the temporary-identity ownership checks, the
 // lease table and every catalogued error string now live in the SDK's
@@ -12,11 +11,11 @@
 //
 // WHY ctxFor IS CALLED PER HANDLER, NOT ONCE AT REGISTRATION
 // `SessionContext`'s three members are getters, and `clientFor()` is the per-session
-// factory Developer-2's server owns. chooseIdentity and createIdentity REBIND the
+// factory the MCP server owns. chooseIdentity and createIdentity REBIND the
 // session as part of the call, so they must read the lease table as it is now.
 // Nothing below captures ctx.leaseToken() or ctx.sessionId() into a local.
 //
-// The descriptions and zod schemas are the baseline's, character for character.
+// Tool descriptions and zod schemas are compatibility-sensitive and kept byte-stable.
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
@@ -35,8 +34,8 @@ type ActiveIdentityTreeRow = Extract<IdentityTreeRow, { cid: string }>;
 const isActiveIdentity = (row: IdentityTreeRow): row is ActiveIdentityTreeRow => 'cid' in row;
 
 // The consent sentence create_identity, create_root_identity and choose_identity
-// all append after binding. Baseline text (index.ts:3617, 3793, 3948) — one
-// helper because the three copies were already identical, not a rewording.
+// all append after binding. One helper avoids three identical copies without
+// changing the user-facing text.
 const monitorHintFor = (name: string): string =>
   `\n\nAsk the user whether to enable this harness's live mail monitor for "${name}". ` +
   'Never enable monitoring without explicit consent.';
@@ -44,17 +43,17 @@ const monitorHintFor = (name: string): string =>
 // The exposure clause of the two create tools. They differ ONLY in the
 // not-exposed case: create_identity says so out loud (it exposes by default, so
 // opting out is worth reporting), create_temporary_identity stays silent (it does
-// NOT expose by default, so silence is the norm). index.ts:3614-3616 / 3684-3686.
+// NOT expose by default, so silence is the norm).
 const exposureClause = (exposed: boolean, autoAccept: boolean, whenNotExposed: string): string =>
   exposed
     ? ` Published to the local contact book${autoAccept ? '' : ' (introductions require approval)'}.`
     : whenNotExposed;
 
-// The remove-me notice sentence, in its TWO baseline spellings. They are not
+// The remove-me notice sentence has two compatibility-sensitive spellings. They are not
 // interchangeable: close_temporary_identity's has a leading capital and a
-// no-contacts variant (index.ts:3747-3751); remove_identity's is a trailing
-// clause with a leading SPACE and collapses to '' when there were no contacts
-// (index.ts:4063-4065). Both are also built inside the SDK for the deleteError
+// no-contacts variant; remove_identity's is a trailing
+// clause with a leading SPACE and collapses to '' when there were no contacts.
+// Both are also built inside the SDK for the deleteError
 // path, where they are interpolated into the error message.
 const closeNotice = (r: { attempted: number; notified: number; failed: number }): string =>
   r.attempted === 0
@@ -103,7 +102,7 @@ async function dropBeforeMutation<T>(
 
 // list_identities' two tag columns, from IdentityTreeRow's typed facts.
 // `session: null` covers BOTH "no lease" and "lease held by a dead pid" — the SDK
-// already collapsed them, because the baseline renders a dead holder as free.
+// already collapsed them because a dead holder must render as free.
 const sessionTag = (row: IdentityTreeRow): string => {
   if (!isActiveIdentity(row)) return '';
   if (row.session === 'mine') return '  ← this session';
@@ -155,8 +154,8 @@ export function registerIdentityTools(
           () => c.createIdentity({ name, bio, exposeLocal: expose_local, localAutoAccept: local_auto_accept }),
         ),
         async (r) => {
-          // `underRoot` rather than r.info.rootName: the baseline names the root from
-          // the in-memory Identity (index.ts:3596), which cannot degrade to '' when
+          // Use `underRoot` rather than r.info.rootName: it names the root from the
+          // in-memory Identity and cannot degrade to '' when
           // the describe_identity read-back fails.
           const hierarchy =
             r.hierarchy === 'role'
@@ -267,7 +266,7 @@ export function registerIdentityTools(
         },
         (r) => (
           // `result: null` is the idempotent no-op — a name that no longer exists.
-          // The baseline answers it with a NON-error result (index.ts:3720), which is
+          // A missing identity is an idempotent NON-error result, which is
           // why the SDK returns it instead of throwing.
           r.result === null
             ? textResult(`close_temporary_identity: no identity named "${r.name}" — nothing to close (already cleaned up?).`)
@@ -423,7 +422,7 @@ export function registerIdentityTools(
           }
           // The rows arrive in RENDER ORDER (root, roles, flat). A no-root host is
           // detected exactly as the SDK documents it: no row claims 'root', because
-          // the baseline never asks the packet for a role id in that case.
+          // a flat identity never asks the packet for a role id in that case.
           const hasRoot = rows.some((row) => isActiveIdentity(row) && row.kind === 'root');
           const lines = rows.map((row) => {
             if (!isActiveIdentity(row)) {
@@ -450,21 +449,19 @@ export function registerIdentityTools(
       'place in the identity hierarchy.',
     {},
     // ⚠ THE ONE HANDLER IN THIS SLICE THAT DOES NOT GO THROUGH runTool, and it is
-    // deliberate. The baseline renders the not-bound case as a NON-error text
-    // result — index.ts:4018 is `return textResult(b.error)` with no `true`, unlike
+    // deliberate. The not-bound case is a NON-error text result, unlike
     // every other tool. Those four binding failures arrive from the SDK as
     // OursError, and runTool renders an OursError with isError: true, which would
     // flip this tool's flag and change its UX. So the message is rendered here with
-    // the baseline's flag; the text itself is still the SDK's, unwrapped and
+    // the required non-error flag; the text itself is still the SDK's, unwrapped and
     // unmodified, and a non-OursError is still rethrown as a protocol error exactly
-    // as runTool does. Developer-2: if you would rather this be a variant in
-    // src/mcp/tool.ts (e.g. an isError override), say so and I will move it — I did
-    // not widen your contract on my own.
+    // as runTool does. Keeping this exception local avoids widening the common
+    // adapter contract for this one exception.
     async () => {
       try {
         const r = await clientFor().currentIdentity();
         // `described: false` means ::actor::describe_identity threw — the five
-        // described fields are UNKNOWN, not empty — and the baseline degrades to the
+        // described fields are UNKNOWN, not empty, so the response degrades to the
         // bare line, dropping the hierarchy, temporary, bio and persona sentences.
         if (!r.described) return textResult(`Bound to "${r.name}" (${r.cid}).`);
         const place = r.isRoot
@@ -481,7 +478,7 @@ export function registerIdentityTools(
         const persona = r.persona ? `\nPersona: ${r.persona}` : '';
         return textResult(`Bound to "${r.name}" (${r.cid})${place}.${temp}${bio}${persona}`);
       } catch (err) {
-        // NOT a missing `true` and NOT a forgotten runTool: index.ts:4018 renders
+        // NOT a missing `true` and NOT a forgotten runTool: it renders
         // the not-bound case with isError FALSE, and this handler preserves that.
         if (err instanceof OursError) return textResult(err.message);
         throw err;

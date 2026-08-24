@@ -7,9 +7,9 @@
 // ============================================================================
 // Every other converted tool answers a failure with `textResult(err.message,
 // true)`, which is exactly what runTool does. get_files does NOT: for the four
-// SELECTION failures the baseline returns a `structuredContent` block carrying
+// SELECTION failures get_files returns a `structuredContent` block carrying
 // `error.category` and a per-wire_id `items` array, and the ours connector reads
-// that block (index.ts:4924-4936). runTool cannot produce it — it renders text
+// that block. runTool cannot produce it — it renders text
 // only — so this handler catches `OursError` itself and maps `code` →
 // `error_category`. That mapping is the ONLY reason the SDK gives these four
 // failures dedicated codes instead of a plain TX_FAILED (ours-sdk
@@ -22,8 +22,8 @@
 //
 // ----- THE FINISHED SUMMARY TRAVELS; IT IS NOT REBUILT ----------------------
 // `result.text` is the summary `writeIncomingFiles` already built, and it is
-// passed STRAIGHT THROUGH as the tool's whole text content, exactly as baseline
-// index.ts:4957 did. It is NOT redundant with `files`: two of the three voice
+// passed STRAIGHT THROUGH as the tool's whole text content. It is NOT redundant
+// with `files`: two of the three voice
 // branches interpolate raw strings that `structuredVoiceOutcome` discards
 // (`unconfigured` drops `reason`; `failed` collapses `error` into a five-value
 // category), so a consumer holding only the file records CANNOT rebuild it
@@ -55,9 +55,8 @@ const SELECTION_CATEGORY: Record<string, string> = {
 
 // Every selection message from the SDK is already the finished tool text and
 // begins with this prefix (ours-sdk src/errors.ts:220-231), because that text is
-// what its api-error-parity gate holds byte-identical to the baseline. The
-// baseline's `structuredContent.error.message` is the SAME sentence WITHOUT the
-// prefix (index.ts:4925 adds it for the prose and 4933 omits it for the block),
+// what its api-error-parity gate holds byte-identical to the MCP compatibility contract. The
+// structuredContent.error.message is the SAME sentence WITHOUT the prefix,
 // so the bare form is derived from the one source of truth rather than restated.
 const GET_FILES_PREFIX = 'get_files failed: ';
 
@@ -132,7 +131,7 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
         annotateGetFilesResult(result, FILES_ALWAYS_PROMPT ? () => false : canRead);
         return result;
       } catch (e) {
-        // ⚠ DO NOT "TIDY" THIS BACK THROUGH runTool. Source: index.ts:4924-4936.
+        // Keep this explicit mapping: runTool cannot preserve structured selection errors.
         // runTool renders `.message` and nothing else, so routing the four
         // SELECTION codes through it would render the same text and DROP this
         // whole block — no error, no log, on every bad selection. That is the same

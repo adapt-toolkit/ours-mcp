@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/install",
-  "version": "0.17.0",
+  "version": "0.17.2",
   "private": false,
   "description": "The all-in-one ours.network installer: one shared daemon, MCP, cowork, Telegram, Fleet, harness plugins, Human identity, stopped Fleet starter, progress UI, and guided next steps.",
   "type": "module",

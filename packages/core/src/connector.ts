@@ -1,6 +1,6 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
-import { attachOursClient, resolveDaemonConfig } from '@ours.network/sdk';
+import { attachOursClient, OursError, resolveDaemonConfig } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 
 import { ApplicationIdentityStore } from './application-identities.js';
@@ -24,8 +24,13 @@ const OBSOLETE_DAEMON_ENV = [
   'OURS_UNIT_DIR',
 ] as const;
 
+let stdioFailureHandler: (() => void) | null = null;
 const log = (message: string): void => {
-  try { process.stderr.write(`ours: ${message}\n`); } catch { /* reader gone */ }
+  try {
+    process.stderr.write(`ours: ${message}\n`, (error) => { if (error) stdioFailureHandler?.(); });
+  } catch {
+    stdioFailureHandler?.();
+  }
 };
 
 function rejectObsoleteDaemonEnvironment(env: NodeJS.ProcessEnv): void {
@@ -97,6 +102,18 @@ async function seedBinding(
   identities: ApplicationIdentityStore,
   name: string,
 ): Promise<void> {
+  try {
+    const existing = await client.currentIdentity();
+    rememberBinding(existing.name);
+    log(`[${existing.name}] existing session binding takes precedence over OURS_BIND_IDENTITY=${JSON.stringify(name)}`);
+    return;
+  } catch (error) {
+    if (!(error instanceof OursError) || error.code !== 'NOT_BOUND') {
+      log(`could not inspect the existing session binding; OURS_BIND_IDENTITY was not applied (${String(error)})`);
+      return;
+    }
+  }
+
   let wasVisible = false;
   try {
     wasVisible = await identities.has(name);
@@ -150,6 +167,7 @@ export async function runConnector(options: ConnectorOptions): Promise<void> {
   log(`MCP server v${options.version} ready (transport=stdio, daemon=${endpoint})`);
   void watcher.run();
 
+  let stdioBroken: (() => void) | undefined;
   await new Promise<void>((resolve) => {
     let done = false;
     const finish = (reason: string): void => {
@@ -158,12 +176,25 @@ export async function runConnector(options: ConnectorOptions): Promise<void> {
       log(`shutting down (${reason})`);
       resolve();
     };
+    stdioBroken = () => finish('stdio output closed');
+    stdioFailureHandler = stdioBroken;
     process.stdin.on('end', () => finish('stdin closed'));
     process.stdin.on('close', () => finish('stdin closed'));
+    process.stdout.once('error', stdioBroken);
+    process.stderr.once('error', stdioBroken);
+    process.stdout.once('close', stdioBroken);
+    process.stderr.once('close', stdioBroken);
     process.on('SIGINT', () => finish('SIGINT'));
     process.on('SIGTERM', () => finish('SIGTERM'));
   });
 
+  if (stdioBroken) {
+    process.stdout.off('error', stdioBroken);
+    process.stderr.off('error', stdioBroken);
+    process.stdout.off('close', stdioBroken);
+    process.stderr.off('close', stdioBroken);
+  }
+  stdioFailureHandler = null;
   watcher.stop();
   try { await transport.close(); } catch { /* already closed */ }
 }

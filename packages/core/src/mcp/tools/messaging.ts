@@ -9,7 +9,7 @@
 // the conversion has regressed.
 //
 // ----- WHAT MOVED INTO THE SDK AND MUST NOT BE REPEATED HERE ----------------
-// The baseline's `log('[e2e-route] …')` / `log('[migration] …')` verdict lines and
+// the established `log('[e2e-route] …')` / `log('[migration] …')` verdict lines and
 // the `send_not_retained` notify-log entry are DAEMON-SCOPED SIDE EFFECTS and
 // travel with the engine — ours-sdk src/api/messaging.ts:100-121 and 198-214 run
 // them. Re-emitting them here would double every route log and write the notify
@@ -20,8 +20,8 @@
 // `cid`, `queued` and `notRetained` and no prose, precisely so the wording stays
 // here. The ONE exception is `kind: 'introduced'`, whose text is FINISHED prose
 // from sendViaSibling / sendViaLocalBook describing an introduction that has
-// already happened — the baseline passed that string straight to textResult
-// (index.ts:4625) and so does this file. Re-deriving those two sentences here is
+// already happened. Pass that string straight to textResult
+// and so does this file. Re-deriving those two sentences here is
 // exactly the drift the split exists to prevent.
 import { readFileSync } from 'node:fs';
 import { basename, resolve as resolvePath } from 'node:path';
@@ -105,8 +105,8 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
                 `Message queued for "${contact}" (wire_id ${v.wireId}) — the contact's encryption keys are being ` +
                 `re-established after an upgrade (contact restore in progress); delivery is automatic once ` +
                 `restored (${v.queued} message${v.queued === 1 ? '' : 's'} queued).`, v);
-            // The contact-miss fallback. `text` is finished prose from the SDK —
-            // the baseline's `return textResult(sent)` at index.ts:4625.
+            // The contact-miss fallback. `text` is finished prose from the SDK,
+            // so pass it through without rebuilding or rewording it here.
             case 'introduced':
               return sendResult(v.text, v);
             default:
@@ -171,7 +171,7 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
           });
         },
         (v) => {
-          // The three facts the SDK carries for exactly this prefix (index.ts:4685):
+          // The three facts the SDK carries for exactly this prefix:
           // `bytes` is the length of what was actually sent, so it is right for both
           // the `path` and the `data_base64` input forms.
           const desc = `File "${v.filename}" (${v.bytes} B${v.mime ? `, ${v.mime}` : ''})`;
@@ -199,7 +199,7 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
               return sendResult(`${desc} sent to "${contact}" over the upgraded end-to-end session (wire_id ${v.wireId}).`, v);
             // UNREACHABLE for send_file, and present only because FileSendOutcome
             // is SendOutcome & {…} so it inherits the union member. sendFile has NO
-            // contact-miss fallback — the baseline has no `/Unknown contact/` branch
+            // contact-miss fallback: send_file has no `/Unknown contact/` branch
             // here (ours-sdk src/api/files section, messaging.ts:145-149) — so a file
             // to a stranger is simply a failure. Rendering the SDK's own finished
             // prose is the only honest thing to do if that ever changes; inventing a

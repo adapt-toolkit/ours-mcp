@@ -46,6 +46,7 @@ test('isNightlyVersion: exactly the suffix the release bump stamps', () => {
   assert.equal(isNightlyVersion('1.2.3-nightly.42'), true);
   assert.equal(isNightlyVersion('0.17.0'), false);
   assert.equal(isNightlyVersion('0.17.0-rc.1'), false, 'only the nightly suffix counts');
+  assert.equal(isNightlyVersion('0.17.0-nightly.03'), false, 'release indices are canonical integers');
   assert.equal(isNightlyVersion(''), false);
   assert.equal(isNightlyVersion(undefined), false);
 });
@@ -128,7 +129,7 @@ test('pkgTag: the nightly channel takes each package\'s OWN prerelease tag', () 
   // stack needs the fleet build with the SDK integration, and a stable fleet against a
   // nightly daemon is the split-brain deployment the channel exists to prevent.
   assert.equal(pkgTag('fleet', 'nightly'), 'nightly', 'fleet follows the channel');
-  // cowork publishes `nightly` too, aligned with every other service (owner, 2026-08-16 —
+  // cowork publishes `nightly` too, aligned with every other service (public release contract —
   // it previously used `next`). The nightly channel must reach that line: the external-daemon
   // mode the Rooms step configures ships there, so taking `latest` would pair a daemon block
   // with a build predating it.
@@ -393,7 +394,7 @@ test('buildHandoffPrompt: Rooms gets its own step, and drops out when Rooms was 
   assert.match(roomsOnly, /1\. Set up my first Rooms mission room/, 'steps renumber');
 });
 
-// ── Rooms daemon selection (ours-cowork PR #9 external-daemon contract) ────────
+// ── Rooms external-daemon selection ──────────────────────────────────────────
 // Optional `daemon` block; absent ⇒ embedded. External is
 // { mode:'external', endpoint, stateDir } and REQUIRES both halves — cowork stores
 // no token, its SDK reads <stateDir>/daemon-token. Boot is fail-closed with NO

@@ -36,9 +36,14 @@ ensure_daemon_latest(){
   npm i -g @ours.network/cli@latest @ours.network/mcp@latest
   after="$(ours version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
   if ! ours daemon status >/dev/null 2>&1; then
-    say "starting the ours daemon…"; ours daemon start || say "could not start; run 'ours daemon start' if the tools error."
+    say "starting the ours daemon…"
+    if ! ours daemon start; then say "could not start the ours daemon; installation stopped."; return 1; fi
   elif [ -n "$before" ] && [ "$before" != "$after" ]; then
-    say "operator CLI upgraded (v${before} → v${after}) — restarting its daemon…"; ours daemon restart || ours daemon start || true
+    say "operator CLI upgraded (v${before} → v${after}) — restarting its daemon…"
+    if ! ours daemon restart; then
+      say "restart failed; trying a clean start…"
+      if ! ours daemon start; then say "could not restart or start the upgraded daemon; installation stopped."; return 1; fi
+    fi
   else
     say "daemon already current (v${after:-unknown})."
   fi

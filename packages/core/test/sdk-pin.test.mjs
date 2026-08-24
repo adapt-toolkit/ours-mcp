@@ -32,7 +32,7 @@ assert.equal(lstatSync(dirname(cliPath)).isSymbolicLink(), false, 'CLI must be a
 
 const lock = JSON.parse(readFileSync(new URL('../../../package-lock.json', import.meta.url), 'utf8'));
 for (const [path, version] of [
-  ['packages/core/node_modules/@ours.network/sdk', '3.2.0'],
+  ['node_modules/@ours.network/sdk', '3.2.0'],
   ['node_modules/@ours.network/cli', '2.2.0'],
 ]) {
   const entry = lock.packages[path];
