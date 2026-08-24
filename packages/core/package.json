@@ -47,7 +47,7 @@
   },
   "dependencies": {
     "@ours.network/cli": "2.2.0",
-    "@ours.network/sdk": "3.2.0"
+    "@ours.network/sdk": "3.2.2"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
