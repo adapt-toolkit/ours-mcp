@@ -10,7 +10,7 @@
 //
 // (This file lives under test/ and defines no tests of its own. Node's runner
 // loads it and reports zero tests, which is the intended outcome.)
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 export const HOME = '/home/me';
 export const OURS = resolve(HOME, '.ours');
@@ -78,11 +78,12 @@ export function fx({
     run: async (cmd, cmdArgs, opts = {}) => {
       const invocation = [cmd, ...cmdArgs];
       recorder.ran.push(invocation);
-      // install-service WRITES the unit. `unitUnchanged` models the case where the
-      // bytes it writes are the bytes already there — which is what the run reads
-      // back to decide whether anything moved, now that no --json reports it.
+      // Linux keeps its established unit-byte comparison. Darwin instead reads
+      // the CLI's JSON `changed` field because the CLI exclusively owns the plist.
       if (cmdArgs.includes('install-service') && !unitUnchanged) {
-        for (const p of Object.keys(text)) if (p.includes('systemd')) text[p] = `${text[p] ?? ''}\n# rewritten`;
+        for (const p of Object.keys(text)) {
+          if (p.includes('systemd')) text[p] = `${text[p] ?? ''}\n# rewritten`;
+        }
       }
       // Recorded separately so deepEqual assertions on `ran` keep working; the
       // pair invariant is checked against this.
@@ -90,7 +91,13 @@ export function fx({
       recorder.runOptions.push(opts);
       if (fails(invocation)) throw new Error(`${cmd} exited 1`);
       const stdout = cmdArgs.includes('install-service') && cmdArgs.includes('--json')
-        ? JSON.stringify({ changed: unitUnchanged ? false : true, unitName: 'ours.service' })
+        ? JSON.stringify(platform === 'darwin'
+          ? {
+              adapter: 'launchd-user', changed: unitUnchanged ? false : true,
+              unitName: 'solutions.adaptframework.ours',
+              serviceFile: join(HOME, 'Library', 'LaunchAgents', 'solutions.adaptframework.ours.plist'),
+            }
+          : { adapter: 'systemd-user', changed: unitUnchanged ? false : true, unitName: 'ours.service' })
         : cmdArgs.includes('voice-status')
           ? JSON.stringify({ ready: voiceReady, provider: voiceReady ? 'deepgram' : '' })
           : '';

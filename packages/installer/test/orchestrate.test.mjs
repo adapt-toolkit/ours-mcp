@@ -796,26 +796,29 @@ test('a dry run recovers nothing, because it stopped nothing', async () => {
 
 // ------------------------------ macOS now gets a REAL boot service ----------
 //
-// The skip that used to live here is gone with the daemon change: the unit is
-// installed by ours-mcp's own install-service, which handles systemd AND launchd,
-// so there is no longer a platform on which the installer declines to try.
+// The skip that used to live here is gone: the installer now delegates to the
+// CLI's install-service, which handles systemd AND launchd.
 // Whether launchctl accepts the agent is still unproven — nothing here is macOS —
 // but it is now real code rather than a documented refusal.
 
-test('on macOS the daemon boot service is skipped but durable shim services still install', async () => {
-  // The SDK CLI's install-service throws on any non-linux platform — its adapter
-  // factory's first line — so calling it does not degrade, it fails the run after
-  // preflight said the platform was supported. The skip is back with the daemon.
+test('on macOS the installer requests the CLI-managed daemon LaunchAgent before durable shims', async () => {
   const e = fx({
     platform: 'darwin',
     env: { OURS_ASSUME_YES: '1' },
     versions: { '@ours.network/cowork': '0.5.0' },
   });
-  assert.equal(await runInstall([], e), EXIT_OK, 'the daemon is fine; only the boot service is not');
-  assert.ok(
-    !e.recorder.ran.some((c) => c.join(' ').includes('daemon install-service')),
-    'the daemon service was not attempted',
-  );
+  assert.equal(await runInstall([], e), EXIT_OK);
+  const service = e.recorder.ran.find((c) => c.join(' ').includes('daemon install-service'));
+  assert.deepEqual(service, [
+    'ours', 'daemon', 'install-service', '--yes', '--json', '--state-dir', OURS,
+    '--config', join(OURS, 'config.json'),
+  ], 'the CLI dispatches this exact request to its launchd adapter');
+  assert.ok(!service.includes('--force'), 'Darwin never enters Linux legacy-unit adoption');
+  const commands = e.recorder.ran.map((c) => c.join(' '));
+  const start = commands.findIndex((c) => c.includes('daemon start'));
+  const daemonService = commands.findIndex((c) => c.includes('daemon install-service'));
+  const telegramService = commands.findIndex((c) => c.includes('ours-tg-connector install-service'));
+  assert.ok(start < daemonService && daemonService < telegramService, 'daemon starts, gains persistence, then shims install');
   assert.ok(
     e.recorder.ran.some((c) => c.join(' ').includes('ours-tg-connector install-service')),
     'the Telegram shim is installed as a durable service',
@@ -824,9 +827,37 @@ test('on macOS the daemon boot service is skipped but durable shim services stil
     e.recorder.ran.some((c) => c.join(' ').includes('ours-cowork install-service')),
     'the cowork shim is installed as a durable service',
   );
-  assert.match(said(e), /not available on macOS/);
-  assert.match(said(e), /Boot service/, 'and it is marked in the summary, not just in a line');
-  assert.match(said(e), /needs attention/);
+  assert.doesNotMatch(said(e), /not available on macOS|needs attention/);
+  assert.match(said(e), /solutions\.adaptframework\.ours installed and enabled/);
+});
+
+test('a macOS LaunchAgent re-run uses CLI JSON to report unchanged and never forces', async () => {
+  const e = fx({ platform: 'darwin', unitUnchanged: true });
+  const result = await runServicePhase({ dryRun: false }, e, OURS, 3050);
+  assert.equal(result.step.changed, false);
+  assert.equal(result.step.reason, 'unit unchanged');
+  assert.equal(result.plan.unit, 'solutions.adaptframework.ours');
+  const service = e.recorder.ran.find((c) => c.includes('install-service'));
+  assert.ok(service.includes('--json'));
+  assert.ok(!service.includes('--force'));
+});
+
+test('a failed macOS LaunchAgent install reports the failure and attempts daemon recovery', async () => {
+  const e = fx({
+    platform: 'darwin',
+    json: { [join(OURS, 'config.json')]: { port: 3050, stateDir: OURS, brokerUrl: 'wss://b' } },
+    net: { 3050: { ok: true, stateDir: OURS } },
+    runFails: ['install-service'],
+    env: { OURS_ASSUME_YES: '1' },
+  });
+  await assert.rejects(() => runInstall([], e), /ours exited 1/);
+  assert.ok(e.recorder.ran.some((c) => c.join(' ').includes('daemon install-service')));
+  assert.deepEqual(
+    e.recorder.ran.filter((c) => c.join(' ').includes('daemon start')),
+    [['ours', 'daemon', 'start', '--config', join(OURS, 'config.json')]],
+    'one recovery attempt after the launchd adapter failure',
+  );
+  assert.match(said(e), /your daemon is running again/);
 });
 
 test('Linux is completely unaffected — same walk, same service install', async () => {

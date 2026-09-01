@@ -9,6 +9,7 @@ import { join, resolve, basename } from 'node:path';
 export const CLI_UNIT_MARKER = '# Managed by @ours.network/cli';
 export const SYSTEMD_USER_DIR = ['.config', 'systemd', 'user'];
 export const DEFAULT_SYSTEMD_UNIT = 'ours.service';
+export const DEFAULT_LAUNCHD_LABEL = 'solutions.adaptframework.ours';
 
 // -----------------------------------------------------------------------------
 // Which unit file does this state directory own?
@@ -44,6 +45,23 @@ export function unitPathForStateDir(stateDir, home) {
   const derived = unitNameForStateDir(stateDir);
   if (!derived.ok) return derived;
   return { ...derived, path: join(home, ...SYSTEMD_USER_DIR, derived.unit) };
+}
+
+/**
+ * Read-only launchd label derivation for accurate progress output. The CLI owns
+ * the plist path, generation, permissions, conflict handling and launchctl.
+ *
+ * SOURCE OF TRUTH IS @ours.network/cli 2.6.1 service-instance.ts. Keep this in
+ * the same table tests as the systemd derivation above.
+ */
+export function launchdLabelForStateDir(stateDir) {
+  const derived = unitNameForStateDir(stateDir);
+  if (!derived.ok) return derived;
+  return {
+    ok: true,
+    label: derived.instance ? `${DEFAULT_LAUNCHD_LABEL}.${derived.instance}` : DEFAULT_LAUNCHD_LABEL,
+    instance: derived.instance,
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -110,39 +128,28 @@ export function classifyUnit(text) {
  * default that spreads to the other cases.
  */
 export function planServiceInstall({ stateDir, home, readText, platform = 'linux' }) {
-  // THE BOOT SERVICE IS LINUX-ONLY, AND NOT BECAUSE THIS FILE SAYS SO.
-  //
-  // `ours daemon install-service` in @ours.network/cli builds its adapter with
-  // `createLinuxUserSystemdAdapter()` and no platform branch at all, and that
-  // factory's FIRST line is
-  //   if (deps.platform !== 'linux') throw new Error('service management is not
-  //   supported on <platform>; use an external launcher for `ours daemon serve`')
-  // — verified by reading the published 0.4.1 tarball, which contains zero
-  // occurrences of launchd, LaunchAgents or plist.
-  //
-  // So calling it on macOS does not degrade, it THROWS. Before this, a Mac user
-  // was told their platform was supported, watched the CLI install, the config
-  // write and the daemon start, and then got an exception and a rolled-back
-  // config. Skipping the step leaves them a working daemon and one true sentence
-  // instead — which is the whole of this change.
-  //
-  // A real launchd adapter belongs in the SDK CLI, not here. Nothing in this
-  // package can install a launchd agent, and pretending otherwise by writing a
-  // plist ourselves would put a second service implementation in a second repo.
-  // `ours daemon install-service` supports Linux/systemd only: its adapter throws
-  // for any other platform, so calling it would fail the run rather than degrade.
-  // Skip it and say so; the daemon itself is unaffected.
-  if (platform && platform !== 'linux') {
+  // @ours.network/cli 2.6.1 dispatches this same command to user systemd on
+  // Linux and launchd on macOS. Other platforms still have no service adapter.
+  if (platform && platform !== 'linux' && platform !== 'darwin') {
     return {
       action: 'unsupported',
       platform,
       reason: 'no-service-manager',
-      message: platform === 'darwin'
-        ? 'installing a boot service is not available on macOS — the ours CLI can only manage a Linux user systemd service'
-        : `installing a boot service is not available on ${platform} — the ours CLI can only manage a Linux user systemd service`,
+      message: `installing a boot service is not available on ${platform} — the ours CLI supports Linux user systemd and macOS launchd`,
       manual: ['ours', 'daemon', 'serve', '--config'],
     };
   }
+
+  if (platform === 'darwin') {
+    const derived = launchdLabelForStateDir(stateDir);
+    if (!derived.ok) {
+      return { action: 'refuse', exitCode: 2, reason: 'unusable-state-dir', message: derived.reason };
+    }
+    return {
+      action: 'install', platform, unit: derived.label, instance: derived.instance,
+    };
+  }
+
   const derived = unitPathForStateDir(stateDir, home);
   if (!derived.ok) {
     return { action: 'refuse', exitCode: 2, reason: 'unusable-state-dir', message: derived.reason };

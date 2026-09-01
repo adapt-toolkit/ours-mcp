@@ -34,7 +34,8 @@ connector from another daemon still require explicit confirmation.
 - Installs `@ours.network/cli`, `@ours.network/mcp`,
   `@ours.network/tg-connector`, `@ours.network/cowork`, and
   `@ours.network/fleet` on one release channel.
-- Configures, starts, and enables the single shared daemon.
+- Configures, starts, and enables the single shared daemon with a CLI-managed
+  user systemd service on Linux or LaunchAgent on macOS.
 - Creates the daemon's Human identity (historically called the root identity),
   or preserves the existing one on a re-run.
 - Installs the ours plugin into safely detected Claude Code, Codex, and Hermes

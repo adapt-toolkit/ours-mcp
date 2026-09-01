@@ -489,11 +489,8 @@ export async function runServicePhase(args, effects, dir, port) {
   const plan = planServiceInstall({
     stateDir: dir, home: effects.home, readText: effects.readText, platform: effects.platform?.platform,
   });
-  // NOT a refusal and NOT a failure: the daemon is running and correct, and only
-  // the boot service could not be installed — `ours daemon install-service` throws
-  // on any non-linux platform. The run CONTINUES, says so, and the summary marks
-  // it, because the person this hurts reboots in a fortnight and finds nothing
-  // listening.
+  // NOT a refusal and NOT a failure: this is retained for platforms with no CLI
+  // service adapter. Linux and macOS both take the normal install path.
   if (plan.action === 'unsupported') {
     effects.out(warn(`ours: ${plan.message}`));
     effects.out(info(`Your daemon is installed and running now. To start it after a reboot, run:  ${plan.manual.join(' ')} ${join(dir, 'config.json')}`));
@@ -507,13 +504,9 @@ export async function runServicePhase(args, effects, dir, port) {
   const adopting = plan.action === 'adopt';
   if (adopting) effects.out(info(plan.notice));
   const command = serviceInstallCommand({ stateDir: dir, adoptLegacyUnit: adopting });
-  // The unit's bytes BEFORE, so "did it change?" survives the loss of --json.
-  // `ours daemon install-service --json` used to answer that itself; ours-mcp's
-  // takes no flags and reports nothing machine-readable. Assuming `changed: true`
-  // would make every re-run claim it rewrote the unit, which turns the honest
-  // "everything already correct" line into one that never appears — a screen that
-  // is wrong in the reassuring direction. So the installer does the comparison it
-  // used to delegate: it already reads this file to classify it.
+  // The service definition's bytes BEFORE are retained for Linux's established
+  // reporting path. On Darwin the CLI's JSON result is authoritative because it
+  // owns the LaunchAgent and launchctl transaction end to end.
   const unitBefore = plan.unitPath ? effects.readText(plan.unitPath) : null;
   let outcome;
   try {
@@ -531,11 +524,13 @@ export async function runServicePhase(args, effects, dir, port) {
   // which is the safe direction for a summary line.
   const changed = args.dryRun
     ? false
-    : (() => {
-      const after = plan.unitPath ? effects.readText(plan.unitPath) : null;
-      if (unitBefore === null || after === null) return true;
-      return unitBefore !== after;
-    })();
+    : plan.platform === 'darwin'
+      ? readChanged(outcome.stdout)
+      : (() => {
+          const after = plan.unitPath ? effects.readText(plan.unitPath) : null;
+          if (unitBefore === null || after === null) return true;
+          return unitBefore !== after;
+        })();
   return { step: { id: 'service', changed, reason: changed ? undefined : 'unit unchanged' }, plan };
 }
 
@@ -751,9 +746,6 @@ export function runPreflight(effects) {
     return { ok: false, platform: plat };
   }
   effects.out(ok(`Platform: ${plat.label} (supported)`));
-  if (effects.platform?.platform && effects.platform.platform !== 'linux') {
-    effects.out(info(`On ${plat.label} the daemon runs, but installing a BOOT SERVICE is not available — you will start it yourself after a reboot.`));
-  }
   const version = String(effects.nodeVersion ?? '0');
   if (Number.parseInt(version.split('.')[0], 10) < 20) {
     effects.out(warn(`Node.js ${version} — ours needs v20 or newer. Update Node and re-run.`));
@@ -1123,8 +1115,8 @@ export async function runInstall(argv, effects) {
     state: target.action === 'create' ? 'installed' : 'current',
     note: `port ${target.port}`,
   }];
-  // The skip must not read as success: same "needs attention" mark a failed
-  // component gets, so the closing screen cannot say everything is clean.
+  // A future supported runtime may still lack a CLI service adapter. Do not
+  // render that partial state as success.
   if (daemon.serviceUnsupported) {
     summary.push({
       key: 'service',
