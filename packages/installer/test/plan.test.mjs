@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import {
   unitNameForStateDir, unitPathForStateDir, classifyUnit, planServiceInstall,
   serviceInstallCommand, planDaemonConfig, planDaemonSteps, legacyReplacedNotice,
-  CLI_UNIT_MARKER, DEFAULT_SYSTEMD_UNIT,
+  launchdLabelForStateDir, CLI_UNIT_MARKER, DEFAULT_SYSTEMD_UNIT, DEFAULT_LAUNCHD_LABEL,
 } from '../lib/plan.mjs';
 
 const HOME = '/home/me';
@@ -57,6 +57,12 @@ test('unitNameForStateDir: the table must match ours-sdk service-instance.ts', (
 
 test('unitPathForStateDir puts it in the systemd user directory', () => {
   assert.equal(unitPathForStateDir(TG, HOME).path, unitPath('ours-tg.service'));
+});
+
+test('launchdLabelForStateDir matches the CLI 2.6.1 LaunchAgent label rule', () => {
+  assert.deepEqual(launchdLabelForStateDir(OURS), { ok: true, label: DEFAULT_LAUNCHD_LABEL, instance: '' });
+  assert.equal(launchdLabelForStateDir(TG).label, `${DEFAULT_LAUNCHD_LABEL}.tg`);
+  assert.equal(launchdLabelForStateDir('/srv/a.b').ok, false);
 });
 
 // ------------------------------------------------------- unit classification --
@@ -171,10 +177,23 @@ test('serviceInstallCommand selects the daemon and lets the CLI name the unit', 
   assert.ok(cmd.includes('--state-dir') && cmd.includes('/home/me/.ours-work'), 'we select the daemon');
 });
 
-test('a non-linux platform yields an UNSUPPORTED service plan, with what to do instead', () => {
-  const p = planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null, platform: 'darwin' });
+test('macOS gets a normal LaunchAgent install plan and delegates plist ownership to the CLI', () => {
+  const p = planServiceInstall({
+    stateDir: '/home/me/.ours', home: '/home/me',
+    readText: () => { throw new Error('Darwin must not inspect a systemd unit or plist'); },
+    platform: 'darwin',
+  });
+  assert.deepEqual(p, {
+    action: 'install', platform: 'darwin', unit: DEFAULT_LAUNCHD_LABEL, instance: '',
+  });
+  assert.ok(!('unitPath' in p), 'plist path, ownership and conflicts stay with the CLI');
+  assert.ok(!JSON.stringify(p).includes('force'), 'Darwin can never enter legacy systemd adoption');
+});
+
+test('an unknown platform remains UNSUPPORTED, with what to do instead', () => {
+  const p = planServiceInstall({ stateDir: '/home/me/.ours', home: '/home/me', readText: () => null, platform: 'freebsd' });
   assert.equal(p.action, 'unsupported');
-  assert.match(p.message, /not available on macOS/);
+  assert.match(p.message, /not available on freebsd/);
   assert.deepEqual(p.manual, ['ours', 'daemon', 'serve', '--config'], 'a gap, not a dead end');
 });
 
