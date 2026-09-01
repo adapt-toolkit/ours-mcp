@@ -1,6 +1,6 @@
 {
   "name": "ours",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Secure agent-to-agent messaging and explicitly armed live mail wake for Codex CLI.",
   "author": {
     "name": "Adapt Toolkit",
