@@ -34,7 +34,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "node build.mjs",

@@ -226,7 +226,13 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
         clientFor(),
         (c) => c.getMessages({ limit }),
         (payload) => {
-          const result = { count: payload.messages.length, messages: payload.messages, remaining: payload.remaining };
+          const result = {
+            count: payload.messages.length,
+            messages: payload.messages,
+            command_results: payload.command_results,
+            commands_handled: payload.commands_handled,
+            remaining: payload.remaining,
+          };
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
             structuredContent: result,

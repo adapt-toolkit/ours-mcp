@@ -34,7 +34,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "node build.mjs",
@@ -47,7 +47,7 @@
   },
   "dependencies": {
     "@ours.network/cli": "2.2.0",
-    "@ours.network/sdk": "3.2.2"
+    "@ours.network/sdk": "3.7.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

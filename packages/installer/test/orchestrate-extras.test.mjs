@@ -322,11 +322,11 @@ test('an unsupported platform stops before the first mutation', async () => {
   assert.match(said(e), /WSL/);
 });
 
-test('a Node older than 20 stops before the first mutation', async () => {
-  const e = fx({ nodeVersion: '18.19.0' });
+test('a Node older than 22 stops before the first mutation', async () => {
+  const e = fx({ nodeVersion: '20.19.0' });
   await runInstall([], e);
   assert.deepEqual(e.recorder.ran, []);
-  assert.match(said(e), /needs v20 or newer/);
+  assert.match(said(e), /needs v22 or newer/);
 });
 
 test('no harness at all no longer abandons the daemon', async () => {

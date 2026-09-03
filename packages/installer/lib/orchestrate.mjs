@@ -719,7 +719,7 @@ export async function askBroker(args, effects) {
  * Pre-flight: the two disasters worth catching before anything is touched.
  *
  * Carried over from the v2 body deliberately. Native Windows and a Node older
- * than 20 are not "the install went badly", they are "this cannot work here",
+ * than 22 are not "the install went badly", they are "this cannot work here",
  * and finding that out after the daemon package is on disk helps nobody.
  *
  * NOT carried over: v2 also exited when no harness was found. Under v3 the
@@ -747,8 +747,8 @@ export function runPreflight(effects) {
   }
   effects.out(ok(`Platform: ${plat.label} (supported)`));
   const version = String(effects.nodeVersion ?? '0');
-  if (Number.parseInt(version.split('.')[0], 10) < 20) {
-    effects.out(warn(`Node.js ${version} — ours needs v20 or newer. Update Node and re-run.`));
+  if (Number.parseInt(version.split('.')[0], 10) < 22) {
+    effects.out(warn(`Node.js ${version} — ours needs v22 or newer. Update Node and re-run.`));
     return { ok: false, platform: plat, node: version };
   }
   effects.out(ok(`Node.js ${version}`));
