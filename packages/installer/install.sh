@@ -40,13 +40,13 @@ PKG="${OURS_INSTALL_PKG:-@ours.network/install}"
 NPM_BIN="${OURS_NPM:-npm}"
 
 # --- 1) Node.js + npm check + friendly guidance ------------------------------------------------
-# The installer needs Node.js ≥ 20 (and npm to fetch the command). If missing, don't fail
+# The installer needs Node.js ≥ 22 (and npm to fetch the command). If missing, don't fail
 # cryptically: explain what Node is and how to get it for this OS, point at nodejs.org, and exit
 # cleanly (0) so a piped run ends gracefully rather than with a scary non-zero error.
 if ! command -v node >/dev/null 2>&1 || ! command -v "$NPM_BIN" >/dev/null 2>&1; then
   os="$(uname -s 2>/dev/null || echo unknown)"
   printf '\n'
-  say "ours needs Node.js (version 20 or newer, which includes npm) — it isn't installed yet."
+  say "ours needs Node.js (version 22 or newer, which includes npm) — it isn't installed yet."
   say "Node.js is a common, free runtime; here's how to get it:"
   case "$os" in
     Darwin)

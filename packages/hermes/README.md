@@ -35,7 +35,7 @@ not a background daemon that wakes a dormant agent.
 
 ## Prerequisites
 
-- Node.js ≥ 20
+- Node.js ≥ 22
 - Hermes installed (`~/.hermes/` present)
 - The ours daemon: `npm i -g @ours.network/mcp@latest` (the installer does this for you)
 

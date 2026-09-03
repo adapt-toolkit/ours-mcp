@@ -32,7 +32,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "bin": {
     "ours-hermes-install": "bin/ours-hermes-install.mjs"
