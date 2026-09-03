@@ -15,11 +15,8 @@ export class MonitorWatcher {
     this.queued = false;
     this.controller = null;
     appServer?.onNotification?.((message) => {
-      if (message.method === 'turn/started') { this.turnActive = true; this.pending = false; }
-      if (message.method === 'turn/completed') {
-        this.turnActive = false;
-        if (this.pending && this.current) void this.#wake(this.current.threadId);
-      }
+      if (message.method === 'turn/started') this.turnActive = true;
+      if (message.method === 'turn/completed') this.turnActive = false;
     });
   }
 
@@ -34,30 +31,20 @@ export class MonitorWatcher {
   }
 
   async #wake(threadId) {
-    if (this.turnActive || this.pending) { this.queued = true; return; }
+    if (this.pending) { this.queued = true; return; }
     this.pending = true;
     try {
-      const result = await this.appServer.startTurn(threadId, WAKE_PROMPT);
-      if (this.appServer.readThread && result?.turn?.id) void this.#trackCompletion(threadId, result.turn.id);
-      else this.pending = false;
+      let targetThreadId = threadId;
+      do {
+        this.queued = false;
+        // turn/start steers a normal active turn. Waiting for that turn to finish
+        // can wedge mail forever when a steered turn is not independently visible
+        // through thread/read, so acceptance of the request completes the wake.
+        await this.appServer.startTurn(targetThreadId, WAKE_PROMPT);
+        targetThreadId = this.current?.threadId || targetThreadId;
+      } while (this.queued);
     }
-    catch (error) { this.pending = false; throw error; }
-  }
-
-  async #trackCompletion(threadId, turnId) {
-    try {
-      while (this.pending) {
-        const result = await this.appServer.readThread(threadId);
-        const turn = result?.thread?.turns?.find((item) => item.id === turnId);
-        if (turn && turn.status !== 'inProgress') break;
-        await this.sleep(250);
-      }
-    } catch { /* the next notification poll remains recoverable */ }
-    this.pending = false;
-    if (this.queued && this.current) {
-      this.queued = false;
-      void this.#wake(this.current.threadId);
-    }
+    finally { this.pending = false; }
   }
 
   async pollOnce({ identity, threadId, cursor }, signal) {
