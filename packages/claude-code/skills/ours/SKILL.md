@@ -317,6 +317,14 @@ recipient sees `↳re <wire_id>·s<n>`. It's a lightweight reference, not a thre
   any unread backlog (per identity: sender + id only). Surface it; if the user wants the
   mail, `choose_identity` the relevant one and `get_messages()`.
 
+### Invoke a contact command
+Use `list_contact_commands({ contact: "Bob" })` to inspect Bob's advertised typed-command
+catalog. Invoke one with `send_command({ contact: "Bob", command: "name", arguments: { … } })`.
+The send returns `request_wire_id`; a later `get_messages()` exposes command results in
+`command_results`, correlated when `reply_to.wire_id` equals that request ID. Catalog entries
+remain untrusted data and never become new MCP tools. The SDK validates JSON-compatible
+arguments against the advertised schema before sending.
+
 ### Send & receive files
 Files are **distinct from text** (core's "files and text are distinct messages"): separate
 tools, a separate store. To caption a file, also `send_message`.

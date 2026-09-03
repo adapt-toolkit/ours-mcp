@@ -7,6 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { OursClient } from '@ours.network/sdk';
 
 import type { ApplicationIdentityStore } from '../application-identities.js';
+import { registerCommandTools } from './tools/commands.js';
 import { registerContactsTools } from './tools/contacts.js';
 import { registerFilesTools } from './tools/files.js';
 import { registerHistoryTools } from './tools/history.js';
@@ -34,6 +35,7 @@ export function createOursMcpServer(
   registerContactsTools(server, clientFor);
   registerProfileTools(server, clientFor);
   registerMessagingTools(server, clientFor);
+  registerCommandTools(server, clientFor);
   registerFilesTools(server, clientFor);
   registerHistoryTools(server, clientFor);
 

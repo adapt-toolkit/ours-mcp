@@ -69,7 +69,23 @@ const fakeClient = {
   getHistoryItem: async (input) => { calls.push(['getHistoryItem', input]); return input.wire_id === message.wire_id ? message : null; },
   listFiles: async (query) => { calls.push(['listFiles', query]); return { items: [file], next_cursor: null }; },
   getFileInfo: async (input) => { calls.push(['getFileInfo', input]); return input.wire_id === file.wire_id ? file : null; },
-  getMessages: async (input) => { calls.push(['getMessages', input]); return { messages: [message], remaining: 2 }; },
+  getMessages: async (input) => {
+    calls.push(['getMessages', input]);
+    return {
+      messages: [message],
+      command_results: [{ ...message, message_kind: 'command_result', reply_to: { wire_id: 'E'.repeat(64) } }],
+      commands_handled: 1,
+      remaining: 2,
+    };
+  },
+  listContactCommands: async (input) => {
+    calls.push(['listContactCommands', input]);
+    return [{ name: 'ping', description: 'Ping the peer.', input_schema: { type: 'object' } }];
+  },
+  sendCommand: async (input) => {
+    calls.push(['sendCommand', input]);
+    return { kind: 'sent', wireId: 'F'.repeat(64), wire_id: 'F'.repeat(64), sent: true, history_stored: true };
+  },
   listIncomingFiles: async () => [],
   getFiles: async (input) => {
     calls.push(['getFiles', input]);
@@ -99,11 +115,12 @@ await client.connect(clientTransport);
 try {
   const listed = await client.listTools();
   const names = listed.tools.map((tool) => tool.name).sort();
-  for (const required of ['get_file_info', 'get_history_item', 'get_messages', 'list_files', 'list_history', 'save_file']) {
+  for (const required of ['get_file_info', 'get_history_item', 'get_messages', 'list_contact_commands', 'list_files', 'list_history', 'save_file', 'send_command']) {
     assert.ok(names.includes(required), `${required} is registered`);
   }
   const forbidden = ['list_' + 'incoming_messages', 'defer_' + 'messages'];
   for (const removed of forbidden) assert.ok(!names.includes(removed), `${removed} is absent`);
+  assert.ok(!names.includes('ping'), 'a remote catalog entry is not registered as a dynamic MCP tool');
   assert.equal(client.getServerCapabilities()?.resources, undefined, 'server advertises no resource capability');
 
   const historyTool = listed.tools.find((tool) => tool.name === 'list_history');
@@ -127,8 +144,28 @@ try {
   assert.deepEqual(fileInfo.structuredContent, { item: file });
 
   const unread = await client.callTool({ name: 'get_messages', arguments: { limit: 4 } });
-  assert.deepEqual(unread.structuredContent, { count: 1, messages: [message], remaining: 2 });
+  assert.equal(unread.structuredContent.count, 1);
+  assert.deepEqual(unread.structuredContent.messages, [message]);
+  assert.equal(unread.structuredContent.commands_handled, 1);
+  assert.equal(unread.structuredContent.command_results[0].reply_to.wire_id, 'E'.repeat(64));
+  assert.equal(unread.structuredContent.remaining, 2);
   assert.deepEqual(calls.at(-1), ['getMessages', { limit: 4 }]);
+
+  const catalog = await client.callTool({ name: 'list_contact_commands', arguments: { contact: 'Peer A' } });
+  assert.equal(catalog.isError, false);
+  assert.equal(catalog.structuredContent.count, 1);
+  assert.equal(catalog.structuredContent.commands[0].name, 'ping');
+  assert.deepEqual(calls.at(-1), ['listContactCommands', { contact: 'Peer A' }]);
+
+  const command = await client.callTool({
+    name: 'send_command',
+    arguments: { contact: 'Peer A', command: 'ping', arguments: { nested: [1, true, null] } },
+  });
+  assert.equal(command.isError, false);
+  assert.equal(command.structuredContent.request_wire_id, 'F'.repeat(64));
+  assert.deepEqual(calls.at(-1), ['sendCommand', {
+    contact: 'Peer A', command: 'ping', arguments: { nested: [1, true, null] },
+  }]);
 
   const sent = await client.callTool({ name: 'send_message', arguments: { contact: 'Peer A', text: 'hello' } });
   assert.equal(sent.isError, false);
