@@ -1,6 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { validatePlatform, appServerArgs, remoteTuiArgs, launcherEnvironment, liveProcessEnvironments, sessionRegistrationFromNotification } from '../src/launcher.mjs';
+
+for (const [scenario, code] of [
+  ['fast', 0], ['nonzero', 7], ['signal', 128],
+  ['cleanup-error', 0], ['startup-error', 1], ['hung', 0],
+]) {
+  test(`launcher exits naturally after ${scenario} cleanup`, () => {
+    const child = spawnSync(process.execPath, [
+      fileURLToPath(new URL('../test-support/launcher-process.mjs', import.meta.url)), scenario,
+    ], { encoding: 'utf8', timeout: 5_000 });
+    assert.ifError(child.error);
+    assert.equal(child.signal, null, child.stderr);
+    assert.equal(child.status, code, child.stderr);
+    // Written at process exit, so a timer firing AFTER runLauncher resolves is visible.
+    const report = JSON.parse(child.stdout);
+    assert.equal(report.settled, true);
+    assert.equal(report.deadlines, 1);
+    assert.equal(report.referenced, true, 'hung cleanup must keep its deadline alive');
+    assert.equal(report.fired, scenario === 'hung');
+    assert.equal(report.firedAfterSettled, scenario === 'hung' ? false : null);
+    assert.equal(report.cleared, true, 'release the deadline on every race outcome');
+    assert.deepEqual(report.kills, scenario === 'hung' || scenario === 'cleanup-error'
+      ? [['end', 'SIGTERM'], ['app-server', 'SIGTERM']]
+      : scenario === 'signal' ? [['tui', 'SIGTERM'], ['app-server', 'SIGTERM']]
+      : [['app-server', 'SIGTERM']]);
+    if (scenario === 'startup-error') {
+      assert.equal(report.error, 'connect failed\nStandard mode remains available with: codex');
+    } else {
+      assert.equal(report.result, code);
+    }
+  });
+}
 
 test('supports Unix hosts but rejects native Windows v1', () => {
   assert.doesNotThrow(() => validatePlatform('linux'));
