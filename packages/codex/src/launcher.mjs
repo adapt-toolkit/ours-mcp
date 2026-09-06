@@ -107,10 +107,15 @@ export async function runLauncher({
       stdio: 'ignore',
     });
     end.once('error', () => {});
-    await Promise.race([
-      waitExit(end),
-      new Promise((resolve) => setTimeout(resolve, 30_000)),
-    ]).catch(() => {});
+    let cleanupTimeout;
+    try {
+      await Promise.race([
+        waitExit(end),
+        new Promise((resolve) => { cleanupTimeout = setTimeout(resolve, 30_000); }),
+      ]).catch(() => {});
+    } finally {
+      clearTimeout(cleanupTimeout);
+    }
     if (end.exitCode == null) end.kill('SIGTERM');
     if (tui && tui.exitCode == null) tui.kill('SIGTERM');
     if (appServer && appServer.exitCode == null) appServer.kill('SIGTERM');

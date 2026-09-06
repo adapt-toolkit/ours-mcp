@@ -1,6 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { validatePlatform, appServerArgs, remoteTuiArgs, launcherEnvironment, liveProcessEnvironments, sessionRegistrationFromNotification } from '../src/launcher.mjs';
+
+test('successful cleanup lets the launcher process exit without waiting for its deadline', () => {
+  const launcherUrl = new URL('../src/launcher.mjs', import.meta.url).href;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { EventEmitter } from 'node:events';
+    import { tmpdir } from 'node:os';
+    import { runLauncher } from ${JSON.stringify(launcherUrl)};
+    process.exitCode = await runLauncher({
+      argv: [], env: { XDG_RUNTIME_DIR: tmpdir() },
+      profileResolver: async () => ({ port: 1, baseUrl: 'http://127.0.0.1:1', configPath: '/nonexistent', codexArgs: [] }),
+      fetch: async () => ({ ok: true }),
+      connect: async () => ({ onServerRequest() {}, onNotification() {}, close() {} }),
+      spawn: (_command, args) => {
+        const child = new EventEmitter();
+        child.exitCode = null;
+        child.kill = () => { child.exitCode = 0; child.emit('exit', 0, null); };
+        if (args[0] !== 'app-server') setImmediate(() => child.kill());
+        return child;
+      },
+    });
+    console.log('launcher returned');
+  `], { encoding: 'utf8', timeout: 5_000 });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'launcher returned');
+});
 
 test('supports Unix hosts but rejects native Windows v1', () => {
   assert.doesNotThrow(() => validatePlatform('linux'));
