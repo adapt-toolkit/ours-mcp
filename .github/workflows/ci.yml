@@ -2,9 +2,8 @@ name: CI
 
 # Gates → Conventional-Commits LOCKSTEP version bump (one suite version for every
 # @ours.network package + every native plugin manifest) → publish
-# @ours.network/mcp then the plugins (strict order: each plugin's exact core
-# dependency is re-pinned to the same suite version before anything publishes —
-# see scripts/bump-versions.sh PIN-SYNC).
+# @ours.network/mcp then the standalone plugins and installer.
+# Plugin versions stay aligned; their SDK dependencies are preserved by the bump.
 #
 # Prerequisites (one-time, GitHub repo settings → secrets):
 #   - NPM_TOKEN: npm automation token with publish rights to the
@@ -41,6 +40,8 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - name: Verify release versioning preserves package dependencies
+        run: node --test .github/workflows/scripts/bump-versions.test.mjs
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
@@ -52,7 +53,7 @@ jobs:
       - run: npm test
 
   # Bumps every managed workspace package and native plugin manifest in one
-  # [skip ci] commit, pins plugin core dependencies, and pushes
+  # [skip ci] commit, preserves standalone plugin dependencies, and pushes
   # back to main via a GitHub App token. Gated on gates going green.
   version-bump:
     needs: gates
@@ -115,7 +116,9 @@ jobs:
           codex_version="$(jq -r .version packages/codex/package.json)"
           test "$codex_version" = "$core_version"
           test "$(jq -r .version packages/codex/.codex-plugin/plugin.json)" = "$codex_version"
-          test "$(jq -r '.dependencies["@ours.network/mcp"]' packages/codex/package.json)" = "$core_version"
+          for p in codex claude-code; do
+            jq -e '.dependencies | has("@ours.network/mcp") | not' "packages/$p/package.json"
+          done
           npm pack --workspace @ours.network/codex --dry-run --json > /tmp/ours-codex-pack.json
           node - <<'NODE'
           const pack = require('/tmp/ours-codex-pack.json')[0];

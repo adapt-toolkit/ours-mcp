@@ -9,9 +9,9 @@
 #
 # Managed packages (publish order = dependency order):
 #   @ours.network/mcp        packages/core         (no internal deps)
-#   @ours.network/claude-code packages/claude-code (pins @ours.network/mcp)
+#   @ours.network/claude-code packages/claude-code (standalone SDK consumer)
 #   @ours.network/hermes     packages/hermes       (no internal deps)
-#   @ours.network/codex      packages/codex        (pins @ours.network/mcp)
+#   @ours.network/codex      packages/codex        (standalone SDK consumer)
 #   @ours.network/install    packages/installer    (self-contained — no internal deps)
 # (Claude Code and Codex plugin manifests are not npm packages, but their user-visible versions
 # stay at the suite version.)
@@ -45,9 +45,9 @@ MODE="${OURS_RELEASE_MODE:-stable}"
 # name|json-path|pin-dep (pin-dep empty = none). Order matters: publish/bump in this order.
 MANAGED=(
   "@ours.network/mcp|packages/core/package.json|"
-  "@ours.network/claude-code|packages/claude-code/package.json|@ours.network/mcp"
+  "@ours.network/claude-code|packages/claude-code/package.json|"
   "@ours.network/hermes|packages/hermes/package.json|"
-  "@ours.network/codex|packages/codex/package.json|@ours.network/mcp"
+  "@ours.network/codex|packages/codex/package.json|"
   "@ours.network/install|packages/installer/package.json|"
 )
 
