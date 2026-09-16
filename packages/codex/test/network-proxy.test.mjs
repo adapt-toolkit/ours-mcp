@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -404,4 +404,32 @@ test('SessionEnd releases the exact native owner through the explicit host recor
     endImpl: async (...args) => calls.push(args),
   });
   assert.deepEqual(calls, [[profile, 'thread-a', '/host/private']]);
+});
+
+
+test('failed network host save returns a tool error without creating a destination', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ours-network-save-failure-'));
+  const destination = join(root, 'must-not-exist');
+  const output = [];
+  let closed = false;
+  const bridge = createNetworkBridge({
+    send: async (frame) => output.push(frame),
+    sessionFactory: async () => ({
+      fileClient: { openFile: async () => { throw new Error('file unavailable'); } },
+      initializeResult: {}, notification: async () => {}, close: async () => { closed = true; },
+      request: async () => ({ content: [], isError: false,
+        structuredContent: { oursHostSave: { wire_id: 'missing', dest_path: destination } } }),
+    }),
+  });
+  try {
+    await bridge.handle({ jsonrpc: '2.0', id: 'failed-save', method: 'tools/call',
+      params: { name: 'save_file', arguments: { wire_id: 'missing', dest_path: destination }, _meta: { threadId: 'thread-save' } } });
+    assert.equal(output.length, 1);
+    assert.equal(output[0].id, 'failed-save');
+    assert.equal(output[0].result.isError, true);
+    assert.match(output[0].result.content[0].text, /save_file failed: file unavailable/);
+    assert.equal(existsSync(destination), false);
+    await bridge.close();
+    assert.equal(closed, true);
+  } finally { await bridge.close(); rmSync(root, { recursive: true, force: true }); }
 });

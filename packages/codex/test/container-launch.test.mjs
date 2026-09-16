@@ -1,59 +1,12 @@
+// Legacy Compose tuples cannot select the network proxy. Network transport,
+// streamed files, watch ownership and SessionEnd are covered by network-* tests.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-
-for (const plugin of ['codex', 'claude-code']) {
-  test(`${plugin} routes native proxy and SessionEnd bytes exclusively through selected Docker`, () => {
-    const dir = mkdtempSync(join(tmpdir(), 'ours-container-launch-'));
-    try {
-      const profile = join(dir, 'profile.json');
-      const record = join(dir, 'invocation.json');
-      writeFileSync(profile, JSON.stringify({ endpoint: 'http://localhost:3050', expectedInstanceId: 'test-daemon', credentialPath: '/private/token', composeFile: '/private/compose file.yml', composeProject: 'selected' }));
-      writeFileSync(join(dir, 'docker'), `#!${process.execPath}\nimport fs from 'node:fs'; fs.writeFileSync(process.env.RECORD, JSON.stringify({args:process.argv.slice(2), id:process.env.OURS_DAEMON_ID})); process.stdin.pipe(process.stdout);`);
-      chmodSync(join(dir, 'docker'), 0o755);
-      const env = { ...process.env, PATH: dir, RECORD: record, OURS_CONFIG: profile, CLAUDE_CODE_SESSION_ID: 'session=value', OURS_BIND_IDENTITY: 'alice', OURS_DAEMON_ID: 'wrong' };
-      for (const command of ['proxy', 'session-end']) {
-        const input = Buffer.from('{ "session_id": "native" }\n\u0000\u00ff');
-        const result = spawnSync(process.execPath, [fileURLToPath(new URL(`../../${plugin}/bin/proxy.mjs`, import.meta.url)), ...(command === 'proxy' ? [] : command === 'watch' ? ['watch', 'alice'] : [command])], { env, input });
-        assert.equal(result.status, 0, result.stderr.toString());
-        assert.deepEqual(result.stdout, input);
-        assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), { args: ['compose', '-f', '/private/compose file.yml', '-p', 'selected', 'exec', '-T', '-e', 'CLAUDE_CODE_SESSION_ID=session=value', '-e', 'OURS_BIND_IDENTITY=alice', 'daemon', 'node', '/opt/ours/node_modules/@ours.network/mcp/dist/container.js', 'test-daemon', command, ...(command === 'watch' ? ['alice'] : [])], id: 'test-daemon' });
-      }
-      writeFileSync(join(dir, 'docker'), `#!${process.execPath}\nprocess.exit(47);`);
-      const failure = spawnSync(process.execPath, [fileURLToPath(new URL(`../../${plugin}/bin/proxy.mjs`, import.meta.url))], { env });
-      assert.equal(failure.status, 47);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
-  });
-}
-
-test('Claude container hooks surface selected remote unread and preserve local workspace pins', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ours-container-hook-'));
-  try {
-    const profile = join(dir, 'profile.json');
-    writeFileSync(profile, JSON.stringify({ expectedInstanceId: 'daemon', composeFile: '/compose.yml' }));
-    writeFileSync(join(dir, '.ours-identity'), JSON.stringify({ identity: 'remote' }));
-    writeFileSync(join(dir, 'docker'), `#!${process.execPath}\nconsole.log(JSON.stringify({identities:['remote'], unread:{identities:[{name:'remote',count:2,recent:[]}]},bindings:process.env.TEST_BOUND ? ['remote'] : []}));`);
-    chmodSync(join(dir, 'docker'), 0o755);
-    const env = { ...process.env, PATH: dir, OURS_CONFIG: profile };
-    const runner = fileURLToPath(new URL('../../claude-code/src/hooks/runner.ts', import.meta.url));
-    const run = (kind, extra = {}) => spawnSync(process.execPath, [runner, kind], { env: { ...env, ...extra }, input: JSON.stringify({ cwd: dir }), encoding: 'utf8' });
-    const start = run('session-start');
-    assert.equal(start.status, 0, start.stderr);
-    const context = JSON.parse(start.stdout).hookSpecificOutput?.additionalContext || '';
-    assert.match(context, /remote — 2 unread/);
-    assert.match(context, /choose_identity/);
-    assert.match(context, /bin\/proxy\.mjs.*watch/);
-    assert.doesNotMatch(context, /ours-mcp watch/);
-    assert.doesNotMatch(context, /does not exist/);
-    assert.deepEqual(JSON.parse(run('user-prompt-submit', { TEST_BOUND: '1' }).stdout), { continue: true });
-    writeFileSync(join(dir, 'docker'), `#!${process.execPath}\nprocess.exit(1);`);
-    assert.deepEqual(JSON.parse(run('session-start').stdout), { continue: true });
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
 
 for (const plugin of ['codex', 'claude-code']) {
   test(`${plugin} container selection validates profile and isolates Compose UUID from exec environment`, async () => {
@@ -79,41 +32,23 @@ for (const plugin of ['codex', 'claude-code']) {
 }
 
 for (const plugin of ['codex', 'claude-code']) {
-  test(`${plugin} unreadable or corrupt explicit profile cannot select a host MCP`, async () => {
-    const { containerInvocation } = await import(`../../${plugin}/bin/container-launch.mjs`);
-    const dir = mkdtempSync(join(tmpdir(), 'ours-container-corrupt-'));
+  for (const [scenario, contents, mode, reason] of [
+    ['partial legacy tuple', JSON.stringify({ composeFile: '/compose.yml', expectedInstanceId: 'legacy' }), 0o600, /complete host profile/],
+    ['public profile', JSON.stringify({ endpoint: 'http://127.0.0.1:1', expectedInstanceId: '00000000-0000-0000-0000-000000000001', credentialPath: '/private/token' }), 0o644, /private permissions/],
+    ['corrupt profile', '{"composeFile":', 0o600, /not valid JSON/],
+  ]) test(`${plugin} refuses ${scenario} without invoking Docker or falling back`, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ours-legacy-profile-refusal-'));
     try {
       const profile = join(dir, 'profile.json');
-      assert.throws(() => containerInvocation('proxy', [], { OURS_CONFIG: profile }), /profile/);
-      writeFileSync(profile, '{"composeFile":');
-      assert.throws(() => containerInvocation('proxy', [], { OURS_CONFIG: profile }), /profile/);
-      const result = spawnSync(process.execPath, [fileURLToPath(new URL(`../../${plugin}/bin/proxy.mjs`, import.meta.url))], { env: { ...process.env, PATH: dir, OURS_CONFIG: profile }, encoding: 'utf8' });
-      assert.equal(result.status, 1);
-      assert.match(result.stderr, /cannot read OURS_CONFIG profile/);
-      assert.doesNotMatch(result.stderr, /cannot resolve|spawn ours-mcp/);
+      const marker = join(dir, 'launched');
+      writeFileSync(profile, contents, { mode });
+      for (const command of ['docker', 'ours-mcp']) writeFileSync(join(dir, command), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unexpected');`, { mode: 0o700 });
+      const env = { ...process.env, HOME: dir, PATH: dir, OURS_CONFIG: profile };
+      for (const key of ['OURS_API_TOKEN', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_DAEMON_ID']) delete env[key];
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL(`../../${plugin}/bin/proxy.mjs`, import.meta.url))], { env, encoding: 'utf8', timeout: 5000 });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, reason);
+      assert.equal(existsSync(marker), false);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 }
-
-
-test('Claude container watch keeps stdin open until the shim is stopped', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ours-claude-watch-'));
-  let child;
-  try {
-    const profile = join(dir, 'profile.json');
-    const ended = join(dir, 'ended');
-    writeFileSync(profile, JSON.stringify({ composeFile: '/compose.yml', expectedInstanceId: 'selected' }));
-    writeFileSync(join(dir, 'docker'), `#!${process.execPath}
-if (process.argv.slice(-3).join(',') !== 'selected,watch,alice') process.exit(5);
-import fs from 'node:fs'; process.on('SIGTERM', () => {}); process.stdin.resume(); process.stdin.on('end', () => { fs.writeFileSync(process.env.ENDED, 'EOF'); process.exit(0); }); console.log('ready');`);
-    chmodSync(join(dir, 'docker'), 0o755);
-    child = spawn(process.execPath, [fileURLToPath(new URL('../../claude-code/bin/proxy.mjs', import.meta.url)), 'watch', 'alice'], { env: { ...process.env, PATH: dir, OURS_CONFIG: profile, ENDED: ended }, stdio: ['ignore', 'pipe', 'pipe'] });
-    const exited = new Promise((resolve) => child.once('exit', resolve));
-    await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('error', reject); child.once('exit', (code) => reject(new Error(`watch exited ${code}`))); });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(existsSync(ended), false, 'outer stdin EOF must not stop the watch');
-    child.kill('SIGTERM');
-    await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('watch stop timed out')), 3000).unref())]);
-    assert.equal(readFileSync(ended, 'utf8'), 'EOF');
-  } finally { child?.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); }
-});
