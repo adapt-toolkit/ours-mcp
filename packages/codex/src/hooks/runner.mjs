@@ -1,10 +1,14 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sendControlCommand } from '../control-server.mjs';
 import { resolveDaemonProfile } from '../profile.mjs';
+import { createHostSessionFactory } from '../network-proxy.mjs';
+import { attachOursClient } from '@ours.network/sdk';
+import { hostProfileFromEnv } from '../../../core/src/host-client/index.ts';
 
 async function defaultFindPin(cwd) {
   let dir = resolve(cwd || process.cwd());
@@ -31,11 +35,13 @@ const safeUnread = (value) => (Array.isArray(value?.identities) ? value.identiti
   return [{ name: entry.name, count, files, recent }];
 });
 
-async function applicationIdentityNames(env, stateDir) {
+async function applicationIdentityNames(env, selection) {
   const path = env.OURS_MCP_CONFIG || join(homedir(), '.ours-mcp', 'config.json');
   const value = JSON.parse(await readFile(path, 'utf8'));
   if (value?.version !== 1 || !value.daemons || typeof value.daemons !== 'object') return new Set();
-  const identities = value.daemons[resolve(stateDir)]?.identities;
+  const identities = selection.instanceId
+    ? value.instances?.[selection.instanceId]?.identities
+    : value.daemons[resolve(selection.stateDir)]?.identities;
   return new Set(Array.isArray(identities) ? identities.filter((name) => typeof name === 'string') : []);
 }
 
@@ -54,7 +60,16 @@ function renderContext(unread, pin) {
   return lines.join('\n');
 }
 
-export async function handleHook(payload, { env = process.env, fetch: fetchImpl = globalThis.fetch, send = sendControlCommand, findPin = defaultFindPin } = {}) {
+function applicationIdentitiesFromResource(value) {
+  const text = value?.contents?.find((item) => item?.uri === 'ours://application-identities')?.text;
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed?.identities) || parsed.identities.some((name) => typeof name !== 'string')) {
+    throw new Error('invalid application identity resource');
+  }
+  return new Set(parsed.identities);
+}
+
+export async function handleHook(payload, { env = process.env, fetch: fetchImpl = globalThis.fetch, send = sendControlCommand, findPin = defaultFindPin, profileResolver = resolveDaemonProfile, clientFactory = attachOursClient, networkSessionFactory = createHostSessionFactory } = {}) {
   try {
     const event = payload?.hook_event_name;
     const socket = env.OURS_CODEX_CONTROL_SOCKET;
@@ -75,21 +90,53 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
     let port = env.OURS_PORT || '3050';
     let selectedStateDir = resolve(env.OURS_STATE_DIR || join(homedir(), '.ours'));
     let selectedToken = env.OURS_API_TOKEN || '';
+    let hostProfile;
+    try { hostProfile = hostProfileFromEnv(env); }
+    catch { return { continue: true }; }
+    if (hostProfile) {
+      const nativeSessionId = payload.session_id;
+      if (typeof nativeSessionId !== 'string' || !nativeSessionId) return { continue: true };
+      const appPath = env.OURS_MCP_CONFIG || join(env.HOME || homedir(), '.ours-mcp', 'config.json');
+      let session;
+      try {
+        const factory = networkSessionFactory({ profile: hostProfile, hostRecordRoot: dirname(appPath), send: async () => {} });
+        session = await factory(nativeSessionId);
+        const resource = await session.request({ method: 'resources/read', params: { uri: 'ours://application-identities' } });
+        const visible = applicationIdentitiesFromResource(resource);
+        const unread = safeUnread(await session.fileClient.unread()).filter((entry) => visible.has(entry.name));
+        const pin = await findPin(payload.cwd || process.cwd());
+        const context = renderContext(unread, pin);
+        return context ? { continue: true, hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { continue: true };
+      } finally { await session?.close(); }
+    }
     // Standard Codex does not pass through ours-codex's resolved environment.
     // Resolve the same coherent SDK selection here so SessionStart and
     // UserPromptSubmit inspect the same daemon as the stdio proxy.
     try {
-      const selected = await resolveDaemonProfile({ env, fetch: fetchImpl });
+      const selected = await profileResolver({ env, fetch: fetchImpl });
+      if (selected.profile) {
+        let client;
+        try {
+          client = await clientFactory({ ...selected.profile, sessionMode: 'external', leaseToken: `codex-hook-${process.pid}`, env: {} });
+          const visible = await applicationIdentityNames(env, { instanceId: selected.profile.expectedInstanceId });
+          const unread = safeUnread(await client.unread()).filter((entry) => visible.has(entry.name));
+          const pin = await findPin(payload.cwd || process.cwd());
+          const context = renderContext(unread, pin);
+          return context ? { continue: true, hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { continue: true };
+        } finally { await client?.close(); }
+      }
       port = String(selected.port);
       selectedToken = selected.token || '';
       selectedStateDir = resolve(selected.stateDir);
-    } catch { /* proxy/launcher owns diagnostics; hooks emit a benign no-op */ }
+    } catch {
+      /* proxy/launcher owns legacy diagnostics; hooks emit a benign no-op */
+    }
     const headers = selectedToken ? { 'x-ours-api-token': selectedToken } : {};
     let unread = [];
     try {
       const response = await fetchImpl(`http://127.0.0.1:${port}/unread`, { headers, signal: AbortSignal.timeout(1500) });
       if (response.ok) {
-        const visible = await applicationIdentityNames(env, selectedStateDir);
+        const visible = await applicationIdentityNames(env, { stateDir: selectedStateDir });
         unread = safeUnread(await response.json()).filter((entry) => visible.has(entry.name));
       }
     } catch { /* daemon diagnostics belong to launcher/proxy */ }
@@ -102,7 +149,7 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
 
 async function main() {
   let payload = {};
-  try { payload = JSON.parse(await readFile(0, 'utf8')); } catch { /* noop */ }
+  try { payload = JSON.parse(readFileSync(0, 'utf8')); } catch { /* noop */ }
   process.stdout.write(JSON.stringify(await handleHook(payload)));
 }
 

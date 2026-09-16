@@ -54,7 +54,11 @@ selected daemon is absent or incompatible, it exits with an error and leaves sta
 ## Selecting a daemon
 
 Multiple daemons may run on one host when each uses a distinct port and state directory.
-Selection precedence is:
+For network clients, explicit `OURS_CONFIG` takes precedence over the managed
+`~/.ours-client/profile.json`. When the managed file exists, ordinary `ours-codex`
+launches need no environment override. Invalid or unreadable managed profiles
+fail before selecting another daemon. With neither selection, the existing
+local-daemon precedence remains:
 
 1. `ours-codex --ours-port <port>`
 2. `OURS_PORT`
@@ -62,11 +66,27 @@ Selection precedence is:
 4. `~/.ours/config.json`
 5. port `3050`
 
-All MCP, hooks, unread, and watcher calls inherit the same selected profile. Example:
+All MCP, hooks, unread, and watcher calls inherit the same selected profile. Host-profile
+traffic goes directly to the selected daemon's authenticated `/mcp` endpoint through the
+Codex package; it does not require Docker or an installed `@ours.network/mcp` package.
+Example:
 
 ```sh
 OURS_CONFIG="$HOME/.ours/testing.json" ours-codex --ours-port 4050
 ```
+
+An operator-provisioned host profile uses the complete
+`endpoint`/`expectedInstanceId`/`credentialPath` tuple in the selected file. In this mode,
+do not combine the profile with `--ours-port`, `OURS_PORT`, `OURS_API_TOKEN`, or
+`OURS_STATE_DIR`. Codex forwards the actual selected path as `OURS_CONFIG` and the optional `OURS_MCP_CONFIG` host
+record location; the SDK verifies the expected
+daemon instance and rereads `credentialPath` for every request, so an operator token
+update takes effect in the running hook and live monitor without a restart or token
+snapshot in child process environments.
+
+Native ownership is keyed by Codex's actual thread ID. A normal live TUI exit forwards
+that ID through the same `SessionEnd` input used by the hook. If Codex has not produced
+a logical thread ID, there is no native owner for the launcher to release.
 
 ## Hooks and consent
 
@@ -77,9 +97,17 @@ lifecycle directly, while the hooks add standard-mode context and defensive stat
 - `SessionStart` surfaces body-free unread metadata and an advisory `.ours-identity` pin.
 - `UserPromptSubmit` can re-surface unresolved unread/pin context.
 - `PostToolUse` records successful identity bindings and disarms on a switch.
-- `SessionEnd` releases the session lease and waits for all session-owned temporary
-  roles to send best-effort removal notices and delete local state. Live mode also
-  invokes this cleanup directly when its TUI exits, so it does not depend on hook trust.
+- `SessionEnd`, when delivered, reads the native `session_id`, durably captures the
+  exact owner, releases its lease, and waits for all owner-scoped temporary roles to
+  send best-effort removal notices and delete local state. Live mode also invokes
+  this cleanup directly when its TUI exits.
+
+The ours MCP owner is allocated lazily from Codex's tool-call thread metadata, so
+`SessionStart` is not required for ownership and may be disabled. Stdio/MCP recycle
+does not end that owner; a later call in the same unended thread recovers it. If
+`SessionEnd` is disabled or never delivered, ours does not infer death from EOF,
+PID, or a timeout and does not claim automatic cleanup. The owner and protected
+resources remain available for ordinary resume until a terminal hook is delivered.
 
 Codex requires review and trust of the exact hook definitions before running them.
 Installation does not bypass hook trust, and live monitoring remains available when the

@@ -37,3 +37,28 @@ test('authentication loss disarms instead of retrying forever', async () => {
   await assert.rejects(() => watcher.pollOnce({ identity: 'Alice', threadId: 'thr', cursor: '1' }), /authentication/i);
   assert.equal(watcher.authFailed, true);
 });
+
+test('explicit profile reads notifications and unread through one closeable SDK attachment', async () => {
+  const calls = [];
+  let closed = false;
+  const profile = { endpoint: 'http://127.0.0.1:4050', expectedInstanceId: '12345678-1234-1234-1234-123456789abc', credentialPath: '/host/token' };
+  const watcher = new MonitorWatcher({
+    profile,
+    clientFactory: async (options) => {
+      calls.push(['attach', options]);
+      return {
+        readNotificationPage: async (identity, options) => { calls.push(['page', identity, options.since]); return { cursor: 7, events: [] }; },
+        unread: async () => { calls.push(['unread']); return { identities: [] }; },
+        close: async () => { closed = true; },
+      };
+    },
+    appServer: { startTurn: async () => assert.fail('must not wake') }, stateStore: { save: async () => {} },
+  });
+  const next = await watcher.pollOnce({ identity: 'Alice', threadId: 'thr', cursor: null });
+  assert.equal(next.cursor, '7');
+  assert.deepEqual(calls.map((entry) => entry[0]), ['attach', 'page', 'unread']);
+  assert.equal(calls[0][1].credentialPath, '/host/token');
+  assert.equal(calls[1][2], 'tip');
+  await watcher.stop();
+  assert.equal(closed, true);
+});

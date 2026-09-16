@@ -8,7 +8,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
-import { daemonEnv, isWholeDaemonEnv, DAEMON_ENV_KEYS, realEffects } from '../lib/effects.mjs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
+import { daemonEnv, isWholeDaemonEnv, DAEMON_ENV_KEYS, realEffects, __testables } from '../lib/effects.mjs';
 
 const TG = resolve('/home/me', '.ours-tg');
 
@@ -86,4 +89,53 @@ test('OURS_NPM selects the npm executable used by installer mutations', async ()
   const effects = realEffects({ env: { ...process.env, OURS_NPM: process.execPath }, out: () => {} });
   const result = await effects.run('npm', ['-e', 'process.stdout.write("custom-npm")']);
   assert.equal(result.stdout, 'custom-npm');
+});
+
+test('a private profile verifies unauthenticated selection before authenticated version without exposing the credential', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ours-installer-profile-'));
+  const credentialPath = join(root, 'credential');
+  const configPath = join(root, 'profile.json');
+  const token = 'test-only-private-token';
+  const instanceId = '6d1e0b1a-cba2-4d33-9389-7d1787ea325f';
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push({ url: request.url, token: request.headers['x-ours-api-token'] ?? null });
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/selection') response.end(JSON.stringify({ schema: 1, instanceId, capabilities: ['external-sessions-v1'] }));
+    else if (request.url === '/version' && request.headers['x-ours-api-token'] === token) response.end(JSON.stringify({ instanceId, version: 'test' }));
+    else { response.statusCode = 401; response.end(JSON.stringify({ error: 'unauthorized' })); }
+  });
+  await new Promise((accept) => server.listen(0, '127.0.0.1', accept));
+  try {
+    const address = server.address();
+    writeFileSync(credentialPath, `${token}\n`, { mode: 0o600 });
+    writeFileSync(configPath, JSON.stringify({ endpoint: `http://127.0.0.1:${address.port}`, expectedInstanceId: instanceId, credentialPath }), { mode: 0o600 });
+    const result = await __testables.verifyHostProfile(configPath);
+    assert.equal(result.profile.expectedInstanceId, instanceId);
+    assert.deepEqual(requests, [
+      { url: '/selection', token: null },
+      { url: '/version', token },
+    ]);
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(token));
+  } finally {
+    await new Promise((accept) => server.close(accept));
+  }
+});
+
+test('incompatible selection metadata refuses before the credential file is read', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ours-installer-selection-'));
+  const configPath = join(root, 'profile.json');
+  const instanceId = '6d1e0b1a-cba2-4d33-9389-7d1787ea325f';
+  const server = createServer((request, response) => {
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ instanceId }));
+  });
+  await new Promise((accept) => server.listen(0, '127.0.0.1', accept));
+  try {
+    const address = server.address();
+    writeFileSync(configPath, JSON.stringify({ endpoint: `http://127.0.0.1:${address.port}`, expectedInstanceId: instanceId, credentialPath: join(root, 'missing-credential') }), { mode: 0o600 });
+    await assert.rejects(__testables.verifyHostProfile(configPath), /selection metadata.*incompatible/i);
+  } finally {
+    await new Promise((accept) => server.close(accept));
+  }
 });

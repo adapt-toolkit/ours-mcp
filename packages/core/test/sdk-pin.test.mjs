@@ -4,8 +4,8 @@ import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-assert.equal(pkg.dependencies['@ours.network/sdk'], '3.7.0', 'SDK must stay exactly pinned');
-assert.equal(pkg.dependencies['@ours.network/cli'], '2.2.0', 'CLI must stay exactly pinned');
+assert.equal(pkg.dependencies['@ours.network/sdk'], '3.8.0', 'SDK must stay exactly pinned');
+assert.equal(pkg.dependencies['@ours.network/cli'], '2.8.0', 'CLI must stay exactly pinned');
 
 const require = createRequire(import.meta.url);
 function packageRoot(entry, expectedName) {
@@ -22,18 +22,18 @@ function packageRoot(entry, expectedName) {
 }
 
 const sdk = packageRoot('@ours.network/sdk', '@ours.network/sdk');
-assert.equal(sdk.value.version, '3.7.0');
+assert.equal(sdk.value.version, '3.8.0');
 assert.equal(lstatSync(sdk.current).isSymbolicLink(), false, 'SDK must be a registry artifact, not a link');
 
 const cliPath = require.resolve('@ours.network/cli/package.json');
 const cli = JSON.parse(readFileSync(cliPath, 'utf8'));
-assert.equal(cli.version, '2.2.0');
+assert.equal(cli.version, '2.8.0');
 assert.equal(lstatSync(dirname(cliPath)).isSymbolicLink(), false, 'CLI must be a registry artifact, not a link');
 
 const lock = JSON.parse(readFileSync(new URL('../../../package-lock.json', import.meta.url), 'utf8'));
 for (const [path, version] of [
-  ['node_modules/@ours.network/sdk', '3.7.0'],
-  ['node_modules/@ours.network/cli', '2.2.0'],
+  ['node_modules/@ours.network/sdk', '3.8.0'],
+  ['node_modules/@ours.network/cli', '2.8.0'],
 ]) {
   const entry = lock.packages[path];
   assert.equal(entry.version, version);
@@ -48,4 +48,4 @@ for (const file of ['src', 'build.mjs']) {
   assert.doesNotMatch(text, /@ours\.network\/sdk\/daemon/);
 }
 
-console.log('sdk-pin: SDK 3.7.0 and CLI 2.2.0 registry pins verified');
+console.log('sdk-pin: SDK 3.8.0 and CLI 2.8.0 registry pins verified');

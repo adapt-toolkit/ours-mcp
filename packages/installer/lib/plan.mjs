@@ -4,7 +4,8 @@
 // injects file reads, and every function returns a PLAN the caller renders and
 // executes. Nothing here writes, spawns, or runs systemctl.
 
-import { join, resolve, basename } from 'node:path';
+import { join, resolve, basename, dirname } from 'node:path';
+import { valid, validRange, satisfies } from 'semver';
 
 export const CLI_UNIT_MARKER = '# Managed by @ours.network/cli';
 export const SYSTEMD_USER_DIR = ['.config', 'systemd', 'user'];
@@ -274,4 +275,196 @@ export function planDaemonSteps(target, { cliVersionChanged = false, cliStartedI
   }
   steps.push({ id: 'service', label: 'install the boot service', command: serviceInstallCommand({ stateDir: dir }) });
   return steps;
+}
+
+export const SERVER_PACKAGES = ['sdk', 'cli', 'mcp', 'tg-connector', 'cowork', 'messenger-server'].map(n => `@ours.network/${n}`);
+export const SERVER_DEPENDENCIES = {
+  daemon: [], telegram: ['daemon'], cowork: ['daemon'], messenger: ['daemon'],
+};
+export const SERVER_SERVICES = Object.keys(SERVER_DEPENDENCIES);
+
+export function maintenanceServices(record, domain) {
+  const selected = new Set(domain === 'server' ? record.services : [domain]);
+  for (const service of SERVER_SERVICES) {
+    if (SERVER_DEPENDENCIES[service].some(provider => selected.has(provider))) selected.add(service);
+  }
+  return record.services.filter(service => selected.has(service));
+}
+
+/** Validate exact supplied selections, without rewriting the source authority. */
+export function selectSourcePackages(manifest, role, clients = []) {
+  const names = role === 'server' ? SERVER_PACKAGES : clients.map(n => `@ours.network/${n}`);
+  const result = {};
+  for (const name of names) {
+    const selected = manifest?.packages?.[name];
+    if (selected?.type === 'npm' && Object.keys(selected).length === 2 && valid(selected.version) !== null) {
+      result[name] = selected;
+    } else if (selected && Object.keys(selected).length === 1 && typeof selected.source === 'string') {
+      const source = manifest.sources?.[selected.source];
+      if (source?.type !== 'git' || typeof source.url !== 'string' || !source.url || !/^[0-9a-f]{40}$/.test(source.commit)) throw new Error(`Invalid exact Git selection for ${name}`);
+      result[name] = selected;
+    } else throw new Error(`Missing or non-exact source selection for ${name}`);
+  }
+  return result;
+}
+
+/** Resolve a packaged compatibility policy into a role-filtered exact selection. */
+export async function resolveSourcePolicy(manifest, role, clients = [], resolveNpm) {
+  const names = role === 'server' ? SERVER_PACKAGES : clients.map(name => `@ours.network/${name}`);
+  const packages = {};
+  const sourceNames = new Set();
+  for (const name of names) {
+    const selected = manifest?.packages?.[name];
+    if (selected?.type === 'npm' && Object.keys(selected).length === 2 && typeof selected.version === 'string') {
+      if (valid(selected.version) !== null) packages[name] = selected;
+      else {
+        if (validRange(selected.version) === null) throw new Error(`Invalid npm source policy for ${name}`);
+        if (typeof resolveNpm !== 'function') throw new Error(`Cannot resolve npm source policy for ${name}`);
+        const version = await resolveNpm(name, selected.version);
+        if (valid(version) === null || !satisfies(version, selected.version)) throw new Error(`Resolved ${name}@${version} outside allowed range ${selected.version}`);
+        packages[name] = { type: 'npm', version };
+      }
+    } else if (selected && Object.keys(selected).length === 1 && typeof selected.source === 'string') {
+      const source = manifest.sources?.[selected.source];
+      if (source?.type !== 'git' || typeof source.url !== 'string' || !source.url || !/^[0-9a-f]{40}$/.test(source.commit)) throw new Error(`Invalid exact Git selection for ${name}`);
+      packages[name] = selected;
+      sourceNames.add(selected.source);
+    } else throw new Error(`Missing source policy for ${name}`);
+  }
+  const sources = Object.fromEntries([...sourceNames].map(name => [name, manifest.sources[name]]));
+  const exact = { ...(sourceNames.size ? { sources } : {}), packages };
+  selectSourcePackages(exact, role, clients);
+  return exact;
+}
+
+/** Installer-owned physical layout; package defaults remain unchanged. */
+export function installationPaths(record) {
+  const root = record.root;
+  const shared = record.schema === 2;
+  const state = shared ? join(root, 'storage', 'state') : root;
+  const daemon = join(state, shared ? 'daemon' : 'data');
+  const credentials = Object.fromEntries(['telegram', 'cowork', 'messenger'].map(service => [
+    service, shared ? join(state, 'credentials', service, 'daemon-token') : join(root, 'credentials', `${service}-token`),
+  ]));
+  return {
+    state, daemon, mcp: join(state, 'mcp'), telegram: join(state, 'telegram'),
+    cowork: join(state, 'cowork'), messenger: join(state, 'messenger'), credentials,
+    config: shared ? join(daemon, 'config.json') : join(root, 'config.json'),
+  };
+}
+
+export function validateInstallation(record, root) {
+  if (!record || ![1, 2].includes(record.schema) || !['docker', 'packages'].includes(record.mode)
+    || record.root !== root || record.configPath !== installationPaths(record).config
+    || record.sourcesPath !== join(root, 'sources.json') || record.workDir !== join(root, 'runtime')
+    || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(record.instanceId ?? '')
+    || !/^ours-[a-z0-9]+$/.test(record.project ?? '')
+    || (record.sourcePolicyHash !== undefined && !/^[0-9a-f]{64}$/.test(record.sourcePolicyHash))
+    || !Array.isArray(record.services) || record.services[0] !== 'daemon' || new Set(record.services).size !== record.services.length || record.services.some(s => !SERVER_SERVICES.includes(s))) {
+    throw new Error('Invalid or conflicting installation selection');
+  }
+  if (record.layoutConversion !== undefined) {
+    // DEPRECATED (introduced in 2.0): legacy managed-layout conversion only.
+    // Removal target: 3.0, after supported installs convert and upgrade inputs
+    // no longer need this reader. Retain backups and supported archive import.
+    const conversion = record.layoutConversion;
+    const source = conversion?.sourceRecord;
+    if (conversion?.version !== 1 || source?.schema !== 1 || source.layoutConversion !== undefined
+      || typeof conversion.backupPath !== 'string'
+      || dirname(conversion.backupPath) !== join(root, 'storage', 'backups')
+      || resolve(conversion.backupPath) !== conversion.backupPath
+      || !Array.isArray(conversion.runningServices)
+      || new Set(conversion.runningServices).size !== conversion.runningServices.length) {
+      throw new Error('Invalid layout conversion record');
+    }
+    validateInstallation(source, root);
+    if (['mode', 'instanceId', 'project', 'sourcesPath', 'workDir'].some(key => source[key] !== record[key])
+      || JSON.stringify(source.services) !== JSON.stringify(record.services)
+      || conversion.runningServices.some(service => !source.services.includes(service))) {
+      throw new Error('Conflicting layout conversion source');
+    }
+  }
+  if (record.buildTransition !== undefined) {
+    const transition = record.buildTransition, candidate = transition?.candidate;
+    if (record.schema !== 2 || record.layoutConversion || !candidate
+      || candidate.buildTransition !== undefined || candidate.layoutConversion !== undefined
+      || dirname(candidate.root ?? '') !== root || !/^\.build-[A-Za-z0-9]{6}$/.test(basename(candidate.root ?? ''))
+      || !/^ours-build[0-9a-f]{32}$/.test(candidate.project ?? '')
+      || !['update', 'rebuild'].includes(transition.operation)
+      || !['prepared', 'state-updated', 'runtime-activated'].includes(transition.phase)
+      || typeof transition.compatible !== 'boolean'
+      || (transition.sourcePolicyHash !== undefined && !/^[0-9a-f]{64}$/.test(transition.sourcePolicyHash))
+      || !Array.isArray(transition.runningServices)
+      || new Set(transition.runningServices).size !== transition.runningServices.length
+      || transition.runningServices.some(service => !record.services.includes(service))) {
+      throw new Error('Invalid server build transition');
+    }
+    validateInstallation(candidate, candidate.root);
+    for (const key of ['schema', 'mode', 'instanceId', 'services', 'port', 'coworkPort', 'messengerPort', 'messengerIdentity', 'uid', 'gid']) {
+      if (JSON.stringify(candidate[key]) !== JSON.stringify(record[key])) throw new Error('Conflicting server build candidate');
+    }
+  }
+  return record;
+}
+
+/** Messenger exposes serve only; these definitions contain no credentials. */
+export function messengerServicePlan(record, platform, home, executable, environment, uid) {
+  const marker = `Managed by @ours.network/install; state=${record.root}`;
+  const name = `${record.project}-messenger`;
+  if ([record.root, executable, ...Object.values(environment)].some(v => /[\n\r\0]/.test(String(v)))) throw new Error('Service values must not contain control characters');
+  if (platform === 'linux') {
+    const escape = value => `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%')}"`;
+    return { path: join(home, '.config/systemd/user', `${name}.service`), marker: `# ${marker}`, name: `${name}.service`, text: `# ${marker}\n[Unit]\nDescription=OURS Messenger\nAfter=network-online.target\n[Service]\nType=simple\nExecStart=${escape(executable)} serve\n${Object.entries(environment).map(([k, v]) => `Environment=${escape(`${k}=${v}`)}`).join('\n')}\nRestart=on-failure\nRestartSec=2\n[Install]\nWantedBy=default.target\n` };
+  }
+  if (platform !== 'darwin') throw new Error('Messenger requires systemd-user or launchd');
+  const xml = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
+  const label = `network.ours.${name}`;
+  return { path: join(home, 'Library/LaunchAgents', `${label}.plist`), marker: `<!-- Managed by @ours.network/install; selection=${record.project} -->`, name: label, domain: `gui/${uid}`, text: `<?xml version="1.0" encoding="UTF-8"?>\n<!-- Managed by @ours.network/install; selection=${record.project} -->\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${xml(label)}</string><key>ProgramArguments</key><array><string>${xml(executable)}</string><string>serve</string></array><key>EnvironmentVariables</key><dict>${Object.entries(environment).map(([k, v]) => `<key>${xml(k)}</key><string>${xml(v)}</string>`).join('')}</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict></dict></plist>\n` };
+}
+
+/** Read the owning field emitted by the existing consumer service recipes.
+ * Unknown/ambiguous definitions are not evidence of ownership. In particular,
+ * comments, another key, or a longer state path never authorize manager calls.
+ */
+export function consumerServiceState(text, service, platform) {
+  const key = { telegram: 'OURS_TG_STATE_DIR', cowork: 'OURS_COWORK_STATE_DIR' }[service];
+  if (!key || typeof text !== 'string') return undefined;
+  if (platform === 'darwin') {
+    const clean = text.replace(/<!--[\s\S]*?-->/g, '');
+    if (clean.includes('<!--')) return undefined;
+    const dictionaries = [...clean.matchAll(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/g)];
+    if (dictionaries.length !== 1) return undefined;
+    const fields = [...dictionaries[0][1].matchAll(new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`, 'g'))];
+    if (fields.length !== 1) return undefined;
+    const raw = fields[0][1];
+    if (/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/.test(raw)) return undefined;
+    try {
+      return raw.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);/g, (_, entity) => {
+        if (entity.startsWith('#')) return String.fromCodePoint(Number.parseInt(entity.slice(entity[1] === 'x' ? 2 : 1), entity[1] === 'x' ? 16 : 10));
+        return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[entity];
+      });
+    } catch { return undefined; }
+  }
+  if (platform !== 'linux') return undefined;
+  let section = '', selected;
+  let matches = 0;
+  for (const source of text.split('\n')) {
+    const line = source.trim();
+    if (!line || /^[#;]/.test(line)) continue;
+    if (/^\[.*\]$/.test(line)) { section = line; continue; }
+    if (section !== '[Service]') continue;
+    if (/^(EnvironmentFile|UnsetEnvironment)\s*=/.test(line)) return undefined;
+    const assignment = /^Environment\s*=(.*)$/.exec(line);
+    if (!assignment) continue;
+    let value = assignment[1].trim();
+    if (!value) { selected = undefined; matches = 0; continue; }
+    if (value.startsWith('"')) {
+      if (!/^"(?:[^"\\]|\\[\\"])*"$/.test(value)) return undefined;
+      value = value.slice(1, -1).replace(/\\([\\"])/g, '$1');
+    } else if (/[\s"\\]/.test(value)) return undefined;
+    if (/%(?!%)/.test(value.replaceAll('%%', ''))) return undefined;
+    value = value.replaceAll('%%', '%');
+    if (value.startsWith(`${key}=`)) { selected = value.slice(key.length + 1); matches++; }
+  }
+  return matches === 1 ? selected : undefined;
 }

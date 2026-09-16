@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { attachOursClient, resolveDaemonConfig } from '@ours.network/sdk';
 import type { NotificationEvent } from '@ours.network/sdk';
 
 import { ApplicationIdentityStore, filterApplicationIdentities } from './application-identities.js';
+import { hostProfileFromEnv } from './host-profile.js';
+import { endNativeSession } from './native-session.js';
 import type { ConnectorOptions } from './connector.js';
 
 declare const __OURS_VERSION__: string;
@@ -52,7 +54,7 @@ async function runOurs(args: string[]): Promise<void> {
     child.once('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') {
         reject(new Error(
-          `Cannot find the ${JSON.stringify(executable)} CLI. Install @ours.network/cli@2.2.0, ` +
+          `Cannot find the ${JSON.stringify(executable)} CLI. Install @ours.network/cli@2.7.2, ` +
           'put `ours` on PATH, or set OURS_CLI to its executable path.',
         ));
         return;
@@ -84,6 +86,19 @@ async function runProxy(): Promise<void> {
 }
 
 async function runSessionEnd(): Promise<void> {
+  const profile = hostProfileFromEnv(process.env);
+  if (profile !== null) {
+    let payload: unknown;
+    try { payload = JSON.parse(readFileSync(0, 'utf8')); } catch {
+      throw new Error('SessionEnd requires valid hook JSON on stdin.');
+    }
+    const sessionId = (payload as { session_id?: unknown } | null)?.session_id;
+    if (typeof sessionId !== 'string' || !sessionId.trim()) {
+      throw new Error('SessionEnd hook input must contain a non-empty session_id.');
+    }
+    await endNativeSession(profile, sessionId, process.env);
+    return;
+  }
   const client = await attachOursClient({ leaseToken: LEASE_TOKEN, clientPid: CLIENT_PID });
   await client.releaseLease();
 }
@@ -106,6 +121,7 @@ async function runWatch(args: string[]): Promise<void> {
   if (args.length > 1 || args[0]?.startsWith('-')) {
     throw new Error('Usage: ours-mcp watch [identity]');
   }
+  if (hostProfileFromEnv(process.env) !== null) throw new Error('External owner context is required.');
   const selection = resolveDaemonConfig();
   const identities = new ApplicationIdentityStore(selection.expectStateDir);
   await identities.list();
@@ -137,7 +153,7 @@ function usage(): void {
   out('                        compatibility aliases for `ours daemon <command>`');
   out('  version               print the ours-mcp package version');
   out('');
-  out('Daemon configuration and identity CLI operations moved to @ours.network/cli@2.2.0:');
+  out('Daemon configuration and identity CLI operations moved to @ours.network/cli@2.7.2:');
   out('  ours config setup');
   out('  ours identity --help');
 }

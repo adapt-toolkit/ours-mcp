@@ -40,7 +40,7 @@ import { FILE_SELECTION_CAP, OursError } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 
 import { annotateGetFilesResult, canRead, FILES_ALWAYS_PROMPT, renderFiles } from '../format.js';
-import { runTool, textResult, type McpTextResult } from '../tool.js';
+import { runTool, textResult, type McpTextResult, type OursClientProvider } from '../tool.js';
 
 // The four selection codes, and the `error_category` each one renders as. An
 // explicit table rather than a lowercase() of the code: the categories are a wire
@@ -60,7 +60,11 @@ const SELECTION_CATEGORY: Record<string, string> = {
 // so the bare form is derived from the one source of truth rather than restated.
 const GET_FILES_PREFIX = 'get_files failed: ';
 
-export function registerFilesTools(server: McpServer, clientFor: () => OursClient): void {
+export function registerFilesTools(
+  server: McpServer,
+  clientFor: OursClientProvider,
+  options: { networkHostFiles?: boolean } = {},
+): void {
   server.tool(
     'list_incoming_files',
     'List unread received files as structured metadata only — authenticated sender CID in ' +
@@ -69,9 +73,9 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
       'change status. Authorize by from.id, then pass approved wire_ids to get_files. ' +
       'Requires a bound identity.',
     {},
-    async () =>
+    async (_args, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.listIncomingFiles(),
         (files) => ({
           content: [{ type: 'text' as const, text: renderFiles(files) }],
@@ -103,9 +107,10 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
         'Batch size from 1 to 200 when wire_ids is omitted (default 50).',
       ),
     },
-    async ({ wire_ids, limit }): Promise<McpTextResult> => {
+    async ({ wire_ids, limit }, extra): Promise<McpTextResult> => {
+      const client = await clientFor(extra);
       try {
-        const out = await clientFor().getFiles({ wire_ids, limit });
+        const out = await client.getFiles({ wire_ids, limit });
         // structuredContent carries the same records the prose lists. No
         // outputSchema is declared, so this stays additive for every other client.
         const result: McpTextResult = {
@@ -128,7 +133,10 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
         // wrapper existed only because the proxy saw frames, and passing it a frame
         // annotates nothing, silently. PREPENDS, never substitutes: the daemon text
         // can carry a voice transcript this side cannot reconstruct.
-        annotateGetFilesResult(result, FILES_ALWAYS_PROMPT ? () => false : canRead);
+        annotateGetFilesResult(
+          result,
+          options.networkHostFiles || FILES_ALWAYS_PROMPT ? () => false : canRead,
+        );
         return result;
       } catch (e) {
         // Keep this explicit mapping: runTool cannot preserve structured selection errors.
@@ -184,12 +192,20 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
     // agent's user. STREAMED — `fetchFile` would make the whole file resident and
     // break this tool's own promise. `saveFileFallbackNotice` is now unreachable
     // from ours-mcp and stays in the SDK for clients with no connector.
-    async ({ wire_id, dest_path }): Promise<McpTextResult> => {
+    async ({ wire_id, dest_path }, extra): Promise<McpTextResult> => {
+      const client = await clientFor(extra);
       // proxy.ts:557, verbatim. A wire_id names a path segment on the daemon, so a
       // charset check belongs before the request, not after it.
       if (!/^[A-Za-z0-9]+$/.test(wire_id)) return textResult('save_file: invalid wire_id.', true);
+      if (options.networkHostFiles) {
+        return {
+          content: [{ type: 'text', text: `Host save requested for wire_id ${wire_id}.` }],
+          structuredContent: { oursHostSave: { wire_id, dest_path } },
+          isError: false,
+        };
+      }
       try {
-        const body = await clientFor().openFile(wire_id);
+        const body = await client.openFile(wire_id);
         const abs = resolvePath(dest_path);
         mkdirSync(dirname(abs), { recursive: true });
         await pipeline(Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(abs));

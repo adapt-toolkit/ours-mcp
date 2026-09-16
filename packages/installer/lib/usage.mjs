@@ -6,6 +6,25 @@
 
 export const USAGE = `ours-install — the unified ours.network stack installer.
 
+  Selected network installation (uses the packaged compatible source policy):
+    ours-install server install --mode packages|docker [--sources PATH] --state-dir PATH
+    ours-install server status|start|stop|restart --state-dir PATH
+    ours-install server rebuild --state-dir PATH
+    ours-install server update --state-dir PATH [--sources PATH] --compatible
+    ours-install server access-issue --state-dir PATH --output PATH
+    ours-install server access-replace --state-dir PATH --confirm
+    ours-install server backup|restore server LABEL --state-dir PATH
+    ours-install server backup|restore daemon|telegram|cowork|messenger LABEL --state-dir PATH
+    ours-install server reset daemon|telegram|cowork|messenger --confirm --state-dir PATH
+    ours-install client install --config PATH
+  Client profile settings select installer.integrations and may override installer.sourcesPath,
+  and optional installer.fleetSettingsPath (relative paths use the profile directory).
+  Repeat selected server install repairs setup without replacing existing authority.
+  Daemon maintenance includes MCP state. Full-server reset is not supported.
+  Update requires reviewed storage compatibility; --compatible records that attestation.
+  Existing managed layouts are converted before service startup.
+
+
   Install:  npm i -g @ours.network/install && ours-install   (recommended)
             npx @ours.network/install                          (one-off)
 
@@ -28,7 +47,9 @@ ends with exact next commands plus a copy-paste agent hand-off prompt.
   --version    print the installer version and exit
 
 Env: OURS_ASSUME_YES=1 (accept defaults, no prompts) · OURS_INSTALL_DRY_RUN=1 ·
-     OURS_CHANNEL=nightly · OURS_BROKER_URL · OURS_NPM. Docs: https://ours.network`;
+     OURS_CONFIG=/private/host-profile.json · OURS_CHANNEL=nightly ·
+     OURS_BROKER_URL · OURS_NPM. A complete host profile selects client-only
+     setup for an existing Compose-owned daemon. Docs: https://ours.network`;
 
 export const UNINSTALL_USAGE = `ours-uninstall — remove one ours daemon and what attaches to it.
 
@@ -46,4 +67,8 @@ run that refuses leaves the daemon whole rather than half-dismantled.
                identity keys exist nowhere else and no peer can give them back.
   --dry-run    print what it WOULD remove and remove nothing
   --help       show this help and exit
-  --version    print the version and exit`;
+  --version    print the version and exit
+
+When OURS_CONFIG selects a prepared host profile, remove selected client
+attachments only. The shared profile/credential and Compose daemon are kept,
+including under --purge.`;

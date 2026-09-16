@@ -7,6 +7,11 @@
 // never be added.
 import { OursError } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
+import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
+
+export type ToolRequestExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
+export type OursClientProvider = (extra: ToolRequestExtra) => OursClient | Promise<OursClient>;
 
 /** The MCP content shape every ours tool returns. */
 // A TYPE ALIAS, NOT AN INTERFACE, AND THAT IS NOT A STYLE CHOICE.
@@ -59,28 +64,30 @@ export function textResult(text: string, isError = false): McpTextResult {
 // Retrying is safe precisely because the call FAILED with NOT_BOUND: it did nothing,
 // so there is no mutation to repeat. Only NOT_BOUND is retried, only once, and a
 // refused re-bind clears the memory rather than looping.
-let boundIdentity: string | null = null;
-export function rememberBinding(name: string): void { boundIdentity = name; }
+const boundIdentities = new WeakMap<OursClient, string>();
+export function rememberBinding(client: OursClient, name: string): void { boundIdentities.set(client, name); }
 /** What runTool has learned. The inbox watch reads this rather than asking again. */
-export function getBoundIdentity(): string | null { return boundIdentity; }
-export function forgetBinding(): void { boundIdentity = null; }
+export function getBoundIdentity(client: OursClient): string | null { return boundIdentities.get(client) ?? null; }
+export function forgetBinding(client: OursClient): void { boundIdentities.delete(client); }
 
 async function reassertBinding(client: OursClient): Promise<boolean> {
+  const boundIdentity = getBoundIdentity(client);
   if (!boundIdentity) return false;
   try {
     await client.chooseIdentity({ name: boundIdentity, force: false });
     return true;
   } catch {
-    boundIdentity = null; // genuinely gone, or held elsewhere — fail closed
+    forgetBinding(client); // genuinely gone, or held elsewhere — fail closed
     return false;
   }
 }
 
 export async function runTool<T>(
-  client: OursClient,
+  clientValue: OursClient | Promise<OursClient>,
   call: (client: OursClient) => Promise<T> | T,
   render: (value: T) => McpTextResult | Promise<McpTextResult>,
 ): Promise<McpTextResult> {
+  const client = await clientValue;
   let value: T;
   try {
     value = await call(client);
@@ -105,8 +112,8 @@ export async function runTool<T>(
   // nothing. This is what feeds reassertBinding above, and it is deliberately NOT a
   // list of which tools rebind — that list would be a second vocabulary, and it
   // would be wrong the first time an operation started or stopped binding.
-  if (boundIdentity === null) {
-    void client.currentIdentity().then((r) => { boundIdentity = r.name; }).catch(() => {});
+  if (getBoundIdentity(client) === null) {
+    void client.currentIdentity().then((r) => { rememberBinding(client, r.name); }).catch(() => {});
   }
   return render(value);
 }

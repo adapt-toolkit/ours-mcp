@@ -30,10 +30,11 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   errFileUnreadable,
+  OursError,
 } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 
-import { runTool, type McpTextResult } from '../tool.js';
+import { runTool, type McpTextResult, type OursClientProvider } from '../tool.js';
 
 function sendResult<T extends object>(text: string, outcome: T, isError = false): McpTextResult {
   const historyWarning = 'history_stored' in outcome && outcome.history_stored === false
@@ -46,7 +47,11 @@ function sendResult<T extends object>(text: string, outcome: T, isError = false)
   };
 }
 
-export function registerMessagingTools(server: McpServer, clientFor: () => OursClient): void {
+export function registerMessagingTools(
+  server: McpServer,
+  clientFor: OursClientProvider,
+  options: { networkHostFiles?: boolean } = {},
+): void {
   server.tool(
     'send_message',
     'Send an end-to-end-encrypted message to a known contact (by name or container id). ' +
@@ -72,9 +77,9 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
         .optional()
         .describe('Optional 1-based sentence index in the replied-to message.'),
     },
-    async ({ contact, text, reply_to_wire_id, reply_to_sentence }) =>
+    async ({ contact, text, reply_to_wire_id, reply_to_sentence }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.sendMessage({ contact, text, reply_to_wire_id, reply_to_sentence }),
         (v) => {
           switch (v.kind) {
@@ -125,6 +130,7 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
     {
       contact: z.string().min(1).describe('Contact name or container id to send to.'),
       path: z.string().min(1).optional().describe('Filesystem path to the file to send (preferred). Read by the ours connector as YOUR OS user, then streamed to the daemon.'),
+      upload_id: z.string().min(1).optional().describe('Host-bridge staged upload identifier. Do not supply this directly.'),
       data_base64: z.string().min(1).optional().describe('Inline file bytes, base64-encoded (alternative to path).'),
       filename: z.string().min(1).optional().describe('Filename to advertise (required with data_base64; defaults to basename of path).'),
       mime: z.string().optional().describe('MIME type (inferred from the path extension when omitted).'),
@@ -141,12 +147,25 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
     // Passing `path` straight through typechecks perfectly and fails only at
     // runtime, on someone else's machine, with a permissions error that has no
     // workaround. A green compile on this handler is not evidence of correctness.
-    async ({ contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }) =>
+    async ({ contact, path, upload_id, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         async (c) => {
+          const inputs = Number(Boolean(path)) + Number(Boolean(upload_id)) + Number(Boolean(data_base64));
+          if (inputs !== 1) {
+            throw new OursError('FILE_UNREADABLE', 'send_file requires exactly one of path, upload_id, or data_base64.');
+          }
+          if (upload_id) {
+            if (!options.networkHostFiles) {
+              throw new OursError('FILE_UNREADABLE', 'send_file upload_id is available only through the network host bridge.');
+            }
+            return c.sendFile({ contact, upload_id, filename, mime, reply_to_wire_id, reply_to_sentence });
+          }
           if (!path) {
             return c.sendFile({ contact, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence });
+          }
+          if (options.networkHostFiles) {
+            throw new OursError('FILE_UNREADABLE', 'send_file path must be staged by the network host bridge.');
           }
           const abs = resolvePath(path);
           let bytes: Buffer;
@@ -221,9 +240,9 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
       'Read receipts are best-effort after the local read commit; there is no defer, outbox, ' +
       'fallback, or automatic retry.',
     { limit: z.number().int().min(1).max(200).optional().describe('Batch size from 1 to 200 (default 50).') },
-    async ({ limit }) =>
+    async ({ limit }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.getMessages({ limit }),
         (payload) => {
           const result = {

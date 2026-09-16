@@ -21,18 +21,18 @@ import { z } from 'zod';
 
 import type { OursClient } from '@ours.network/sdk';
 
-import { runTool, textResult } from '../tool.js';
+import { runTool, textResult, type OursClientProvider } from '../tool.js';
 
-export function registerProfileTools(server: McpServer, clientFor: () => OursClient): void {
+export function registerProfileTools(server: McpServer, clientFor: OursClientProvider): void {
   server.tool(
     'set_bio',
     "Set the bound identity's profile bio (free text). For a role, the bio is " +
       'embedded in the invites it generates. For the root identity, the refreshed ' +
       'profile is re-pinned into every role so future role invites carry the update.',
     { bio: z.string().describe('The new bio text (empty string clears it).') },
-    async ({ bio }) =>
+    async ({ bio }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.setBio({ bio }),
         (r) => {
           const suffix = r.rolesRefreshed > 0 ? ` Root profile refreshed in ${r.rolesRefreshed} role(s).` : '';
@@ -52,9 +52,9 @@ export function registerProfileTools(server: McpServer, clientFor: () => OursCli
       're-enabling is a no-op for the cap, and the offer election stays fail-closed. ' +
       'Returns how many migration offers were initiated.',
     {},
-    async () =>
+    async (_args, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.advertiseMigrate(),
         ({ wasAdvertising, advertising, offers }) => {
           const already = wasAdvertising ? ' (already advertising — cap unchanged)' : '';
@@ -73,9 +73,9 @@ export function registerProfileTools(server: McpServer, clientFor: () => OursCli
       'via invites — only via the control-plane cluster registry. An agent must ask the ' +
       'user before adopting a persona. Empty string clears it.',
     { persona: z.string().describe('The new persona text (empty string clears it).') },
-    async ({ persona }) =>
+    async ({ persona }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.setPersona({ persona }),
         // persona is local-only and never carried in invites: no root-profile refresh (unlike set_bio).
         (r) => textResult(`Updated the persona of "${r.identity}".`),

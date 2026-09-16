@@ -22,6 +22,7 @@ export function fx({
   runFails = [], voiceReady = false, interactiveOk = true, restoreFails = [], known = [],
   restoreDoesNotTake = [], restoreChangesMode = [], packageDeps = {}, registryVersions = {},
   codexMarket = null, claudePluginInstalled = false,
+  profile = null, profileVerificationError = null,
 } = {}) {
   // A restore that RETURNS without the bytes landing — the case a read-back
   // catches and a returning call cannot. Distinct from `restoreFails`, which
@@ -33,6 +34,16 @@ export function fx({
   let lineIndex = 0;
   const fails = (cmd) => runFails.some((f) => cmd.join(' ').includes(f));
   return {
+    packagedSourcePolicy: () => ({ packages: Object.fromEntries(
+      ['sdk', 'cli', 'mcp', 'tg-connector', 'cowork', 'messenger-server', 'fleet', 'codex', 'claude-code']
+        .map(name => [`@ours.network/${name}`, { type: 'npm', version: '2.0.1' }]),
+    ) }),
+    resolveSourcePolicy: async (policy, role, clients = []) => {
+      const names = role === 'server' ? ['sdk', 'cli', 'mcp', 'tg-connector', 'cowork', 'messenger-server'] : clients;
+      for (const name of names) if (!policy.packages?.[`@ours.network/${name}`]) throw new Error(`Missing source policy for @ours.network/${name}`);
+      return { packages: Object.fromEntries(names.map(name => [`@ours.network/${name}`, policy.packages[`@ours.network/${name}`]])) };
+    },
+    withInstallationLock: async (_root, operation) => operation(),
     recorder,
     home: HOME,
     env,
@@ -40,7 +51,7 @@ export function fx({
     version: '9.9.9',
     platform: { platform, release: '6.0.0' },
     nodeVersion,
-    exists: () => false,
+    exists: (path) => Boolean(profile && path === env.OURS_CONFIG),
     // Detection for the selection screen. Empty by default so a test that says
     // nothing about existing daemons gets the same walk it always had: nothing
     // detected, no screen, the default state directory.
@@ -52,6 +63,22 @@ export function fx({
     probe: (port) => net[port] ?? { ok: false, reason: 'connection refused' },
     isTaken: (port) => taken.includes(port),
     readJson: (p) => (Object.prototype.hasOwnProperty.call(json, p) ? json[p] : null),
+    readManagedClientProfile: () => json[join(HOME, '.ours-client/profile.json')] ?? null,
+    importClientProfile: ({ profile: input, sourcesPath, sources, integrations, fleetSettingsPath }) => {
+      const configPath = join(HOME, '.ours-client/profile.json');
+      const settings = { sourcesPath: join(HOME, '.ours-client/sources.json'), integrations,
+        ...(fleetSettingsPath ? { fleetSettingsPath: join(HOME, '.ours-client/fleet-settings.json') } : {}) };
+      const selected = { ...input, credentialPath: join(HOME, '.ours-client/credential') };
+      json[configPath] = { ...selected, installer: settings };
+      json[settings.sourcesPath] = sources ?? json[sourcesPath];
+      recorder.wrote.push([configPath, JSON.stringify(json[configPath])]);
+      return { configPath, profile: selected, settings };
+    },
+    readProfile: (path) => json[path] ?? profile,
+    verifyHostProfile: async () => {
+      if (profileVerificationError) throw new Error(profileVerificationError);
+      return { profile, version: { instanceId: profile?.expectedInstanceId, version: 'fixture' } };
+    },
     readText: (p) => (Object.prototype.hasOwnProperty.call(text, p) ? text[p] : null),
     copyDir: (from, to) => { recorder.copied.push([from, to]); },
     removeDir: (p) => { recorder.removedDirs.push(p); },

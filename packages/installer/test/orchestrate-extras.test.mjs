@@ -85,6 +85,15 @@ test('a harness we cannot drive is never called, and never dead-ends either', as
   assert.equal(rows.find((r) => r.key === 'codex').state, 'skipped');
 });
 
+test('a manual host-profile harness gets a safely quoted native-launch export', async () => {
+  const configPath = "/home/me/private/profile with 'quote'.json";
+  const e = fx({ harnesses: [{ name: 'claude-code', command: 'claude', label: 'Claude Code', status: 'alias', detail: 'shell alias' }] });
+  await runHarnessPhase(ARGS, e, {
+    target: { mode: 'host-profile', configPath, profile: {}, endpoint: 'http://127.0.0.1:8787' }, isDefaultStateDir: false,
+  });
+  assert.match(said(e), /export OURS_CONFIG='\/home\/me\/private\/profile with '\"'\"'quote'\"'\"'\.json'/);
+});
+
 test('a drivable harness is installed automatically, in order', async () => {
   const e = fx({
     answers: [true],
@@ -172,15 +181,18 @@ test('the DEFAULT state directory prints no env line at all', async () => {
 
 // ------------------------------------------------------------- ours-fleet ---
 
-test('ours-fleet is installed, initialised, and given a stopped starter config', async () => {
-  const e = fx({ answers: [true] });
+test('ours-fleet publishes its own configuration through the interactive wizard', async () => {
+  const text = {};
+  const e = fx({ answers: [true], text });
+  const interactive = e.runInteractive;
+  e.runInteractive = async (...call) => {
+    const result = await interactive(...call);
+    text[join(HOME, 'fleet.yaml')] = 'version: 2\n';
+    return result;
+  };
   const row = await runFleetPhase(ARGS, e, { target: AT_DEFAULT, isDefaultStateDir: true });
-  assert.deepEqual(ranAsText(e), ['npm i -g @ours.network/fleet@latest', 'ours-fleet init']);
-  assert.equal(e.recorder.wroteText.length, 1);
-  assert.equal(e.recorder.wroteText[0][0], join(HOME, 'fleet.yaml'));
-  assert.match(e.recorder.wroteText[0][1], /FleetCoordinator/);
-  assert.match(e.recorder.wroteText[0][1], /fleet-health/);
-  assert.match(e.recorder.wroteText[0][1], /coordinator_health/);
+  assert.deepEqual(ranAsText(e), ['npm i -g @ours.network/fleet@latest', `ours-fleet init --configuration ${join(HOME, 'fleet.yaml')}`]);
+  assert.deepEqual(e.recorder.wroteText, [], 'the installer never writes Fleet-owned configuration');
   // Installing a package needs no daemon selection. Initialization may inspect
   // daemon state, so it receives the complete state-directory/endpoint pair;
   // passing both also prevents a non-default install from silently falling back.
@@ -191,18 +203,77 @@ test('ours-fleet is installed, initialised, and given a stopped starter config',
   assert.equal(row.state, 'installed');
 });
 
-test('for a non-default state directory the starter pins the coordinator to this daemon', async () => {
-  const e = fx({ answers: [true] });
-  await runFleetPhase(ARGS, e, { target: AT_TG, isDefaultStateDir: false });
-  assert.match(e.recorder.wroteText[0][1], /OURS_CONFIG: "\/home\/me\/\.ours-tg\/config\.json"/);
-  assert.match(said(e), /fleet\.yaml/);
+test('prepared-profile Fleet init keeps the profile on the interactive invocation', async () => {
+  const profilePath = '/home/me/private/profile.json';
+  const text = {};
+  const e = fx({ text });
+  const interactive = e.runInteractive;
+  e.runInteractive = async (...call) => {
+    const result = await interactive(...call);
+    text[join(HOME, 'fleet.yaml')] = 'version: 2\n';
+    return result;
+  };
+  const row = await runFleetPhase(ARGS, e, {
+    target: { mode: 'host-profile', configPath: profilePath, profile: {}, endpoint: 'http://127.0.0.1:8787' },
+    isDefaultStateDir: false,
+  });
+  assert.equal(row.state, 'installed');
+  assert.deepEqual(e.recorder.interactive, [['ours-fleet', 'init', '--configuration', join(HOME, 'fleet.yaml')]]);
+  assert.deepEqual(e.recorder.ranEnv.at(-1), { OURS_CONFIG: profilePath });
 });
 
-test('a failed ours-fleet init is reported with its retry and does not end the run', async () => {
-  const e = fx({ answers: [true], runFails: ['ours-fleet init'] });
+test('prepared Fleet settings use the captured runner with settings, profile, and output path', async () => {
+  const profilePath = '/home/me/private/profile.json';
+  const settingsPath = '/home/me/private/setup/fleet.json';
+  const text = {};
+  const e = fx({ text });
+  const run = e.run;
+  e.run = async (...call) => {
+    const result = await run(...call);
+    text[join(HOME, 'fleet.yaml')] = 'version: 2\n';
+    return result;
+  };
+  const row = await runFleetPhase({ ...ARGS, fleetSettingsPath: settingsPath }, e, {
+    target: { mode: 'host-profile', configPath: profilePath, profile: {}, endpoint: 'http://127.0.0.1:8787' },
+    isDefaultStateDir: false,
+  });
+  assert.equal(row.state, 'installed');
+  assert.deepEqual(e.recorder.interactive, []);
+  assert.deepEqual(e.recorder.ran.at(-1), [
+    'ours-fleet', 'init', '--configuration', join(HOME, 'fleet.yaml'), '--settings', settingsPath,
+  ]);
+  assert.deepEqual(e.recorder.ranEnv.at(-1), { OURS_CONFIG: profilePath });
+});
+
+test('a cancelled Fleet wizard publishes nothing and is reported incomplete', async () => {
+  const e = fx({ answers: [true] });
   const row = await runFleetPhase(ARGS, e, { target: AT_DEFAULT, isDefaultStateDir: true });
   assert.equal(row.state, 'failed');
+  assert.match(row.note, /not published/);
+  assert.match(said(e), /configuration was not published/i);
+});
+
+test('a cancelled repeat Fleet wizard does not turn an existing manifest into success', async () => {
+  const path = join(HOME, 'fleet.yaml');
+  const e = fx({ text: { [path]: 'api_version: ours.network/fleet/v2\n' }, interactiveOk: false });
+  const row = await runFleetPhase(ARGS, e, { target: AT_DEFAULT, isDefaultStateDir: true });
+  assert.equal(row.state, 'failed');
+  assert.equal(row.note, 'ours-fleet init failed');
+  assert.equal(e.recorder.wroteText.length, 0);
   assert.match(said(e), /retry manually: ours-fleet init/);
+  assert.doesNotMatch(said(e), /✓ ours-fleet init .*interactive Fleet configuration/);
+});
+
+test('prepared-settings Fleet retry preserves shell-safe profile, output, and settings paths', async () => {
+  const profilePath = "/home/me/private/client's profile.json";
+  const settingsPath = '/home/me/private/setup path/fleet.json';
+  const e = fx({ runFails: ['--settings'] });
+  const row = await runFleetPhase({ ...ARGS, fleetSettingsPath: settingsPath }, e, {
+    target: { mode: 'host-profile', configPath: profilePath, profile: {}, endpoint: 'http://127.0.0.1:8787' },
+    isDefaultStateDir: false,
+  });
+  assert.equal(row.state, 'failed');
+  assert.match(said(e), /retry manually: OURS_CONFIG='\/home\/me\/private\/client'"'"'s profile\.json' ours-fleet init --configuration \/home\/me\/fleet\.yaml --settings '\/home\/me\/private\/setup path\/fleet\.json'/);
 });
 
 // ------------------------------------------------------------------ voice ---
@@ -267,7 +338,7 @@ test('the hand-off drops what this run already did and keeps what it did not', a
   await endScreen(ARGS, e, { summary, target: AT_DEFAULT, isDefaultStateDir: true, brokerUrl: e.brokerUrl });
   const out = said(e);
   assert.doesNotMatch(out, /Create my Ours human identity/, 'an identity created in-run drops out of the hand-off');
-  assert.match(out, /Review ~\/fleet\.yaml/, 'fleet was installed, so its review step stays');
+  assert.match(out, /Review the Fleet wizard output in ~\/fleet\.yaml/, 'fleet was installed, so its review step stays');
   assert.doesNotMatch(out, /Set up my Telegram bot/, 'a skipped connector drops its step');
   assert.doesNotMatch(out, /OURS_CONFIG/, 'the default state directory adds nothing to the prompt');
 });
@@ -431,7 +502,7 @@ test('`ours-fleet init` is handed the daemon pair, as insurance against an unres
     e,
     { target: { stateDir: OURS, port: 3050 }, isDefaultStateDir: true },
   );
-  const i = e.recorder.ran.findIndex((cmd) => cmd.join(' ') === 'ours-fleet init');
+  const i = e.recorder.ran.findIndex((cmd) => cmd.join(' ').startsWith('ours-fleet init --configuration '));
   assert.ok(i >= 0, 'init ran');
   assert.deepEqual(e.recorder.ranEnv[i], {
     OURS_CONFIG: join(OURS, 'config.json'),
@@ -449,7 +520,7 @@ test('the pair reaches init for the DEFAULT state directory too, as nightly does
     e,
     { target: { stateDir: TG, port: 3060 }, isDefaultStateDir: false },
   );
-  const i = e.recorder.ran.findIndex((cmd) => cmd.join(' ') === 'ours-fleet init');
+  const i = e.recorder.ran.findIndex((cmd) => cmd.join(' ').startsWith('ours-fleet init --configuration '));
   assert.equal(e.recorder.ranEnv[i].OURS_PORT, '3060');
   assert.equal(e.recorder.ranEnv[i].OURS_STATE_DIR, TG);
 });

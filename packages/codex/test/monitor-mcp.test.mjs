@@ -4,11 +4,11 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import {
   monitorToolNames, foregroundWatchProcess, handleMonitorCommand, waitForForegroundMail,
-} from '../src/monitor-mcp.mjs';
+} from '../dist/monitor-mcp.mjs';
 
 test('exposes background and foreground monitor tools', () => {
   assert.deepEqual(monitorToolNames, ['arm_monitor', 'foreground_monitor', 'disarm_monitor', 'monitor_status']);
-  const watch = foregroundWatchProcess('Alice');
+  const watch = foregroundWatchProcess('Alice', undefined, {});
   assert.deepEqual(watch.args.slice(-2), ['watch', 'Alice']);
 });
 
@@ -36,7 +36,7 @@ test('foreground monitor returns the first body-free watch event and stops the w
   child.killed = false;
   child.kill = (signal) => { child.killed = true; child.killSignal = signal; return true; };
   const calls = [];
-  const waiting = waitForForegroundMail('Alice', {
+  const waiting = waitForForegroundMail('Alice', 'thread-a', {
     env: { OURS_PORT: '4050' },
     commandFor: (identity) => ({ command: 'ours-mcp', args: ['watch', identity] }),
     spawnImpl: (...args) => { calls.push(args); return child; },
@@ -57,8 +57,39 @@ test('foreground monitor can be interrupted', async () => {
   child.killed = false;
   child.kill = () => { child.killed = true; return true; };
   const controller = new AbortController();
-  const waiting = waitForForegroundMail('Alice', { spawnImpl: () => child, signal: controller.signal });
+  const waiting = waitForForegroundMail('Alice', 'thread-a', { spawnImpl: () => child, signal: controller.signal });
   controller.abort();
   await assert.rejects(waiting, /stopped/);
   assert.equal(child.killed, true);
+});
+
+test('foreground watch uses the package-local network client for a selected host profile', async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'ours-watch-container-'));
+  try {
+    const profile = join(dir, 'profile.json');
+    writeFileSync(profile, JSON.stringify({
+      endpoint: 'http://127.0.0.1:4050',
+      expectedInstanceId: 'b282ca8e-72d2-48cc-a948-b3c1a62129f5',
+      credentialPath: join(dir, 'credential'),
+    }), { mode: 0o600 });
+    const invocation = foregroundWatchProcess('Alice', 'thread-a', { OURS_CONFIG: profile });
+    assert.equal(invocation.command, process.execPath);
+    assert.match(invocation.args[0], /bin\/network-watch\.mjs$/);
+    assert.deepEqual(invocation.args.slice(1), ['Alice', 'thread-a']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('selected host foreground watch rejects missing native session metadata', async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'ours-watch-session-'));
+  try {
+    const profile = join(dir, 'profile.json');
+    writeFileSync(profile, JSON.stringify({ endpoint: 'http://127.0.0.1:4050', expectedInstanceId: 'b282ca8e-72d2-48cc-a948-b3c1a62129f5', credentialPath: join(dir, 'credential') }), { mode: 0o600 });
+    assert.throws(() => foregroundWatchProcess('Alice', undefined, { OURS_CONFIG: profile }), /Native session metadata/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

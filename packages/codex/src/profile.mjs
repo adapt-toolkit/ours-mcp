@@ -1,7 +1,9 @@
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
-import { assertDaemonStateDir, resolveDaemonConfig } from '@ours.network/sdk';
+import { assertDaemonStateDir, attachOursClient, resolveDaemonConfig } from '@ours.network/sdk';
+import { hostProfileSelectionFromEnv } from '../../core/src/host-client/index.ts';
 
 function validPort(value) {
   const port = Number(value);
@@ -26,8 +28,21 @@ export function parseOursArgs(argv = []) {
   return { port, codexArgs };
 }
 
-export async function resolveDaemonProfile({ argv = [], env = process.env, fetch: fetchImpl = globalThis.fetch } = {}) {
+export async function resolveDaemonProfile({ argv = [], env = process.env, fetch: fetchImpl = globalThis.fetch, attach = attachOursClient } = {}) {
   const parsed = parseOursArgs(argv);
+  const hostSelection = hostProfileSelectionFromEnv(env);
+  if (hostSelection !== null) {
+    const { profile: hostProfile, configPath } = hostSelection;
+    if (parsed.port != null) throw new Error('ours: --ours-port conflicts with host-profile mode');
+    const client = await attach({ ...hostProfile, sessionMode: 'external', leaseToken: randomUUID(), env: {} });
+    let info;
+    try {
+      info = await client.version();
+      await client.identities();
+      await client.unread();
+    } finally { await client.close(); }
+    return { profile: hostProfile, info, baseUrl: hostProfile.endpoint, configPath, codexArgs: parsed.codexArgs };
+  }
   const selection = resolveDaemonConfig({
     ...(parsed.port == null ? {} : { port: parsed.port }),
     env,

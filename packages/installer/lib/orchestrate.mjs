@@ -24,14 +24,14 @@
 //   now()                  -> number
 
 import { basename, dirname, join, resolve } from 'node:path';
-import { parseInstallArgs, resolveTarget, InstallUsageError } from './target.mjs';
-import { planDaemonConfig, planServiceInstall, serviceInstallCommand } from './plan.mjs';
+import { parseNetworkArgs, validateHostProfile, parseInstallArgs, resolveTarget, resolveProfileSelection, profileEnv, InstallUsageError } from './target.mjs';
+import { selectSourcePackages, validateInstallation, SERVER_SERVICES, planDaemonConfig, planServiceInstall, serviceInstallCommand } from './plan.mjs';
 import {
   COMPONENTS,
   planComponentSelection, planMcpAttachment, planTgAttachment, planCoworkAttachment,
   tgConfigPath, coworkConfigPath, summarizeComponentRun, componentSpec, componentByKey,
 } from './components.mjs';
-import { planHarnessPlugins, planFleet, buildHandoffPromptV3, restartHints } from './extras.mjs';
+import { planHarnessPlugins, planFleet, buildHandoffPromptV3, restartHints, shellQuote } from './extras.mjs';
 import { summarizeRun } from './rerun.mjs';
 import { configJournal, reportRollback } from './journal.mjs';
 import { detectDaemons, planDaemonSelection, resolveSelection } from './detect.mjs';
@@ -212,7 +212,7 @@ async function attempt(effects, dryRun, label, thunk) {
  */
 function pairFor(plan, target) {
   return plan && plan.env && Object.keys(plan.env).length > 0
-    ? daemonEnv(target.stateDir, target.port)
+    ? target.mode === 'host-profile' ? profileEnv(target) : daemonEnv(target.stateDir, target.port)
     : undefined;
 }
 
@@ -815,7 +815,7 @@ export async function runIdentityPhase(args, effects, { target, mcpReady }) {
  */
 export async function runHarnessPhase(args, effects, { target, isDefaultStateDir, exactSuite = null }) {
   effects.out(heading('Harness plugins'));
-  const detected = await effects.detectHarnesses();
+  const detected = (await effects.detectHarnesses()).filter(h => !args.clientIntegrations || args.clientIntegrations.includes(h.name));
   for (const h of detected) {
     if (h.status === 'ok') effects.out(ok(`'${h.command ?? h.name}'  → ${h.detail ?? 'real program'} (its plugin can be installed)`));
     else if (h.status === 'alias') effects.out(warn(`'${h.command ?? h.name}'  → ${h.detail} (I won't call it — manual steps below)`));
@@ -832,6 +832,7 @@ export async function runHarnessPhase(args, effects, { target, isDefaultStateDir
     harnesses: detected.map((h) => ({ name: h.name, status: h.status })),
     stateDir: target.stateDir,
     isDefaultStateDir,
+    configPath: target.mode === 'host-profile' ? target.configPath : null,
     channel: args.channel,
     assumeYes: true,
     answers: {},
@@ -844,6 +845,12 @@ export async function runHarnessPhase(args, effects, { target, isDefaultStateDir
     if (plan.action === 'skip') {
       if (plan.reason !== 'not installed') effects.out(info(`${plan.label} — ${plan.reason}`));
       rows.push({ ...row, state: 'skipped', note: plan.reason });
+      continue;
+    }
+    if (plan.action === 'manual' && exactSuite?.localPackages?.[plan.name]) {
+      const root = await effects.prepareClientMarketplace(plan.name, exactSuite.localPackages[plan.name]);
+      effects.out(warn(`${plan.label} requires manual registration of exact local marketplace ${root}; ${target.managed ? 'the saved client default is retained' : `keep OURS_CONFIG=${target.configPath}`}.`));
+      rows.push({ ...row, state: 'failed', note: 'native executable unavailable' });
       continue;
     }
     if (plan.action === 'manual') {
@@ -864,12 +871,28 @@ export async function runHarnessPhase(args, effects, { target, isDefaultStateDir
       }
       effects.out(warn(`${plan.label} — ${plan.reason}; install it yourself with:`));
       for (const step of manual) effects.out(info(`  ${step}`));
+      if (plan.envLine) effects.out(info(`Before later native launches, set:  ${plan.envLine}`));
       rows.push({ ...row, state: 'skipped', note: plan.reason });
       continue;
     }
 
     let steps = plan.steps;
     let manual = plan.manual;
+    if (exactSuite?.localPackages?.[plan.name]) {
+      const registration = await effects.prepareClientMarketplace(plan.name, exactSuite.localPackages[plan.name]);
+      const steps = plan.name === 'codex'
+        ? [['codex', 'plugin', 'marketplace', 'add', registration], ['codex', 'plugin', 'add', 'ours@ours-codex-marketplace']]
+        : [['claude', 'plugin', 'marketplace', 'add', registration], ['claude', 'plugin', await effects.hasClaudePlugin() ? 'update' : 'install', 'ours@ours.network']];
+      let failed = false;
+      for (const step of steps) {
+        const outcome = await attempt(effects, false, step.join(' '), () => effects.run(step[0], step.slice(1), { env: profileEnv(target) }));
+        if (!outcome.ok) { failed = true; break; }
+      }
+      effects.out(info(target.managed ? `Native ${plan.name} launches use the saved client default.` : `Native ${plan.name} launches must retain OURS_CONFIG=${target.configPath}.`));
+      rows.push({ ...row, state: failed ? 'failed' : 'installed' });
+      continue;
+    }
+
     if (exactSuite && (plan.name === 'claude-code' || plan.name === 'codex')) {
       const isClaude = plan.name === 'claude-code';
       const root = isClaude ? markets.claudeRoot : markets.codexRoot;
@@ -916,33 +939,43 @@ export async function runHarnessPhase(args, effects, { target, isDefaultStateDir
   return rows;
 }
 
-/** Install Fleet, initialize its host support, and stage a stopped starter config. */
+/** Install Fleet and let its interactive wizard publish the owned configuration. */
 export async function runFleetPhase(args, effects, { target, isDefaultStateDir }) {
   effects.out(heading('ours-fleet (your always-online agent team)'));
   effects.out(info('This makes your harnesses PERSISTENT: they stop being just a terminal session and'));
   effects.out(info('become always-online agents that survive a reboot.'));
   const plan = planFleet({
-    home: effects.home, stateDir: target.stateDir, isDefaultStateDir, wanted: true, channel: args.channel,
+    home: effects.home, stateDir: target.stateDir, isDefaultStateDir,
+    configPath: target.mode === 'host-profile' ? target.configPath : null,
+    settingsPath: args.fleetSettingsPath ?? null,
+    wanted: true, channel: args.channel,
   });
   if (plan.action === 'skip') {
     effects.out(info('skipped cleanly — re-run ours-install any time to add it.'));
     return { key: 'fleet', label: plan.label, state: 'skipped' };
   }
-  const install = await attempt(effects, args.dryRun, plan.install.join(' '), () => effects.run(plan.install[0], plan.install.slice(1)));
-  // Pass the complete daemon tuple to host initialization. The generated role
-  // also carries OURS_CONFIG when the chosen daemon is non-default.
-  const initEnv = daemonEnv(target.stateDir, target.port);
+  const install = args.acquiredFleet ? { ok: true } : await attempt(effects, args.dryRun, plan.install.join(' '), () => effects.run(plan.install[0], plan.install.slice(1)));
+  // Fleet owns its v2 manifest, roles, models and permissions. With no prepared
+  // settings, its wizard keeps the user's terminal while this invocation carries
+  // the selected daemon; --settings makes the same call strictly noninteractive.
+  const initEnv = target.mode === 'host-profile' ? profileEnv(target) : daemonEnv(target.stateDir, target.port);
+  const initRunner = args.fleetSettingsPath ? effects.run : effects.runInteractive;
   const init = install.ok
-    ? await attempt(effects, args.dryRun, `${plan.init.join(' ')} (one-time host setup: units, dirs, linger)`, () => effects.run(plan.init[0], plan.init.slice(1), { env: initEnv }))
+    ? await attempt(effects, args.dryRun, `${plan.init.join(' ')} (${args.fleetSettingsPath ? 'prepared' : 'interactive'} Fleet configuration)`, async () => {
+      const result = await initRunner(args.acquiredFleet || plan.init[0], plan.init.slice(1), { env: initEnv });
+      if (!result?.ok) throw new Error(`ours-fleet init exited ${result?.code ?? 'without a status'}`);
+      return result;
+    })
     : install;
   if (!init.ok) {
-    effects.out(info(`retry manually: ${plan.init.join(' ')}`));
+    const selection = target.mode === 'host-profile'
+      ? `OURS_CONFIG=${shellQuote(target.configPath)} ` : '';
+    effects.out(info(`retry manually: ${selection}${plan.init.map(shellQuote).join(' ')}`));
     return { key: 'fleet', label: plan.label, state: 'failed', note: 'ours-fleet init failed' };
   }
-  if (effects.readText(plan.configPath) === null) {
-    await perform(effects, args.dryRun, `write starter fleet config ${plan.configPath}`, () => effects.writeText(plan.configPath, plan.config));
-  } else {
-    effects.out(ok(`${plan.configPath} already exists — not touched`));
+  if (!args.dryRun && effects.readText(plan.configPath) === null) {
+    effects.out(warn(`Fleet initialization returned without publishing ${plan.configPath}; configuration was not published.`));
+    return { key: 'fleet', label: plan.label, state: 'failed', note: 'Fleet configuration was not published' };
   }
   effects.out(ok('ours-fleet installed and initialized; no fleet roles were started.'));
   if (plan.instruction) effects.out(info(plan.instruction));
@@ -1052,6 +1085,23 @@ export async function endScreen(args, effects, { summary, target, isDefaultState
  * never a refusal.
  */
 export async function runInstall(argv, effects) {
+  if (!argv.length && effects.interactive) {
+    const selection = await effects.askLine('Install server (packages/docker) or connect client (client/profile path): ', effects.readManagedClientProfile() ? 'client' : 'packages');
+    if (['packages', 'docker'].includes(selection)) {
+      const root = await effects.askLine('Private installation root: ', join(effects.home, '.ours-install'));
+      argv = ['server', 'install', '--mode', selection, '--state-dir', root];
+    } else argv = ['client', 'install', ...(selection === 'client' ? [] : ['--config', selection])];
+  }
+  if (['server', 'client'].includes(argv[0])) {
+    try {
+      const command = parseNetworkArgs(argv);
+      if (command.role === 'server') return await runServerCommand(command, effects);
+      return await runClientCommand(command, effects);
+    } catch (error) {
+      effects.out(warn(`ours-install: ${reason(error)}`));
+      return EXIT_REFUSED;
+    }
+  }
   let args;
   try {
     args = parseInstallArgs(argv, effects.env, { home: effects.home });
@@ -1096,6 +1146,40 @@ export async function runInstall(argv, effects) {
     return EXIT_REFUSED;
   }
   effects.out(ok(`Release channel: ${exactSuite.channel} → exact lockstep suite v${exactSuite.version}`));
+
+  let profileSelection;
+  try {
+    profileSelection = resolveProfileSelection({
+      args, env: effects.env, home: effects.home, exists: effects.exists, readProfile: effects.readProfile,
+    });
+  } catch (error) {
+    if (error instanceof InstallUsageError) {
+      effects.out(warn(`ours: ${error.message}. Nothing was changed.`));
+      return EXIT_REFUSED;
+    }
+    throw error;
+  }
+  if (profileSelection.mode === 'host-profile') {
+    try {
+      await effects.verifyHostProfile(profileSelection.configPath);
+    } catch (error) {
+      effects.out(warn(`External daemon validation failed: ${reason(error)}. Nothing was changed.`));
+      return EXIT_REFUSED;
+    }
+    const target = { ...profileSelection, endpoint: profileSelection.profile.endpoint };
+    effects.out(ok(`Validated external daemon at ${target.endpoint}; installing client attachments only.`));
+    const summary = [];
+    const mcp = await attempt(effects, args.dryRun, `npm i -g @ours.network/mcp@${exactSuite.packages.mcp}`,
+      () => effects.run('npm', ['i', '-g', `@ours.network/mcp@${exactSuite.packages.mcp}`]));
+    summary.push({ key: 'mcp', label: 'MCP client', state: mcp.ok ? 'installed' : 'failed' });
+    summary.push(...await runHarnessPhase(args, effects, { target, isDefaultStateDir: false, exactSuite }));
+    summary.push(await runFleetPhase(args, effects, { target, isDefaultStateDir: false }));
+    effects.out(info('Telegram, cowork, messenger, voice, daemon state, and daemon services remain Compose-owned.'));
+    const failed = summary.some((row) => row.state === 'failed');
+    if (failed) effects.out(warn(`Client setup for external daemon ${target.endpoint} is incomplete; shared profile and credential kept.`));
+    else effects.out(ok(`Client setup for external daemon ${target.endpoint} complete; shared profile and credential kept.`));
+    return failed ? EXIT_REFUSED : EXIT_OK;
+  }
 
   // Which daemon, before anything is decided about it. Only args.stateDir can
   // change here; every refusal downstream is unaffected.
@@ -1147,7 +1231,7 @@ export async function runInstall(argv, effects) {
   summary.push(await runIdentityPhase(args, effects, { target, mcpReady }));
   effects.out(progress(6, 8, 'Wire detected harnesses', 'Install the ours plugin into each safe Claude Code, Codex, or Hermes installation.'));
   summary.push(...await runHarnessPhase(args, effects, { target, isDefaultStateDir, exactSuite }));
-  effects.out(progress(7, 8, 'Stage the fleet', 'Install Fleet and write a stopped coordinator + watchdog + health-loop starter config.'));
+  effects.out(progress(7, 8, 'Configure the fleet', 'Install Fleet and run its native configuration wizard; roles remain stopped.'));
   summary.push(await runFleetPhase(args, effects, { target, isDefaultStateDir }));
   summary.push(await runVoicePhase(args, effects, { target, mcpReady }));
 
@@ -1161,4 +1245,167 @@ export async function runInstall(argv, effects) {
   effects.out(progress(8, 8, 'Finish', 'Summarize what is running, what is stopped, and the exact next commands.'));
   await endScreen(args, effects, { summary, target, isDefaultStateDir, brokerUrl: args.brokerUrl });
   return EXIT_OK;
+}
+
+
+export async function runServerCommand(args, effects) {
+  if (args.operation === 'status') return executeServerCommand(args, effects);
+  return effects.withInstallationLock(args.stateDir, () => executeServerCommand(args, effects));
+}
+
+async function executeServerCommand(args, effects) {
+  const recordPath = join(args.stateDir, 'installation.json');
+  let record = effects.readJson(recordPath);
+  const existing = record !== null;
+  if (existing) {
+    record = validateInstallation(record, args.stateDir);
+    if (args.mode && args.mode !== record.mode) throw new Error('Conflicting runtime mode; retained installation was not changed');
+    if (args.operation !== 'update' && args.sources && (record.sourcePolicyHash
+      ? effects.sourcePolicyHash(args.sources) !== record.sourcePolicyHash
+      : effects.readText(args.sources) !== effects.readText(record.sourcesPath))) throw new Error('Conflicting source selection; use explicit server update');
+  } else {
+    if (args.operation !== 'install' || !args.mode) throw new Error('First server install requires --mode');
+    record = effects.newInstallation(args.stateDir, args.mode);
+  }
+  if (record.layoutConversion && !['install', 'start', 'stop', 'status'].includes(args.operation)) {
+    throw new Error('Layout conversion is incomplete; resume with server install or server start before changing state or authority');
+  }
+  if (record.buildTransition && !['stop', 'status', record.buildTransition.operation].includes(args.operation)) {
+    throw new Error(`Server build activation is incomplete; repeat server ${record.buildTransition.operation} before other mutations`);
+  }
+  if ((!existing || args.operation === 'update') && !record.buildTransition) {
+    const policy = args.sources ? effects.readJson(args.sources) : effects.packagedSourcePolicy();
+    args.resolvedSources = await effects.resolveSourcePolicy(policy, 'server');
+  }
+  if (!existing && args.sources) record.sourcePolicyHash = effects.sourcePolicyHash(args.sources);
+  await effects.serverPreflight(record, args.operation, {
+    existing, sourcePath: args.sources ?? record.sourcesPath, sourceManifest: args.resolvedSources,
+  });
+  if (existing && (record.schema === 1 || record.layoutConversion)
+    && ['install', 'start', 'restart', 'update', 'rebuild'].includes(args.operation)) {
+    record = record.mode === 'docker'
+      ? await effects.convertDockerInstallation(record, args.operation)
+      : await effects.convertPackageInstallation(record, args.operation);
+    if (['install', 'start', 'restart'].includes(args.operation)) {
+      effects.out(ok(`Server ${args.operation} completed after layout conversion for ${record.root}`));
+      return EXIT_OK;
+    }
+  }
+  if (args.operation === 'stop' && record.layoutConversion) {
+    await effects.stopPendingConversion(record);
+  } else if (args.operation === 'install') {
+    if (!existing) {
+      await effects.initializeSelection(record, args.resolvedSources);
+      effects.writeJson(recordPath, JSON.stringify(record, null, 2) + '\n');
+    }
+    await effects.prepareInstallation(record);
+    // A repeated setup repairs delivery with the retained master and exact packages.
+    await effects.serverLifecycle(record, 'stop');
+    await effects.serverAccess(record, 'access-init', { migrate: !!args.migrate });
+    await effects.serverAccess(record, 'access-issue');
+    await effects.recordInstallationBuild(record);
+    await effects.serverLifecycle(record, 'start');
+  } else if (['backup', 'restore', 'reset'].includes(args.operation)) {
+    await effects.serverMaintenance(record, args);
+  } else if (['update', 'rebuild'].includes(args.operation)) {
+    await effects.serverBuildTransition(record, args);
+  } else if (args.operation === 'access-issue') {
+    await effects.serverAccess(record, 'access-issue', { output: args.output });
+  } else if (args.operation === 'access-replace') {
+    const running = await effects.serverLifecycle(record, 'status');
+    await effects.serverLifecycle(record, 'stop');
+    await effects.serverAccess(record, 'access-replace');
+    try {
+      await effects.serverAccess(record, 'access-issue');
+      await effects.serverLifecycle(record, 'start', running);
+    } catch (error) {
+      effects.out(warn(`The API master has changed; setup is incomplete: ${reason(error)}. Repeat server install to repair delivery without another replacement.`));
+      return EXIT_REFUSED;
+    }
+    effects.out(info('Separately configured clients require newly issued replacement credentials.'));
+  } else if (args.operation === 'restart') {
+    const running = await effects.serverLifecycle(record, 'status');
+    await effects.serverLifecycle(record, 'stop');
+    await effects.serverLifecycle(record, 'start', running);
+  } else {
+    const running = await effects.serverLifecycle(record, args.operation);
+    if (args.operation === 'status') effects.out(JSON.stringify({
+      mode: record.mode, instanceId: record.instanceId, schema: record.schema, running,
+      ...(record.buildTransition ? { buildTransition: record.buildTransition.phase } : {}),
+      ...(record.layoutConversion ? {
+        layoutConversion: record.schema === 1 ? 'preparation-pending' : 'activation-pending',
+      } : {}),
+    }));
+  }
+  effects.out(ok(`Server ${args.operation} completed for ${record.root}`));
+  return EXIT_OK;
+}
+
+async function runClientCommand(command, effects) {
+  const managedPath = join(effects.home, '.ours-client', 'profile.json');
+  const saved = effects.readManagedClientProfile();
+  let configPath = command.config;
+  if (!configPath && saved) {
+    if (effects.interactive && !await effects.ask(`Reuse saved client server ${saved.endpoint}?`, true))
+      throw new InstallUsageError('Saved client default retained; use an explicit prepared profile to validate replacement input');
+    configPath = managedPath;
+  }
+  let profile;
+  if (configPath) profile = validateHostProfile(effects.readProfile(configPath));
+  else if (effects.interactive) {
+    const endpoint = await effects.askLine('Server HTTP endpoint: ', 'http://127.0.0.1:3050');
+    const credentialPath = await effects.askLine('Private issued-token file: ', '');
+    if (!credentialPath) throw new InstallUsageError('Client setup requires an issued-token file');
+    profile = await effects.discoverClientProfile(endpoint, credentialPath);
+  }
+  if (!profile) throw new InstallUsageError('client install requires a complete network profile; supply --config or use the interactive client setup');
+  if (saved && (saved.endpoint !== profile.endpoint || saved.expectedInstanceId !== profile.expectedInstanceId))
+    throw new InstallUsageError('Managed client already selects another server; existing default was not changed');
+  for (const name of ['OURS_API_TOKEN', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_DAEMON_ID']) {
+    if (effects.env[name]?.trim()) throw new InstallUsageError(`${name} conflicts with client profile selection`);
+  }
+  effects.out(info(`Selected server ${profile.endpoint} (instance ${profile.expectedInstanceId}).`));
+  await effects.verifyHostProfile(configPath || profile);
+  await effects.verifyPackagedMcp(configPath || profile);
+  const settings = saved?.installer ?? (configPath ? effects.readJson(configPath)?.installer : undefined);
+  const settingsBase = saved ? dirname(managedPath) : configPath ? dirname(configPath) : process.cwd();
+  let integrations = settings?.integrations;
+  if (!integrations && effects.interactive) {
+    integrations = [];
+    for (const name of ['codex', 'claude-code', 'fleet']) if (await effects.ask(`Install ${name}?`, name !== 'fleet')) integrations.push(name);
+  }
+  if (!Array.isArray(integrations) || !integrations.length || integrations.some(name => !['codex', 'claude-code', 'fleet'].includes(name)) || new Set(integrations).size !== integrations.length) throw new InstallUsageError('installer.integrations must select codex, claude-code and/or fleet');
+  let fleetSettingsPath = settings?.fleetSettingsPath;
+  if (fleetSettingsPath !== undefined && (typeof fleetSettingsPath !== 'string' || !fleetSettingsPath))
+    throw new InstallUsageError('installer.fleetSettingsPath must be a non-empty path when supplied');
+  if (fleetSettingsPath) fleetSettingsPath = resolve(settingsBase, fleetSettingsPath);
+  const selectedClients = [...new Set(['sdk', ...(integrations.includes('fleet') ? ['cli'] : []), ...integrations])];
+  let sourcesPath = settings?.sourcesPath;
+  let resolvedSources;
+  if (saved) sourcesPath = resolve(settingsBase, sourcesPath);
+  else {
+    if (sourcesPath) sourcesPath = resolve(settingsBase, sourcesPath);
+    const policy = sourcesPath ? effects.readJson(sourcesPath) : effects.packagedSourcePolicy();
+    resolvedSources = await effects.resolveSourcePolicy(policy, 'client', selectedClients);
+  }
+  const imported = effects.importClientProfile({ profile, sourcesPath, sources: resolvedSources, integrations, fleetSettingsPath });
+  try {
+    await effects.verifyHostProfile(imported.configPath);
+    const exactSuite = await effects.acquireClientPackages(imported.configPath, imported.settings.sourcesPath, integrations);
+    const args = { assumeYes: true, dryRun: false, channel: 'latest', clientIntegrations: integrations,
+      acquiredFleet: exactSuite.fleetBin, fleetSettingsPath: imported.settings.fleetSettingsPath };
+    const target = { mode: 'host-profile', managed: true, configPath: imported.configPath, profile: imported.profile, endpoint: imported.profile.endpoint };
+    const summary = await runHarnessPhase(args, effects, { target, isDefaultStateDir: false, exactSuite });
+    if (integrations.includes('fleet')) summary.push(await runFleetPhase(args, effects, { target, isDefaultStateDir: false }));
+    const incomplete = integrations.filter(name => !summary.some(row => row.key === name && row.state === 'installed'));
+    if (effects.env.OURS_CONFIG && resolve(effects.env.OURS_CONFIG) !== imported.configPath)
+      effects.out(warn('This shell has an explicit OURS_CONFIG override. Unset it for new clients to use the saved default; installer did not edit your shell.'));
+    effects.out(incomplete.length
+      ? warn(`Client setup incomplete (${incomplete.join(', ')}); saved profile and settings retained. Re-run ours-install client install.`)
+      : ok(`Client setup complete. New clients discover ${imported.configPath}; no OURS_CONFIG export is required.`));
+    return incomplete.length ? EXIT_REFUSED : EXIT_OK;
+  } catch (error) {
+    effects.out(warn(`Client setup incomplete: ${reason(error)}. Saved profile and settings retained; re-run ours-install client install.`));
+    return EXIT_REFUSED;
+  }
 }

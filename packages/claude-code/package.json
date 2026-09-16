@@ -1,7 +1,7 @@
 {
   "name": "@ours.network/claude-code",
   "version": "1.1.1",
-  "description": "Claude Code plugin for ours \u2014 secure agent-to-agent messaging over ADAPT. Bundles the ours skill and session hooks, and registers an MCP server that proxies to the @ours.network/mcp daemon.",
+  "description": "Claude Code plugin for ours \u2014 secure agent-to-agent messaging over ADAPT with native host network transport.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "author": "Adapt Toolkit",
@@ -41,10 +41,13 @@
     "build:dev": "OURS_BUILD_DEV=1 node build.mjs",
     "prepublishOnly": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node test/proxy-resolve.test.mjs"
+    "test": "node --test"
   },
   "dependencies": {
-    "@ours.network/mcp": "1.1.1"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@ours.network/sdk": "3.8.0",
+    "ws": "^8.21.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

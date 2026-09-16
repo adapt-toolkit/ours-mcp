@@ -448,6 +448,7 @@ feature and still works; it is described above.
   watcher for exactly one TUI session. The launcher observes that session's thread
   directly; monitor MCP tools carry explicit arm/disarm consent, while trusted hooks add
   defensive identity-state synchronization. Standard `codex` falls back, after separate
-  consent, to a foreground `ours-mcp watch` call that returns on the next body-free event.
+  consent, to a package-local authenticated network watch that returns on the next
+  body-free event.
   Authenticated daemon notification endpoints remain body-free. Message text is returned
   only by the explicit unread-drain and history tools.
