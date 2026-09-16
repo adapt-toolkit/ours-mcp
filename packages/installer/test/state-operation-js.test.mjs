@@ -148,9 +148,15 @@ for (const operation of ['update', 'rebuild']) test(`full-server ${operation} ba
     // No runtime sockets in this fixture; only the external Cowork preparation is stubbed.
     await assert.rejects(runStateOperation(['update', 'server'], env), /compatibility/);
     assert.equal(fs.existsSync(join(root, 'backups')), false);
+    if (operation === 'rebuild') {
+      await assert.rejects(runStateOperation(['rebuild', 'server'], env), /compatibility/);
+      assert.equal(fs.existsSync(join(root, 'backups')), false);
+      // A rebuild may retain equivalent records; changed records require update.
+      for (const name of records) fs.writeFileSync(join(build, name), old[name]);
+    }
     await runStateOperation([operation, 'server', ...(operation === 'update' ? ['--compatible'] : [])], env);
     for (const name of [...components, 'mcp', 'credentials']) assert.equal(fs.readFileSync(join(live, name, 'retained'), 'utf8'), name);
-    for (const name of components) for (const record of records) assert.equal(fs.readFileSync(join(live, name, '.ours-provenance', record), 'utf8'), '{"build":"new"}');
+    for (const name of components) for (const record of records) assert.equal(fs.readFileSync(join(live, name, '.ours-provenance', record), 'utf8'), operation === 'rebuild' ? old[record].toString() : '{"build":"new"}');
     const backup = fs.readdirSync(join(root, 'backups')).find(name => name.startsWith('pre-update-'));
     await extractArchive(join(root, 'backups', backup), join(root, 'restored'), { domain: 'server', uid: process.getuid(), gid: process.getgid(), provenance: old });
     for (const name of components) assert.equal(fs.readFileSync(join(root, 'restored', name, '.ours-provenance/package-lock.json'), 'utf8'), '{"build":"old"}');

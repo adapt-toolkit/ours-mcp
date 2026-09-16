@@ -224,7 +224,7 @@ test('explicit update resolves the packaged policy while retry reuses its pendin
   }
 });
 
-test('same-source rebuild admits fresh metadata while changed sources require explicit compatibility', async () => {
+test('same-source rebuild requires equivalent dependency records and changed sources require explicit compatibility', async () => {
   const { realEffects } = await import('../lib/effects.mjs');
   const fs = await import('node:fs');
   const { join } = await import('node:path');
@@ -239,6 +239,8 @@ test('same-source rebuild admits fresh metadata while changed sources require ex
       for (const name of ['package-lock.json', 'dependency-tree.json']) fs.writeFileSync(join(item.workDir, name), JSON.stringify({ build: item.workDir }));
     }
     const effects = realEffects({ env: {}, home: root });
+    for (const compatible of [false, true]) await assert.rejects(effects.checkServerBuild(record, candidate, compatible, 'rebuild'), /build|dependenc|compatibility/i);
+    for (const name of ['package-lock.json', 'dependency-tree.json']) fs.copyFileSync(join(record.workDir, name), join(candidate.workDir, name));
     await effects.checkServerBuild(record, candidate, false, 'rebuild');
     fs.writeFileSync(candidate.sourcesPath, '{"selection":"changed"}');
     for (const name of ['package-lock.json', 'dependency-tree.json']) fs.copyFileSync(join(record.workDir, name), join(candidate.workDir, name));
