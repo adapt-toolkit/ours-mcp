@@ -1,4 +1,5 @@
-import { accessSync, constants, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { readBuildRecords, initializeBuildMarker } from '../maintenance/build-context.mjs';
+import { accessSync, constants, lstatSync, readFileSync } from 'node:fs';
 
 export function privatePath(path, directory = false, writable = false) {
   const stat = lstatSync(path);
@@ -42,18 +43,5 @@ export function checkCredential(path) {
 // Called with the startup state-directory lock held. These are build records,
 // not a storage schema or a declaration that arbitrary upgrades are compatible.
 export function recordBuild(state) {
-  const marker = `${state}/.ours-provenance`;
-  try { mkdirSync(marker, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
-  privatePath(marker, true, true);
-  for (const name of ['package-lock.json', 'dependency-tree.json']) {
-    const path = `${marker}/${name}`;
-    const content = readFileSync(`/opt/ours/${name}`);
-    try {
-      privatePath(path);
-      if (readFileSync(path).equals(content)) continue;
-    } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const temp = `${path}.${process.pid}`;
-    writeFileSync(temp, content, { mode: 0o600, flag: 'wx' });
-    renameSync(temp, path);
-  }
+  initializeBuildMarker(`${state}/.ours-provenance`, readBuildRecords('/opt/ours'));
 }

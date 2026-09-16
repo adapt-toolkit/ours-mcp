@@ -23,7 +23,7 @@ import { atomicWriteConfig, snapshotConfig, restoreConfig } from './config.mjs';
 import { askYesNo, askLine as askLineOnTty } from './prompt.mjs';
 import { classifyHarnessProbe } from './logic.mjs';
 import { classifyStateDir } from './detect.mjs';
-import { semanticRecordEqual } from '../assets/scripts/maintenance/provenance-compare.mjs';
+import { BASE_RECORDS, CONTEXT, readBuildRecords, equalBuildRecords, initializeBuildMarker } from '../assets/scripts/maintenance/build-context.mjs';
 
 /** GET http://127.0.0.1:<port>/state-dir — the unauthenticated identity probe. */
 async function probePort(port, { timeoutMs = 1500 } = {}) {
@@ -660,6 +660,7 @@ export function networkEffects(effects) {
           try {
             await effects.run(process.execPath, [join(record.workDir, 'scripts/build/build.mjs')], { cwd: record.workDir, env: { OURS_BUILD_ROOT: record.workDir, OURS_SOURCE_ROOT: sourceRoot } });
             await effects.run('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], { cwd: record.workDir });
+            await effects.run(process.execPath, [join(record.workDir, 'scripts/build/record-build.mjs')], { cwd: record.workDir, env: { OURS_BUILD_ROOT: record.workDir } });
             writePrivateNew(join(record.workDir, '.packages-ready'), 'ready\n');
           } finally { rmSync(sourceRoot, { recursive: true, force: true }); }
         }
@@ -703,7 +704,7 @@ export function networkEffects(effects) {
           await effects.copyDockerBuildRecords(candidate, candidate.workDir);
         }
         // npm emits readable build records; maintenance consumes private copies.
-        for (const file of ['package-lock.json', 'dependency-tree.json']) {
+        for (const file of [...BASE_RECORDS, ...(existsSync(join(candidate.workDir, CONTEXT)) ? [CONTEXT] : [])]) {
           const path = join(candidate.workDir, file), stat = lstatSync(path);
           if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o7002)) {
             throw new Error('Unsafe candidate build record');
@@ -711,6 +712,7 @@ export function networkEffects(effects) {
           JSON.parse(readFileSync(path, 'utf8'));
           chmodSync(path, 0o600);
         }
+        readBuildRecords(candidate.workDir, { privateFiles: true });
         return candidate;
       } catch (error) {
         rmSync(root, { recursive: true, force: true });
@@ -718,30 +720,45 @@ export function networkEffects(effects) {
       }
     },
     async copyDockerBuildRecords(record, directory) {
-      // This container is never started and has no server volumes.
+      // Inspect immutable image metadata; never reinterpret a failed context copy as legacy.
+      const label = (await effects.run('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "network.ours.build-context" }}', `${record.project}:runtime`])).stdout.trim();
+      if (!['', '<no value>', '1'].includes(label)) throw new Error('Unsupported image build-context schema');
+      const names = [...BASE_RECORDS, ...(label === '1' ? [CONTEXT] : [])];
+      const stage = mkdtempSync(join(directory, '.records-'));
       const name = `${record.project}-records`;
-      await effects.run('docker', ['create', '--name', name, '--entrypoint', '/bin/true', `${record.project}:runtime`]);
+      let created = false;
       try {
-        for (const file of ['package-lock.json', 'dependency-tree.json']) {
-          await effects.run('docker', ['cp', `${name}:/opt/ours/${file}`, join(directory, file)]);
+        await effects.run('docker', ['create', '--name', name, '--entrypoint', '/bin/true', `${record.project}:runtime`]);
+        created = true;
+        for (const file of names) {
+          await effects.run('docker', ['cp', `${name}:/opt/ours/${file}`, join(stage, file)]);
+          const st = lstatSync(join(stage, file));
+          if (!st.isFile() || st.uid !== process.getuid() || (st.mode & 0o7002)) throw new Error('Unsafe copied build record');
+          chmodSync(join(stage, file), 0o600);
         }
-      } finally { await effects.run('docker', ['rm', name]); }
+        readBuildRecords(stage, { privateFiles: true });
+        // Destination is unpublished candidate storage; any copy error aborts activation.
+        for (const file of names) renameSync(join(stage, file), join(directory, file));
+        if (label !== '1' && existsSync(join(directory, CONTEXT))) throw new Error('Legacy image conflicts with retained build context');
+      } finally {
+        try { if (created) await effects.run('docker', ['rm', name]); }
+        finally { rmSync(stage, { recursive: true, force: true }); }
+      }
     },
     async checkServerBuild(record, candidate, compatible, operation = 'update') {
       const sameSources = readFileSync(record.sourcesPath).equals(readFileSync(candidate.sourcesPath));
       if (operation === 'rebuild' && !sameSources) throw new Error('Rebuild must retain the selected sources');
-      if (compatible && operation !== 'rebuild') return;
-      if (!sameSources && operation !== 'rebuild') throw new Error('Changed sources require reviewed storage compatibility (--compatible)');
+      if (!sameSources && operation !== 'rebuild' && !compatible) throw new Error('Changed sources require reviewed storage compatibility (--compatible)');
       let current = record.workDir;
       if (record.mode === 'docker') {
         current = join(candidate.root, 'previous-build');
         ensurePrivateDirectory(current);
         await effects.copyDockerBuildRecords(record, current);
       }
-      for (const file of ['package-lock.json', 'dependency-tree.json']) {
-        if (!semanticRecordEqual(file, readFileSync(join(current, file)), readFileSync(join(candidate.workDir, file)))) {
-          throw new Error('Different build requires reviewed storage compatibility; use server update with --compatible');
-        }
+      const currentRecords = readBuildRecords(current), candidateRecords = readBuildRecords(candidate.workDir);
+      if (compatible && operation !== 'rebuild') return;
+      if (!equalBuildRecords(currentRecords, candidateRecords)) {
+        throw new Error('Different build or missing verified context requires reviewed storage compatibility; use server update with --compatible');
       }
     },
     async serverBuildTransition(record, args) {
@@ -861,18 +878,10 @@ export function networkEffects(effects) {
       if (record.mode === 'docker') return;
       await effects.recordRuntimeBuild(record);
       const paths = installationPaths(record);
+      const records = readBuildRecords(record.workDir);
       for (const service of SERVER_SERVICES) {
         const marker = join(paths[service], '.ours-provenance');
-        ensurePrivateDirectory(marker);
-        for (const name of ['package-lock.json', 'dependency-tree.json']) {
-          const expected = readFileSync(join(record.workDir, name));
-          const destination = join(marker, name);
-          if (!existsSync(destination)) writePrivateNew(destination, expected);
-          else {
-            assertPrivateRegularFile(destination, 'build provenance');
-            if (!readFileSync(destination).equals(expected)) throw new Error('Existing state provenance differs from the selected build; use supported update');
-          }
-        }
+        initializeBuildMarker(marker, records);
       }
     },
     async serverMaintenance(record, args) {

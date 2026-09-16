@@ -5,7 +5,7 @@ import { installationPaths, validateInstallation, SERVER_SERVICES } from './plan
 import { copyPrivateTree, createArchive, validateArchive, scanSource } from '../assets/scripts/maintenance/state-archive.mjs';
 import { publishNoReplace } from '../assets/scripts/maintenance/state-native.mjs';
 
-const BUILD_RECORDS = ['package-lock.json', 'dependency-tree.json'];
+import { recordNames, readBuildRecords, initializeBuildMarker } from '../assets/scripts/maintenance/build-context.mjs';
 const PROVENANCE_DIRECTORY = '.ours-provenance';
 const COMPONENTS = [...SERVER_SERVICES, 'mcp'];
 const CONSUMERS = SERVER_SERVICES.filter(service => service !== 'daemon');
@@ -14,15 +14,6 @@ function privateFile(path) {
   const stat = fs.lstatSync(path);
   if (!stat.isFile() || stat.uid !== process.getuid() || stat.gid !== process.getgid() || (stat.mode & 0o7777) !== 0o600) {
     throw new Error(`Unsafe conversion source file: ${path}`);
-  }
-  return fs.readFileSync(path);
-}
-
-function buildRecordBytes(path) {
-  const stat = fs.lstatSync(path);
-  // Build metadata is not secret; npm lockfiles normally have mode 0644.
-  if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0) {
-    throw new Error(`Unsafe conversion build record: ${path}`);
   }
   return fs.readFileSync(path);
 }
@@ -89,20 +80,14 @@ export async function stageLegacyPackageState(sourceRecord, staging) {
   if (fs.existsSync(join(source.daemon, '.mcp'))) {
     throw new Error('Conflicting embedded and separate MCP sources require explicit resolution');
   }
-  const provenance = Object.fromEntries(BUILD_RECORDS.map(name => [name, buildRecordBytes(join(sourceRecord.workDir, name))]));
+  const provenance = readBuildRecords(sourceRecord.workDir);
   fs.mkdirSync(staging, { mode: 0o700 });
   try {
     for (const component of COMPONENTS) {
       copyPrivateTree(source[component], staged(target[component]), ownership);
       if (component === 'mcp') continue;
       const marker = join(staged(target[component]), PROVENANCE_DIRECTORY);
-      if (!fs.existsSync(marker)) fs.mkdirSync(marker, { mode: 0o700 });
-      for (const name of BUILD_RECORDS) {
-        const path = join(marker, name);
-        if (fs.existsSync(path)) {
-          if (!privateFile(path).equals(provenance[name])) throw new Error('Source state provenance differs from the installed build');
-        } else fs.writeFileSync(path, provenance[name], { mode: 0o600, flag: 'wx' });
-      }
+      initializeBuildMarker(marker, provenance);
     }
     fs.writeFileSync(staged(target.config), configBytes, { mode: 0o600 });
     for (const consumer of CONSUMERS) {
@@ -148,9 +133,7 @@ export async function prepareLegacyPackageState(sourceRecord, staging, backupPat
   }
   const targetRecord = await stageLegacyPackageState(sourceRecord, staging);
   try {
-    const provenance = Object.fromEntries(BUILD_RECORDS.map(name => [
-      name, buildRecordBytes(join(sourceRecord.workDir, name)),
-    ]));
+    const provenance = readBuildRecords(sourceRecord.workDir);
     // createArchive validates the complete archive before publishing it without replacement.
     // Keep original configuration bytes in the backup, then bind the deployment copy.
     await createArchive(staging, backupPath, {
@@ -191,13 +174,15 @@ export function validateConvertedPackageState(record, tree = installationPaths(r
   const paths = installationPaths(record);
   const physical = path => join(tree, relative(paths.state, path));
   scanSource(tree, { uid: process.getuid(), gid: process.getgid() });
+  const records = readBuildRecords(record.workDir);
+  const BUILD_RECORDS = recordNames(records);
   for (const component of SERVER_SERVICES) {
     const marker = join(physical(paths[component]), PROVENANCE_DIRECTORY);
     if (fs.readdirSync(marker).sort().join() !== [...BUILD_RECORDS].sort().join()) {
       throw new Error(`Incomplete converted ${component} provenance`);
     }
     for (const name of BUILD_RECORDS) {
-      if (!privateFile(join(marker, name)).equals(buildRecordBytes(join(record.workDir, name)))) {
+      if (!privateFile(join(marker, name)).equals(records[name])) {
         throw new Error(`Converted ${component} differs from the selected build`);
       }
     }
@@ -267,7 +252,7 @@ export async function convertPackageInstallation(record, operation, effects) {
       const target = await stageLegacyPackageState(source, staging);
       const archiveOptions = {
         domain: 'server', uid: process.getuid(), gid: process.getgid(),
-        provenance: Object.fromEntries(BUILD_RECORDS.map(name => [name, buildRecordBytes(join(source.workDir, name))])),
+        provenance: readBuildRecords(source.workDir),
       };
       const backupPath = record.layoutConversion.backupPath;
       if (pathExists(backupPath)) await validateArchive(backupPath, archiveOptions);

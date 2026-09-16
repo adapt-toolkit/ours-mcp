@@ -33,5 +33,14 @@ test('JS coordinator builds an exact local Git selection through its existing re
     const packed = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--ignore-scripts', '--json', join(output, 'docker/vendor/ours.network-install.tgz')], { cwd: output, encoding: 'utf8' }))[0];
     assert.equal(packed.name, '@ours.network/install');
     assert.equal(packed.version, '1.2.3');
+    // Exercise the actual fresh finalizer after npm's umask-sensitive install.
+    execFileSync('npm', ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: output, stdio: ['ignore', 'pipe', 'pipe'] });
+    const finalized = spawnSync(process.execPath, [fileURLToPath(new URL('../assets/scripts/build/record-build.mjs', import.meta.url))], {
+      env: { ...process.env, OURS_BUILD_ROOT: output }, encoding: 'utf8',
+    });
+    assert.equal(finalized.status, 0, finalized.stderr);
+    const context = JSON.parse(readFileSync(join(output, 'build-context.json')));
+    assert.equal(context.schema, 1);
+    assert.equal(context.vendors[0].name, '@ours.network/install');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

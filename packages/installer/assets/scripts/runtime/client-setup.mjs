@@ -1,3 +1,4 @@
+import { readBuildRecords, initializeBuildMarker } from '../maintenance/build-context.mjs';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
@@ -105,14 +106,7 @@ function prepare() {
     // access-init owns the fresh-state check; no installer files enter daemon
     // state until it has initialized or retained the selected authority.
     if (domain === 'daemon') continue;
-    const marker = `${data}/.ours-provenance`;
-    ensureDirectory(marker);
-    for (const name of ['package-lock.json', 'dependency-tree.json']) {
-      const target = `${marker}/${name}`, expected = readFileSync(`/opt/ours/${name}`);
-      if (!existingPrivate(target, false)) {
-        writeFileSync(target, expected, { mode: 0o600, flag: 'wx' });
-      }
-    }
+    initializeBuildMarker(`${data}/.ours-provenance`, readBuildRecords('/opt/ours'));
   }
   const path = '/storage/state/daemon/config.json';
   const expected = composeConfig('daemon');
@@ -134,12 +128,7 @@ function prepare() {
 
 function finishDaemonSetup() {
   const state = '/var/lib/ours';
-  const marker = `${state}/.ours-provenance`;
-  ensureDirectory(marker);
-  for (const name of ['package-lock.json', 'dependency-tree.json']) {
-    const path = `${marker}/${name}`;
-    if (!existingPrivate(path, false)) writeFileSync(path, readFileSync(`/opt/ours/${name}`), { mode: 0o600, flag: 'wx' });
-  }
+  initializeBuildMarker(`${state}/.ours-provenance`, readBuildRecords('/opt/ours'));
   privatePath('/var/lib/ours-mcp', true);
   const mcpProfile = { endpoint: 'http://127.0.0.1:3050', expectedInstanceId: process.env.OURS_DAEMON_ID, credentialPath: `${state}/daemon-token` };
   const mcpPath = '/var/lib/ours-mcp/profile.json';

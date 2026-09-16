@@ -7,7 +7,7 @@ import { copyPrivateTree, scanSource, createArchive, validateArchive } from './s
 import { publishNoReplace } from './state-native.mjs';
 
 const COMPONENTS = ['daemon', 'telegram', 'cowork', 'messenger'];
-const BUILD_RECORDS = ['package-lock.json', 'dependency-tree.json'];
+import { recordNames, readBuildRecords, validateBuildRecordSet } from './build-context.mjs';
 const DAEMON_STATE = '/var/lib/ours';
 const MCP_STATE = '/var/lib/ours-mcp';
 const LEGACY_MCP_CHILD = '.mcp';
@@ -54,7 +54,8 @@ export async function stageDockerLayout(source, staging, options) {
   }
   validateProfile(config.networkMcp.profile, options.instanceId);
   validateProfile(objectAt(join(daemon, LEGACY_MCP_CHILD, 'profile.json'), options), options.instanceId);
-  for (const name of BUILD_RECORDS) {
+  validateBuildRecordSet(options.provenance);
+  for (const name of recordNames(options.provenance)) {
     if (!Buffer.isBuffer(options.provenance?.[name])) throw new Error('Selected build provenance is required');
   }
 
@@ -63,10 +64,10 @@ export async function stageDockerLayout(source, staging, options) {
     for (const component of COMPONENTS) {
       const data = join(source, component, 'data');
       const marker = join(data, '.ours-provenance');
-      if (fs.readdirSync(marker).sort().join() !== [...BUILD_RECORDS].sort().join()) {
+      if (fs.readdirSync(marker).sort().join() !== recordNames(options.provenance).sort().join()) {
         throw new Error(`Incomplete source ${component} provenance`);
       }
-      for (const name of BUILD_RECORDS) {
+      for (const name of recordNames(options.provenance)) {
         if (!privateBytes(join(marker, name), options).equals(options.provenance[name])) {
           throw new Error(`Source ${component} differs from the selected build`);
         }
@@ -100,9 +101,11 @@ export function bindDockerLayout(staging, options) {
 
 /** Offline validation also covers components intentionally left stopped. */
 export function validateDockerLayout(tree, options) {
+  validateBuildRecordSet(options.provenance);
   scanSource(tree, options);
   for (const component of COMPONENTS) {
-    for (const name of BUILD_RECORDS) {
+    if (fs.readdirSync(join(tree, component, '.ours-provenance')).sort().join() !== recordNames(options.provenance).sort().join()) throw new Error('Mixed component provenance');
+    for (const name of recordNames(options.provenance)) {
       if (!privateBytes(join(tree, component, '.ours-provenance', name), options).equals(options.provenance[name])) {
         throw new Error(`Converted ${component} differs from the selected build`);
       }
@@ -206,7 +209,7 @@ export async function runDockerLayoutCommand(argv, env = process.env) {
     uid: process.getuid(), gid: process.getgid(), instanceId: env.OURS_DAEMON_ID,
     cli: env.OURS_CLI_PATH || '/opt/ours/node_modules/.bin/ours',
     configPath: env.OURS_DAEMON_CONFIG || '/var/lib/ours/config.json',
-    provenance: Object.fromEntries(BUILD_RECORDS.map(name => [name, fs.readFileSync(join(build, name))])),
+    provenance: readBuildRecords(build),
   };
   if (!options.uid || !options.gid) throw new Error('Conversion requires a non-root owner');
   if (operation === 'cleanup') {

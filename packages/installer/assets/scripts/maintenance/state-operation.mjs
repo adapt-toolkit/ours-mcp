@@ -7,19 +7,18 @@ import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { createArchive, extractArchive, validateArchive, scanSource, copyPrivateTree } from './state-archive.mjs';
 import { exchange, tryLock, setMtimeNs } from './state-native.mjs';
-import { semanticRecordEqual } from './provenance-compare.mjs';
+import { recordNames, readBuildRecords, equalBuildRecords, initializeBuildMarker } from './build-context.mjs';
 
-const RECORDS = ['package-lock.json', 'dependency-tree.json'];
 const PROVENANCE = '.ours-provenance';
 const APPLICATIONS = ['daemon', 'telegram', 'cowork', 'messenger'];
 const exists = path => { try { fs.lstatSync(path); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } };
 const canonical = path => exists(path) ? fs.realpathSync(path) : join(canonical(dirname(path)), basename(path));
-const sameRecords = (a, b) => RECORDS.every(name => a[name].equals(b[name]));
-const semanticSameRecords = (a, b) => RECORDS.every(name => semanticRecordEqual(name, a[name], b[name]));
+const sameRecords = (a, b) => recordNames(a).length === recordNames(b).length && recordNames(a).every(name => a[name].equals(b[name]));
+const semanticSameRecords = equalBuildRecords;
 const sameInode = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const fail = message => { throw new Error(message); };
 
-export async function runStateOperation(argv, env = process.env) {
+export async function runStateOperation(argv, env = process.env, checkpoints = {}) {
   const selected = name => {
     const value = env[name];
     if (!value || resolve(value) !== value || canonical(value) !== value) fail(`${name} must select an absolute canonical path`);
@@ -62,8 +61,7 @@ export async function runStateOperation(argv, env = process.env) {
   function layout() { privateStat(state, true, 0o700); mkdir(backups); mkdir(maintenance); }
   function readRecords(path, marker = true) {
     privateStat(path, true, 0o700);
-    if (marker && fs.readdirSync(path).sort().join() !== [...RECORDS].sort().join()) fail('domain provenance is incomplete or contains unexpected entries');
-    return Object.fromEntries(RECORDS.map(name => { privateStat(join(path, name), false, 0o600); return [name, fs.readFileSync(join(path, name))]; }));
+    return readBuildRecords(path, { privateFiles: true, marker });
   }
   function writeRecord(path, bytes) {
     fs.writeFileSync(path, bytes, { flag: fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, mode: 0o600 });
@@ -94,8 +92,11 @@ export async function runStateOperation(argv, env = process.env) {
     return roots;
   }
   function retarget(tree, source, target) {
-    for (const root of validateTree(tree, source)) for (const name of RECORDS) if (!source[name].equals(target[name])) {
-      const path = join(root, PROVENANCE, name); fs.unlinkSync(path); writeRecord(path, target[name]);
+    // Call only on private staging. Publish the entire generation at exchange.
+    for (const root of validateTree(tree, source)) {
+      const marker = join(root, PROVENANCE);
+      fs.rmSync(marker, { recursive: true }); mkdir(marker);
+      for (const name of recordNames(target)) writeRecord(join(marker, name), target[name]);
     }
   }
   function copyTree(source, destination) {
@@ -114,7 +115,10 @@ export async function runStateOperation(argv, env = process.env) {
   }
   async function automaticBackup(prefix, records) {
     const path = labelPath(`${prefix}-${new Date().toISOString().replace(/[-:.]/g, '')}-${randomBytes(4).toString('hex')}`);
-    await backupTo(path, records); return path;
+    checkpoints.beforeBackup?.();
+    await backupTo(path, records);
+    checkpoints.afterBackup?.();
+    return path;
   }
   function bindConfig(path, source, keys) {
     privateStat(source, false, 0o600);
@@ -154,12 +158,15 @@ export async function runStateOperation(argv, env = process.env) {
     try {
       if (!tryLock(fd)) fail('replacement staging is in use');
       if (!sameInode(fs.fstatSync(fd), fs.statSync(staging))) fail('replacement staging changed before exchange');
-      exchange(live, staging); fs.rmSync(staging, { recursive: true });
+      checkpoints.beforeExchange?.();
+      exchange(live, staging);
+      checkpoints.afterExchange?.();
+      fs.rmSync(staging, { recursive: true });
     } finally { fs.closeSync(fd); }
   }
   privateStat(state, true, 0o700);
   if (!exists(live)) { if (operation !== 'init') fail('domain state does not exist; run init for this domain first'); layout(); mkdir(live); }
-  const target = Object.fromEntries(RECORDS.map(name => [name, fs.readFileSync(join(build, name))]));
+  const target = readBuildRecords(build);
   const fd = liveDescriptor();
   try {
     if (!tryLock(fd)) fail('domain state is already in use');
@@ -175,17 +182,15 @@ export async function runStateOperation(argv, env = process.env) {
       records = target;
       if (exists(marker)) {
         privateStat(marker, true, 0o700);
-        if (fs.readdirSync(marker).some(name => !RECORDS.includes(name))) fail('domain provenance contains unexpected entries');
-        if (fs.readdirSync(marker).length === RECORDS.length) records = readRecords(marker);
+        if (fs.readdirSync(marker).length) {
+          records = readRecords(marker); // Partial generations are never repaired implicitly.
+          if (!sameRecords(records, target)) fail('existing provenance differs; use reviewed update --compatible to establish the new build context');
+        } else if (application.length && !adopt) fail('existing unmarked domain state requires evidence-backed adoption');
       } else if (application.length && !adopt) fail('existing unmarked domain state requires evidence-backed adoption');
-      const missing = [];
-      for (const name of RECORDS) {
-        const path = join(marker, name);
-        if (!exists(path)) { if (application.length && !adopt) fail('existing domain state has incomplete provenance and requires evidence-backed adoption'); missing.push(name); }
-        else { privateStat(path, false, 0o600); if (!fs.readFileSync(path).equals(records[name])) fail('domain provenance does not match this image'); }
-      }
       prepare(); if (application.length && adopt) scanSource(live, { uid, gid });
-      mkdir(marker); for (const name of missing) writeRecord(join(marker, name), records[name]);
+      checkpoints.beforeInitialMarker?.();
+      initializeBuildMarker(marker, records);
+      checkpoints.afterInitialMarker?.();
       layout(); return;
     }
     if (operation === 'update' || operation === 'rebuild') {
@@ -194,16 +199,14 @@ export async function runStateOperation(argv, env = process.env) {
       if (!semanticSameRecords(records, target) && !(compatible && operation !== 'rebuild')) fail('different-build restore/update requires reviewed storage compatibility (--compatible)');
       prepare(); layout(); const archive = await automaticBackup('pre-update', records);
       console.log(`Validated pre-update backup: ${basename(archive)}`);
-      if (domain === 'server') {
-        // Publish all component build records together, retaining opaque state.
-        const staging = join(maintenance, `update-${randomBytes(12).toString('hex')}`);
-        try {
-          copyTree(live, staging);
-          retarget(staging, records, target);
-          validateTree(staging, target);
-          replace(staging);
-        } finally { if (exists(staging)) fs.rmSync(staging, { recursive: true }); }
-      } else retarget(live, records, target);
+      // Stage the complete set for every domain; no in-place partial retarget.
+      const staging = join(maintenance, `update-${randomBytes(12).toString('hex')}`);
+      try {
+        copyTree(live, staging);
+        retarget(staging, records, target);
+        validateTree(staging, target);
+        replace(staging);
+      } finally { if (exists(staging)) fs.rmSync(staging, { recursive: true }); }
       return;
     }
     if (operation === 'backup') { prepare(); layout(); await backupTo(labelPath(argv[2]), records); return; }
@@ -233,7 +236,7 @@ export async function runStateOperation(argv, env = process.env) {
         } else mkdir(staging);
         const marker = join(paired ? join(staging, 'daemon') : staging, PROVENANCE);
         mkdir(marker);
-        for (const name of RECORDS) writeRecord(join(marker, name), records[name]);
+        for (const name of recordNames(records)) writeRecord(join(marker, name), records[name]);
         bindDeployment(staging);
       }
       retainAuthority(staging); bindDeployment(staging); replace(staging);

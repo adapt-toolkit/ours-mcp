@@ -279,8 +279,10 @@ backup before restore, reset, or update. Restore retains current access authorit
 
 Rebuild uses the saved exact source selection. Update resolves the packaged policy,
 or an explicitly supplied development override, into a retained replacement.
-Preparation does not replace the active runtime. Rebuild needs no compatibility flag
-when it retains the selected sources, even if npm generates different build records.
+Preparation does not replace the active runtime. Rebuild requires the same selected sources and equivalent verified dependency records.
+Different JSON ordering is harmless; different package bytes or dependency edges refuse
+rebuild. Fresh builds record the verified vendor archive bindings so staging paths
+can differ without ignoring package integrity.
 Changed sources require reviewed storage compatibility through explicit update with `--compatible`; this flag
 attests to external evidence and does not establish compatibility by itself.
 Services stop before state/runtime publication, and only previously running services
@@ -291,3 +293,23 @@ manifest. The installer resumes its saved candidate rather than fetching another
 build. `server status` reports the pending phase; `server stop` remains available.
 Other mutations refuse until activation completes. There is no automatic rollback
 of application state after publication.
+
+
+New builds retain `build-context.json` alongside their original lockfile and dependency
+tree. The context binds the original record bytes to verified vendor tar names,
+versions and integrity. Only proven top-level vendor staging paths are normalized;
+lockfile integrity and other dependency references remain unchanged. An invalid or
+unknown context is an error, including with `--compatible`.
+
+Older records without a context retain their conservative comparison. If a rebuild
+is refused because historical staging evidence is unavailable, use a reviewed
+`server update --compatible` to establish a newly verified context; this operation
+preserves the original record set in the pre-update backup. The flag is an explicit
+storage-compatibility attestation, not proof of compatibility or a way to reconstruct
+missing historic evidence. Startup never adds a context to existing legacy markers.
+
+Backups with a context use archive format2; legacy backups remain format1. Updated
+maintenance reads both formats. Format2 is not readable by older maintenance tools,
+so this change does not promise executable downgrade support. Restore validates the
+original archive records unchanged, then writes markers for the active target runtime.
+Mixed/incomplete context and component record sets are refused before activation.

@@ -234,9 +234,9 @@ test('same-source rebuild requires equivalent dependency records and changed sou
     const record = { mode: 'packages', root, workDir: join(root, 'old'), sourcesPath: join(root, 'old-sources.json') };
     const candidate = { root, workDir: join(root, 'new'), sourcesPath: join(root, 'new-sources.json') };
     for (const item of [record, candidate]) {
-      fs.mkdirSync(item.workDir);
+      fs.mkdirSync(item.workDir, { mode: 0o700 });
       fs.writeFileSync(item.sourcesPath, '{"selection":"retained"}');
-      for (const name of ['package-lock.json', 'dependency-tree.json']) fs.writeFileSync(join(item.workDir, name), JSON.stringify({ build: item.workDir }));
+      for (const name of ['package-lock.json', 'dependency-tree.json']) fs.writeFileSync(join(item.workDir, name), JSON.stringify({ build: item.workDir }), { mode: 0o600 });
     }
     const effects = realEffects({ env: {}, home: root });
     for (const compatible of [false, true]) await assert.rejects(effects.checkServerBuild(record, candidate, compatible, 'rebuild'), /build|dependenc|compatibility/i);
@@ -841,8 +841,8 @@ test('package setup records the installed build before allowing state maintenanc
   const root = mkdtempSync(join(tmpdir(), 'ours-build-state-'));
   try {
     const record = { schema: 2, root, mode: 'packages', workDir: join(root, 'runtime') };
-    mkdirSync(record.workDir);
-    writeFileSync(join(record.workDir, 'package-lock.json'), '{"name":"selected-build"}\n');
+    mkdirSync(record.workDir, { mode: 0o700 });
+    writeFileSync(join(record.workDir, 'package-lock.json'), '{"name":"selected-build"}\n', { mode: 0o600 });
     for (const name of ['daemon', 'telegram', 'cowork', 'messenger']) mkdirSync(join(root, 'storage/state', name), { recursive: true, mode: 0o700 });
     const effects = realEffects({ env: {}, home: root });
     effects.run = async (cmd, args, options) => {

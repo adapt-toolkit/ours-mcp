@@ -1,4 +1,4 @@
-/** Opaque format-1 archive codec. The caller excludes writers for the entire operation. */
+/** Opaque format-1/2 archive codec. The caller excludes writers for the entire operation. */
 import * as fs from 'node:fs';
 import { dirname, basename, join, relative, posix } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -7,9 +7,11 @@ import tar from 'tar-stream';
 import { parseTree } from 'jsonc-parser';
 import { publishNoReplace, setMtimeNs } from './state-native.mjs';
 
-const RECORDS = ['dependency-tree.json', 'package-lock.json'];
-const PAYLOADS = [...RECORDS, 'state.tar'];
-const FILES = ['metadata.json', ...PAYLOADS];
+import { recordNames, validateBuildRecordSet, CONTEXT } from './build-context.mjs';
+const archiveRecords = options => recordNames(options.provenance);
+const archivePayloads = options => [...archiveRecords(options), 'state.tar'];
+const archiveFiles = options => ['metadata.json', ...archivePayloads(options)];
+const archiveFormat = options => Object.hasOwn(options.provenance, CONTEXT) ? 2 : 1;
 
 /** Copy stopped state with private owner modes and exact timestamps; leave the source unchanged. */
 export function copyPrivateTree(source, destination, ownership) {
@@ -39,7 +41,7 @@ const absent = path => { if (exists(path)) throw Object.assign(new Error(`Destin
 function inputs({ domain, provenance, uid, gid }) {
   if (typeof domain !== 'string' || !domain) reject('domain must be a non-empty string');
   if (![uid, gid].every(n => Number.isSafeInteger(n) && n >= 0)) reject('uid/gid must be non-negative integers');
-  if (!sameKeys(provenance, RECORDS) || !Object.values(provenance).every(Buffer.isBuffer)) reject('provenance must contain the two admitted byte records');
+  validateBuildRecordSet(provenance);
 }
 function owner(st, { uid, gid }, label, allowedMode = 0o700) {
   if (Number(st.uid) !== uid || Number(st.gid) !== gid) reject(`${label} has foreign ownership`);
@@ -165,15 +167,16 @@ async function members(path, options) {
 }
 export async function validateArchive(archive, options) {
   inputs(options);
+  const RECORDS = archiveRecords(options), PAYLOADS = archivePayloads(options), FILES = archiveFiles(options);
   const st = fs.lstatSync(archive);
   if (!st.isDirectory() || owner(st, options, 'archive') !== 0o700) reject('archive must be a private directory');
-  if (fs.readdirSync(archive).sort().join('\0') !== [...FILES].sort().join('\0')) reject('archive must contain exactly the four format files');
+  if (fs.readdirSync(archive).sort().join('\0') !== [...FILES].sort().join('\0')) reject('archive must contain exactly the expected format files');
   for (const name of FILES) {
     const st = fs.lstatSync(join(archive, name));
     if (!st.isFile() || owner(st, options, name) !== 0o600) reject('archive payload must be a private regular file');
   }
   const metadata = strictJson(fs.readFileSync(join(archive, 'metadata.json')));
-  if (!sameKeys(metadata, ['format', 'domain', 'created_at', 'uid', 'gid', 'sha256']) || metadata.format !== 1 || metadata.domain !== options.domain || metadata.uid !== options.uid || metadata.gid !== options.gid) reject('archive metadata does not match');
+  if (!sameKeys(metadata, ['format', 'domain', 'created_at', 'uid', 'gid', 'sha256']) || metadata.format !== archiveFormat(options) || metadata.domain !== options.domain || metadata.uid !== options.uid || metadata.gid !== options.gid) reject('archive metadata does not match');
   if (typeof metadata.created_at !== 'string' || !metadata.created_at.endsWith('Z') || !Number.isFinite(Date.parse(metadata.created_at))) reject('archive creation time is invalid');
   if (!sameKeys(metadata.sha256, PAYLOADS)) reject('archive digest map is invalid');
   for (const name of PAYLOADS) if (metadata.sha256[name] !== await hash(join(archive, name))) reject(`archive payload ${name} has a mismatched digest`);
@@ -184,7 +187,8 @@ export async function validateArchive(archive, options) {
 function inside(child, parentPath) { const rel = relative(parentPath, child); return !rel || (rel !== '..' && !rel.startsWith('../') && !rel.startsWith('/')); }
 const destinationPath = path => join(fs.realpathSync(dirname(path)), basename(path));
 export async function createArchive(source, destination, options) {
-  inputs(options); absent(destination); parent(destination, options);
+  inputs(options);
+  const RECORDS = archiveRecords(options), PAYLOADS = archivePayloads(options); absent(destination); parent(destination, options);
   if (inside(destinationPath(destination), fs.realpathSync(source))) reject('archive destination must be outside the source');
   const entries = scanSource(source, options);
   const stage = fs.mkdtempSync(join(dirname(destination), '.' + basename(destination) + '.tmp-'));
@@ -197,7 +201,7 @@ export async function createArchive(source, destination, options) {
       fs.chmodSync(join(stage, name), 0o600);
     }
     const sha256 = {}; for (const name of PAYLOADS) sha256[name] = await hash(join(stage, name));
-    const metadata = { format: 1, domain: options.domain, created_at: new Date().toISOString(), uid: options.uid, gid: options.gid, sha256 };
+    const metadata = { format: archiveFormat(options), domain: options.domain, created_at: new Date().toISOString(), uid: options.uid, gid: options.gid, sha256 };
     fs.writeFileSync(join(stage, 'metadata.json'), JSON.stringify(metadata) + '\n', { flag: 'wx', mode: 0o600 });
     fs.chmodSync(join(stage, 'metadata.json'), 0o600);
     await validateArchive(stage, options); publishNoReplace(stage, destination);
