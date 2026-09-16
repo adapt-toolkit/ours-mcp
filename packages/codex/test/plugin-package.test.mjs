@@ -10,7 +10,9 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const workspaceRoot = dirname(dirname(root));
 
 test('npm artifact contains a valid native Codex plugin and all entry points', () => {
-  const packed = JSON.parse(execFileSync('npm', ['pack', '--json', '--dry-run'], { cwd: root, encoding: 'utf8' }))[0];
+  // Inspect the already-built artifact. prepack deletes/rebuilds dist and races
+  // parallel launcher/profile tests importing those same files.
+  const packed = JSON.parse(execFileSync('npm', ['pack', '--ignore-scripts', '--json', '--dry-run'], { cwd: root, encoding: 'utf8' }))[0];
   const files = new Set(packed.files.map((file) => file.path));
   for (const path of ['.codex-plugin/plugin.json', '.mcp.json', 'hooks/hooks.json', 'bin/ours-codex.mjs', 'bin/proxy.mjs', 'bin/monitor-mcp.mjs', 'bin/network-watch.mjs', 'dist/monitor-mcp.mjs', 'dist/network-watch.mjs', 'skills/ours/SKILL.md', 'LICENSE', 'README.md']) {
     assert.ok(files.has(path), `package includes ${path}`);

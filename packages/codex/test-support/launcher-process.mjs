@@ -1,4 +1,3 @@
-import { writeSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { runLauncher } from '../src/launcher.mjs';
 
@@ -42,8 +41,7 @@ function child(name) {
   return proc;
 }
 
-// Exit callbacks cannot wait for an asynchronous pipe write to flush.
-process.on('exit', () => writeSync(1, `${JSON.stringify(report)}\n`));
+process.on('exit', () => process.stdout.write(`${JSON.stringify(report)}\n`));
 try {
   report.result = await runLauncher({
     argv: [], env: {},
