@@ -1,11 +1,11 @@
 {
   "sources": {
-    "sdk": { "type": "git", "url": "https://github.com/adapt-toolkit/ours-sdk.git", "commit": "d5656cdffa26ba9d8b1a6c3a7de4d0f95df41d65" },
+    "sdk": { "type": "git", "url": "https://github.com/adapt-toolkit/ours-sdk.git", "commit": "9cb51add34888e6ae2cc3b554c97362bb1ca2d33" },
     "telegram": { "type": "git", "url": "https://github.com/adapt-toolkit/ours-tg-connector.git", "commit": "81798b836b15ac4ba9b32ac180f94fb258a54a41" },
     "cowork": { "type": "git", "url": "https://github.com/adapt-toolkit/ours-cowork.git", "commit": "1e17f7666c1682a858101c98a8f371aac7b737e3" },
     "messenger": { "type": "git", "url": "https://github.com/adapt-toolkit/ours-messenger-server.git", "commit": "fc852e49eb3b43c077f59cf4919536be6f6d03b1" },
     "fleet": { "type": "git", "url": "https://github.com/adapt-toolkit/ours-fleet.git", "commit": "b8444a7aac2eb6148a3ab534e90308bfc76447d7" },
-    "mcp": { "type": "git", "url": "https://github.com/adapt-toolkit/ours-mcp.git", "commit": "0f22153d1e7aa849e95d5de33365e1165d505184" }
+    "mcp": { "type": "git", "url": "https://github.com/adapt-toolkit/ours-mcp.git", "commit": "3d970d0cb7baf52351d5cd44dd59d4a2f705207b" }
   },
   "packages": {
     "@ours.network/sdk": { "source": "sdk" },
