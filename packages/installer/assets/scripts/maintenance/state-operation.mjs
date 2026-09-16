@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { createArchive, extractArchive, validateArchive, scanSource, copyPrivateTree } from './state-archive.mjs';
 import { exchange, tryLock, setMtimeNs } from './state-native.mjs';
+import { semanticRecordEqual } from './provenance-compare.mjs';
 
 const RECORDS = ['package-lock.json', 'dependency-tree.json'];
 const PROVENANCE = '.ours-provenance';
@@ -14,6 +15,7 @@ const APPLICATIONS = ['daemon', 'telegram', 'cowork', 'messenger'];
 const exists = path => { try { fs.lstatSync(path); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } };
 const canonical = path => exists(path) ? fs.realpathSync(path) : join(canonical(dirname(path)), basename(path));
 const sameRecords = (a, b) => RECORDS.every(name => a[name].equals(b[name]));
+const semanticSameRecords = (a, b) => RECORDS.every(name => semanticRecordEqual(name, a[name], b[name]));
 const sameInode = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const fail = message => { throw new Error(message); };
 
@@ -189,7 +191,7 @@ export async function runStateOperation(argv, env = process.env) {
     if (operation === 'update' || operation === 'rebuild') {
       // The installer admits rebuild only after verifying unchanged sources.
       // This is not a recorded user compatibility attestation.
-      if (operation !== 'rebuild' && !sameRecords(records, target) && !compatible) fail('different-build restore/update requires reviewed storage compatibility (--compatible)');
+      if (!semanticSameRecords(records, target) && !(compatible && operation !== 'rebuild')) fail('different-build restore/update requires reviewed storage compatibility (--compatible)');
       prepare(); layout(); const archive = await automaticBackup('pre-update', records);
       console.log(`Validated pre-update backup: ${basename(archive)}`);
       if (domain === 'server') {
@@ -210,7 +212,7 @@ export async function runStateOperation(argv, env = process.env) {
       if (operation === 'restore') {
         const archive = labelPath(argv[2]); if (fs.realpathSync(archive) !== archive) fail('backup path is not canonical');
         const archived = readRecords(archive, false);
-        if (!sameRecords(archived, target) && !compatible) fail('different-build restore/update requires reviewed storage compatibility (--compatible)');
+        if (!semanticSameRecords(archived, target) && !compatible) fail('different-build restore/update requires reviewed storage compatibility (--compatible)');
         await validateArchive(archive, options(archived)); prepare(); layout(); await automaticBackup('pre-restore', records);
         if (paired) {
           const payload = `${staging}-payload`;

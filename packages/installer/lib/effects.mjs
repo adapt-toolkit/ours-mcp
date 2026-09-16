@@ -23,6 +23,7 @@ import { atomicWriteConfig, snapshotConfig, restoreConfig } from './config.mjs';
 import { askYesNo, askLine as askLineOnTty } from './prompt.mjs';
 import { classifyHarnessProbe } from './logic.mjs';
 import { classifyStateDir } from './detect.mjs';
+import { semanticRecordEqual } from '../assets/scripts/maintenance/provenance-compare.mjs';
 
 /** GET http://127.0.0.1:<port>/state-dir — the unauthenticated identity probe. */
 async function probePort(port, { timeoutMs = 1500 } = {}) {
@@ -704,7 +705,7 @@ export function networkEffects(effects) {
         // npm emits readable build records; maintenance consumes private copies.
         for (const file of ['package-lock.json', 'dependency-tree.json']) {
           const path = join(candidate.workDir, file), stat = lstatSync(path);
-          if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o7022)) {
+          if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o7002)) {
             throw new Error('Unsafe candidate build record');
           }
           JSON.parse(readFileSync(path, 'utf8'));
@@ -728,12 +729,9 @@ export function networkEffects(effects) {
     },
     async checkServerBuild(record, candidate, compatible, operation = 'update') {
       const sameSources = readFileSync(record.sourcesPath).equals(readFileSync(candidate.sourcesPath));
-      if (operation === 'rebuild') {
-        if (!sameSources) throw new Error('Rebuild must retain the selected sources');
-        return;
-      }
-      if (compatible) return;
-      if (!sameSources) throw new Error('Changed sources require reviewed storage compatibility (--compatible)');
+      if (operation === 'rebuild' && !sameSources) throw new Error('Rebuild must retain the selected sources');
+      if (compatible && operation !== 'rebuild') return;
+      if (!sameSources && operation !== 'rebuild') throw new Error('Changed sources require reviewed storage compatibility (--compatible)');
       let current = record.workDir;
       if (record.mode === 'docker') {
         current = join(candidate.root, 'previous-build');
@@ -741,7 +739,7 @@ export function networkEffects(effects) {
         await effects.copyDockerBuildRecords(record, current);
       }
       for (const file of ['package-lock.json', 'dependency-tree.json']) {
-        if (!readFileSync(join(current, file)).equals(readFileSync(join(candidate.workDir, file)))) {
+        if (!semanticRecordEqual(file, readFileSync(join(current, file)), readFileSync(join(candidate.workDir, file)))) {
           throw new Error('Different build requires reviewed storage compatibility; use server update with --compatible');
         }
       }

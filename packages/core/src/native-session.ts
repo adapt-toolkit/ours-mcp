@@ -8,6 +8,7 @@ import type { OursClient } from '@ours.network/sdk';
 import { applicationIdentityConfigPath } from './application-identities.js';
 import { validateHostProfile } from './host-profile.js';
 import type { HostProfile } from './host-profile.js';
+import { acquireSessionGuard } from './session-guard.js';
 
 const RECORD_VERSION = 1 as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -91,11 +92,15 @@ async function serialized<T>(key: string, operation: () => Promise<T>): Promise<
   const tail = predecessor.catch(() => {}).then(() => gate);
   operations.set(key, tail);
   await predecessor.catch(() => {});
+  let releaseGuard: (() => void) | undefined;
   try {
+    releaseGuard = acquireSessionGuard(key);
     return await operation();
   } finally {
-    release();
-    if (operations.get(key) === tail) operations.delete(key);
+    try { releaseGuard?.(); } finally {
+      release();
+      if (operations.get(key) === tail) operations.delete(key);
+    }
   }
 }
 
