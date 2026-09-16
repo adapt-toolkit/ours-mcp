@@ -7,8 +7,8 @@ import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } fro
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveDaemonProfile } from '../src/profile.mjs';
-import { handleHook } from '../src/hooks/runner.mjs';
+import { resolveDaemonProfile } from '../dist/profile.mjs';
+import { handleHook } from '../dist/hooks-runner.mjs';
 import { MonitorWatcher } from '../src/watcher.mjs';
 
 const cli = process.env.OURS_TEST_DAEMON_CLI;

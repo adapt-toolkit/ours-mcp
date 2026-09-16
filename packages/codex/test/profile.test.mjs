@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { launcherEnvironment } from '../src/launcher.mjs';
-import { parseOursArgs, resolveDaemonProfile } from '../src/profile.mjs';
+import { parseOursArgs, resolveDaemonProfile } from '../dist/profile.mjs';
 
 const daemonFetch = (stateDir, calls = []) => async (url, init = {}) => {
   calls.push([String(url), init.headers]);
