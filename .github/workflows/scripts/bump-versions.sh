@@ -12,7 +12,6 @@
 #   @ours.network/claude-code packages/claude-code (standalone SDK consumer)
 #   @ours.network/hermes     packages/hermes       (no internal deps)
 #   @ours.network/codex      packages/codex        (standalone SDK consumer)
-#   @ours.network/install    packages/installer    (self-contained — no internal deps)
 # (Claude Code and Codex plugin manifests are not npm packages, but their user-visible versions
 # stay at the suite version.)
 #
@@ -48,7 +47,6 @@ MANAGED=(
   "@ours.network/claude-code|packages/claude-code/package.json|"
   "@ours.network/hermes|packages/hermes/package.json|"
   "@ours.network/codex|packages/codex/package.json|"
-  "@ours.network/install|packages/installer/package.json|"
 )
 
 # Every native plugin manifest in the repo — bumped to the same suite version.
@@ -186,7 +184,7 @@ for f in "${PLUGIN_MANIFESTS[@]}"; do
   patch_version "$f" "$old" "$UNIFIED"
   files+=("$f")
 done
-summary="v${UNIFIED} lockstep (mcp, claude-code, hermes, codex, install + plugin manifests)"
+summary="v${UNIFIED} lockstep (mcp, claude-code, hermes, codex + plugin manifests)"
 
 # Pass 2: PIN-SYNC — each plugin depends on the exact internal version it ships with.
 for entry in "${MANAGED[@]}"; do
@@ -241,7 +239,6 @@ if [[ "$MODE" == nightly ]]; then
   emit "plugin-version=${NEWV[@ours.network/claude-code]}"
   emit "hermes-version=${NEWV[@ours.network/hermes]}"
   emit "codex-version=${NEWV[@ours.network/codex]}"
-  emit "install-version=${NEWV[@ours.network/install]}"
   exit 0
 fi
 
@@ -263,4 +260,3 @@ emit "core-version=${NEWV[@ours.network/mcp]}"
 emit "plugin-version=${NEWV[@ours.network/claude-code]}"
 emit "hermes-version=${NEWV[@ours.network/hermes]}"
 emit "codex-version=${NEWV[@ours.network/codex]}"
-emit "install-version=${NEWV[@ours.network/install]}"
