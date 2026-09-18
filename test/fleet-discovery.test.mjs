@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 for (const harness of ['codex', 'claude-code', 'hermes']) {
   test(`${harness} core ours skill discovers and delegates to ours-fleet`, () => {

@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const manifests = [
-  ...['core', 'claude-code', 'hermes', 'codex', 'installer'].map(p => `packages/${p}/package.json`),
+  ...['core', 'claude-code', 'hermes', 'codex'].map(p => `packages/${p}/package.json`),
   'packages/claude-code/.claude-plugin/plugin.json',
   'packages/codex/.codex-plugin/plugin.json',
 ];

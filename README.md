@@ -68,3 +68,5 @@ audited and is provided without warranty; use it at your own risk. See
 [COMMERCIAL-LICENCE.md](COMMERCIAL-LICENCE.md).
 
 Released under FSL-1.1-Apache-2.0. Copyright 2026 Adapt Framework Solutions Ltd.
+
+The `@ours.network/install` package is maintained and released independently in [ours-network](https://github.com/adapt-toolkit/ours-network). MCP release versioning does not bump or publish the installer.
