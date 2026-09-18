@@ -28,6 +28,66 @@ Legacy daemon variables such as `OURS_AUTOSTART`, `OURS_TRANSPORT`, and
 `OURS_UNIT_DIR` are rejected. Named `--application` selections are also rejected;
 use the SDK daemon selection variables instead.
 
+For an installer-selected server profile, `@ours.network/cli` loads the fixed
+`@ours.network/mcp/network-integration` export and mounts these tools on the
+daemon's existing authenticated `/mcp` listener. The installer writes one
+`networkMcp` object in the daemon config:
+
+```json
+{
+  "networkMcp": {
+    "profile": {
+      "endpoint": "http://127.0.0.1:3050",
+      "expectedInstanceId": "56bd6f1f-2df1-4844-9a46-d558c021e00f",
+      "credentialPath": "/private/ours/server-client-token"
+    },
+    "applicationConfigPath": "/private/ours/application-identities.json"
+  }
+}
+```
+
+The profile credential is an issued client credential. The integration never
+reads the server's master secret, starts another listener, or attaches before
+the first tool call. It exposes the selected instance's application names at
+`ours://application-identities` and keeps arrival watches scoped to each real
+MCP transport.
+
+In this network mode, a host bridge stages `send_file.path` through the SDK byte
+upload route. `save_file` returns an `oursHostSave` intent for that bridge, and
+final success is produced only after the host has downloaded and written the
+bytes. The shared profile, native-owner-record and file-adapter source lives in
+`src/host-client/` so client packages can bundle it into their own entrypoints.
+Native records receive their host-private root explicitly; they do not derive a
+client path from the server application config.
+
+Host-client helpers select explicit `OURS_CONFIG` first, otherwise the private
+`~/.ours-client/profile.json` when present, otherwise their existing unmanaged
+configuration. The managed file contains the same
+`endpoint`/`expectedInstanceId`/`credentialPath` tuple; an invalid or unreadable
+managed profile is an error, never a fallback to a local daemon. This selection
+also applies to the helpers bundled in Codex and Claude. It does not change the
+SDK daemon configuration default or application/native-session state.
+
+When a complete external host profile is selected, the stdio server
+starts without allocating an owner. Its first tool call selects the native
+logical session from Codex request `_meta.threadId`, or from the existing
+`CLAUDE_CODE_SESSION_ID` fallback when that value identifies the Claude
+session. Initialization and tool discovery do not need owner metadata. The
+connector stores a random owner UUID in private recovery metadata below the
+ours-mcp config directory and recovers that owner after an MCP process recycle.
+Different native session selectors keep separate clients, bindings and arrival
+watches. Closing stdio closes transport/watch resources; it does not release
+the logical owner.
+
+The existing `session-end` hook command reads `session_id` from its JSON stdin.
+For a host profile it persists that owner's exact terminal intent before asking
+the daemon to release the lease, and records the end only after the release is
+acknowledged. A pending release is retried before any successor owner can be
+allocated. A later call for an ended selector receives a fresh owner UUID.
+If the terminal hook is disabled or never delivered, no terminal cleanup is
+claimed: ordinary MCP recycle and resume recover the existing owner, and its
+protected resources remain available.
+
 ## Application identity list
 
 The daemon hosts all identities. ours-mcp keeps only the identities adopted by
@@ -101,3 +161,26 @@ npm run build --workspace @ours.network/mcp
 npm run typecheck --workspace @ours.network/mcp
 npm test --workspace @ours.network/mcp
 ```
+
+### External-profile verification
+
+The existing host-profile checks are part of `npm test`. Build the core package
+and prepare the selected SDK/CLI artifacts first. For the daemon-backed native
+selector, proxy-recycle, SessionEnd and token-refresh checks, run from this package:
+
+```sh
+OURS_TEST_DAEMON_CLI=/absolute/path/to/selected/cli/dist/cli.js npm run test:external-profile
+```
+
+Use an isolated Docker environment and test-owned state. These tests do not log
+in to Codex/Claude and do not replace actual native harness acceptance.
+
+### Container entrypoint
+
+The packaged `dist/container.js` entrypoint is used only when a host integration
+explicitly selects a Compose profile. It preserves daemon/profile validation,
+application visibility, file transfer and notification operations. Standard
+`ours-mcp proxy` and host-only installations do not require Docker. The entrypoint
+uses the daemon state directory (`OURS_STATE_DIR`, default `/var/lib/ours`) and its
+private `.mcp` profile; it is an internal launcher interface, not an additional
+service or a replacement for normal host startup.

@@ -25,6 +25,8 @@
 #                                   from a terminal and type the full path.
 #   OURS_ASSUME_YES=1               accept defaults; skip the typed confirmations (implies no tty)
 #   OURS_NPM="npm"                  npm binary to use
+#   OURS_CONFIG=/path/profile.json  remove selected client attachments for this prepared host
+#                                  profile; its shared credential and Compose daemon are retained
 #   OURS_UNINSTALLER_MJS / OURS_INSTALLER_BASE   run/fetch overrides (dev/testing)
 set -euo pipefail
 

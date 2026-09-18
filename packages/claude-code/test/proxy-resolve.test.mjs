@@ -43,8 +43,19 @@ const MARKER = 'CORE_CLI_RAN';
 function makeTree(root, coreBaseRel) {
   const pluginDir = join(root, 'plugins', 'cache', 'ours', 'ours', '0.17.2');
   mkdirSync(join(pluginDir, 'bin'), { recursive: true });
+  mkdirSync(join(pluginDir, 'dist'), { recursive: true });
   const proxy = join(pluginDir, 'bin', 'proxy.mjs');
   copyFileSync(REAL_PROXY, proxy);
+  copyFileSync(join(dirname(REAL_PROXY), 'container-launch.mjs'), join(dirname(proxy), 'container-launch.mjs'));
+  copyFileSync(join(dirname(REAL_PROXY), 'container-file-transfer.mjs'), join(dirname(proxy), 'container-file-transfer.mjs'));
+  writeFileSync(join(pluginDir, 'dist', 'network-client.mjs'), `
+    import { writeFileSync } from 'node:fs';
+    const mark = (value) => writeFileSync(process.env.NETWORK_RECORD, JSON.stringify(value));
+    export const hostProfileFromEnv = (env) => env.NETWORK_RECORD ? { endpoint: 'http://127.0.0.1:1' } : null;
+    export const runNetworkProxy = async (value) => mark({ command: 'proxy', nativeSessionId: value.nativeSessionId });
+    export const runNetworkWatch = async (value) => mark({ command: 'watch', nativeSessionId: value.nativeSessionId, identity: value.identity });
+    export const endNetworkNativeSession = async (value) => mark({ command: 'session-end', nativeSessionId: value.nativeSessionId });
+  `);
   if (coreBaseRel !== null) {
     const coreDir = join(root, coreBaseRel, 'node_modules', '@ours.network', 'mcp');
     mkdirSync(join(coreDir, 'dist'), { recursive: true });
@@ -58,10 +69,11 @@ function makeTree(root, coreBaseRel) {
   return proxy;
 }
 
-function runProxy(proxyPath, env = {}, args = []) {
+function runProxy(proxyPath, env = {}, args = [], input) {
   return spawnSync(process.execPath, [proxyPath, ...args], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
+    input,
   });
 }
 
@@ -79,6 +91,24 @@ function freshRoot(prefix) {
   const r = mkdtempSync(join(tmpdir(), prefix));
   roots.push(r);
   return r;
+}
+
+// A selected network profile uses the packaged client without resolving or
+// launching the main MCP server. Claude's native session id is the sole owner
+// selector; SessionEnd takes the exact hook payload context.
+{
+  const root = freshRoot('a2a-proxy-network-');
+  const proxy = makeTree(root, null);
+  const record = join(root, 'network.json');
+  let r = runProxy(proxy, { NETWORK_RECORD: record, CLAUDE_CODE_SESSION_ID: 'claude-session-a' });
+  assert(r.status === 0, 'network profile: proxy exits 0 without the main MCP package');
+  assert(JSON.stringify(JSON.parse(readFileSync(record, 'utf8'))) === JSON.stringify({ command: 'proxy', nativeSessionId: 'claude-session-a' }), 'network proxy uses CLAUDE_CODE_SESSION_ID');
+  r = runProxy(proxy, { NETWORK_RECORD: record, CLAUDE_CODE_SESSION_ID: 'wrong-env-session' }, ['session-end'], JSON.stringify({ session_id: 'exact-hook-session' }));
+  assert(r.status === 0, 'network profile: SessionEnd exits 0');
+  assert(JSON.stringify(JSON.parse(readFileSync(record, 'utf8'))) === JSON.stringify({ command: 'session-end', nativeSessionId: 'exact-hook-session' }), 'SessionEnd uses the exact hook session id');
+  r = runProxy(proxy, { NETWORK_RECORD: record, CLAUDE_CODE_SESSION_ID: 'claude-session-a' }, ['watch', 'Alice']);
+  assert(r.status === 0, 'network profile: watch exits 0');
+  assert(JSON.stringify(JSON.parse(readFileSync(record, 'utf8'))) === JSON.stringify({ command: 'watch', nativeSessionId: 'claude-session-a', identity: 'Alice' }), 'network watch uses the Claude session owner');
 }
 
 // SessionEnd uses the same dependency resolution but routes to the CLI's

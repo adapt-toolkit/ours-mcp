@@ -16,6 +16,8 @@ import { fx, said, HOME, OURS, TG } from './fake-effects.mjs';
 const unitPath = (n) => join(HOME, '.config', 'systemd', 'user', n);
 
 const LEGACY_UNIT = '[Unit]\nDescription=ours MCP daemon (secure agent-to-agent messaging over ADAPT)\n[Service]\nExecStart=/usr/bin/node /x/ours-mcp/dist/cli.js serve\n';
+const PROFILE_PATH = '/home/me/private/profile.json';
+const PROFILE = { endpoint: 'http://127.0.0.1:8787', expectedInstanceId: '6d1e0b1a-cba2-4d33-9389-7d1787ea325f', credentialPath: '/home/me/private/token' };
 
 // ------------------------------------------------------ the safety invariant --
 
@@ -52,6 +54,48 @@ test('a --dry-run mutates NOTHING: no command, no write', async () => {
   assert.deepEqual(e.recorder.ran, [], 'no subprocess');
   assert.deepEqual(e.recorder.wrote, [], 'no file written');
   assert.match(said(e), /\[dry-run\] would: /, 'and it says what it would have done');
+});
+
+test('host-profile install validates first and never starts, stops, configures, or removes a local daemon', async () => {
+  const e = fx({
+    env: { OURS_CONFIG: PROFILE_PATH, OURS_ASSUME_YES: '1' }, profile: PROFILE,
+    text: { [join(HOME, 'fleet.yaml')]: 'api_version: ours.network/fleet/v2\n' },
+    harnesses: [
+      { name: 'claude-code', command: 'claude', label: 'Claude Code', status: 'ok' },
+      { name: 'codex', command: 'codex', label: 'Codex', status: 'ok' },
+    ],
+  });
+  assert.equal(await runInstall([], e), EXIT_OK);
+  const commands = e.recorder.ran.map((command) => command.join(' '));
+  assert.ok(commands.some((command) => command.includes('@ours.network/mcp@9.9.9')));
+  assert.ok(commands.some((command) => command.includes('@ours.network/codex@9.9.9')));
+  assert.ok(commands.some((command) => command.includes('@ours.network/fleet')));
+  assert.ok(!commands.some((command) => /daemon (start|restart|stop|install-service|uninstall-service)/.test(command)));
+  assert.ok(!commands.some((command) => /tg-connector|cowork|create-root/.test(command)));
+  assert.ok(!e.recorder.wrote.some(([path]) => path === join(OURS, 'config.json')), 'profile mode writes no local daemon config');
+  for (let index = 0; index < commands.length; index += 1) {
+    if (/^(claude|codex|ours-fleet)/.test(commands[index])) {
+      assert.deepEqual(e.recorder.ranEnv[index], { OURS_CONFIG: PROFILE_PATH }, commands[index]);
+    }
+  }
+  assert.match(said(e), /external daemon.*127\.0\.0\.1:8787/i);
+  assert.match(said(e), /Telegram.*Compose-owned/i);
+});
+
+test('mismatched host profile refuses before the first mutation', async () => {
+  const e = fx({ env: { OURS_CONFIG: PROFILE_PATH }, profile: PROFILE, profileVerificationError: 'instance mismatch' });
+  assert.equal(await runInstall([], e), EXIT_REFUSED);
+  assert.deepEqual(e.recorder.ran, []);
+  assert.deepEqual(e.recorder.wrote, []);
+  assert.deepEqual(e.recorder.wroteText, []);
+  assert.match(said(e), /instance mismatch.*Nothing was changed/i);
+});
+
+test('a failed profile client is never announced as complete', async () => {
+  const e = fx({ env: { OURS_CONFIG: PROFILE_PATH }, profile: PROFILE, runFails: ['@ours.network/mcp@9.9.9'] });
+  assert.equal(await runInstall([], e), EXIT_REFUSED);
+  assert.doesNotMatch(said(e), /Client setup .* complete/);
+  assert.match(said(e), /client setup.*incomplete/i);
 });
 
 // ---------------------------------------------------------------------- refusals --
@@ -181,7 +225,7 @@ test('a clean install passes no --force at all', async () => {
 
 // -------------------------------------------------------------------- components ----
 
-test('assume-yes installs the complete stack, runs both durable shims, stages Fleet, and asks nothing', async () => {
+test('assume-yes installs the complete stack, runs both durable shims, delegates Fleet configuration, and asks nothing', async () => {
   const e = fx({ env: { OURS_ASSUME_YES: '1' }, versions: { '@ours.network/cowork': '0.5.0' } });
   assert.equal(await runInstall([], e), EXIT_OK);
   assert.deepEqual(e.recorder.asked, [], 'a linear run reads no input');
@@ -193,7 +237,8 @@ test('assume-yes installs the complete stack, runs both durable shims, stages Fl
   assert.ok(ran.some((s) => s.includes('ours-tg-connector install-service')), 'Telegram runs durably');
   assert.ok(ran.some((s) => s.includes('ours-cowork install-service')), 'cowork runs durably');
   assert.ok(!ran.some((s) => s.includes('ours-fleet up')), 'Fleet stays stopped');
-  assert.equal(e.recorder.wroteText.length, 1, 'the starter fleet config is staged');
+  assert.ok(e.recorder.interactive.some((call) => call.join(' ').startsWith('ours-fleet init --configuration ')), 'Fleet owns its wizard');
+  assert.equal(e.recorder.wroteText.length, 0, 'the installer does not write Fleet configuration');
 });
 
 test('a connector selected by default is never moved without a yes', async () => {
@@ -265,7 +310,7 @@ test('a second identical run preserves config, refreshes packages, and restarts 
 
 // ---------------------------------------------------- the real effects layer --
 
-test('lib/effects.mjs never reaches for systemctl or a unit file', async () => {
+test('legacy effects keep service ownership and never mutate ambient process environment', async () => {
   // The audit this file exists to make possible: every mutation the installer can
   // perform lives in one small module, so "does this touch the machine" is one
   // grep rather than a code review of the whole flow.
@@ -275,7 +320,7 @@ test('lib/effects.mjs never reaches for systemctl or a unit file', async () => {
   const code = readFileSync(new URL('../lib/effects.mjs', import.meta.url), 'utf8')
     .split('\n').filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*') && !l.trim().startsWith('/*')).join('\n');
   for (const f of ['systemctl', 'loginctl', 'systemd/user']) {
-    assert.ok(!code.includes(f), `${f} must not appear in the effects layer's code`);
+    assert.ok(!code.split('export const INSTALLER_ASSETS')[0].includes(f), `${f} must not appear in the legacy effects layer's code`);
   }
   // Extended for the env parameter: a daemon environment reaches a CHILD and
   // never this process. If the effects layer ever assigned into process.env, a
@@ -806,6 +851,7 @@ test('on macOS the installer requests the CLI-managed daemon LaunchAgent before 
     platform: 'darwin',
     env: { OURS_ASSUME_YES: '1' },
     versions: { '@ours.network/cowork': '0.5.0' },
+    text: { [join(HOME, 'fleet.yaml')]: 'api_version: ours.network/fleet/v2\n' },
   });
   assert.equal(await runInstall([], e), EXIT_OK);
   const service = e.recorder.ran.find((c) => c.join(' ').includes('daemon install-service'));

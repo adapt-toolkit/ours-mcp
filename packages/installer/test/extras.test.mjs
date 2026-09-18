@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import {
-  planHarnessPlugins, planFleet, defaultFleetConfig, buildHandoffPromptV3,
+  planHarnessPlugins, planFleet, buildHandoffPromptV3,
   HARNESS_ENV_SUPPORT, CLAUDE_MARKET, CODEX_MARKET,
 } from '../lib/extras.mjs';
 
@@ -16,6 +16,7 @@ const HOME = '/home/me';
 const OURS = resolve(HOME, '.ours');
 const TG = resolve(HOME, '.ours-tg');
 const TG_CFG = join(TG, 'config.json');
+const PROFILE_CFG = '/home/me/private/profile.json';
 
 const all = (status = 'ok') => [
   { name: 'claude-code', status },
@@ -109,35 +110,42 @@ test('nothing a harness plan drives ever calls the `hermes` binary', () => {
   assert.ok(hermes.steps.some((s) => s[0] === 'ours-hermes-install' && s.includes('--skip-daemon')));
 });
 
+test('an explicit host profile reaches driven clients and remains in native launch instructions', () => {
+  const plans = planHarnessPlugins({ harnesses: all(), configPath: PROFILE_CFG, isDefaultStateDir: false });
+  for (const name of ['claude-code', 'codex']) {
+    assert.deepEqual(by(plans, name).env, { OURS_CONFIG: PROFILE_CFG });
+    assert.equal(by(plans, name).envLine, `export OURS_CONFIG=${PROFILE_CFG}`);
+    assert.equal(by(plans, name).claimsPair, false, 'marketplace metadata cannot persist the value');
+  }
+  const hermes = by(plans, 'hermes');
+  assert.equal(hermes.action, 'skip');
+  assert.equal(hermes.reason, 'not selected for host-profile setup');
+  assert.deepEqual(hermes.env, {});
+});
+
 // -------------------------------------------------------------------- fleet --
 
-test('ours-fleet gets a stopped starter config on the selected daemon', () => {
+test('ours-fleet delegates configuration to its wizard at the selected path', () => {
   const plan = planFleet({ stateDir: TG, isDefaultStateDir: false });
   assert.equal(plan.action, 'install');
-  assert.deepEqual(plan.writes, [join(HOME, 'fleet.yaml')]);
-  assert.deepEqual(plan.init, ['ours-fleet', 'init'], 'init takes no daemon argument');
-  assert.deepEqual(plan.roleEnv, { OURS_CONFIG: TG_CFG });
+  assert.deepEqual(plan.init, ['ours-fleet', 'init', '--configuration', join(HOME, 'fleet.yaml')]);
+  assert.equal('writes' in plan, false);
+  assert.equal('config' in plan, false);
+  assert.equal('roleEnv' in plan, false);
   assert.match(plan.instruction, /fleet\.yaml/);
-  assert.ok(plan.instruction.includes(`OURS_CONFIG=${TG_CFG}`));
-  assert.match(plan.config, /FleetCoordinator/);
-  assert.match(plan.config, /fleet-health/);
-  assert.match(plan.config, /coordinator_health/);
-  assert.match(plan.config, new RegExp(`OURS_CONFIG: ${JSON.stringify(TG_CFG)}`));
 });
 
-test('the default state directory writes the starter without a redundant daemon env', () => {
+test('the default state directory uses the same Fleet-owned wizard', () => {
   const plan = planFleet({ stateDir: OURS, isDefaultStateDir: true });
   assert.match(plan.instruction, /ours-fleet doctor/);
-  assert.deepEqual(plan.roleEnv, {});
-  assert.doesNotMatch(plan.config, /OURS_CONFIG/);
+  assert.deepEqual(plan.init, ['ours-fleet', 'init', '--configuration', join(HOME, 'fleet.yaml')]);
 });
 
-test('the starter config is conservative and never starts anything by itself', () => {
-  const text = defaultFleetConfig({ home: HOME, stateDir: OURS, isDefaultStateDir: true });
-  assert.match(text, /approval: allow/);
-  assert.match(text, /filesystem: workspace/);
-  assert.match(text, /unattended: wait/);
-  assert.doesNotMatch(text, /ours-fleet up/);
+test('Fleet plan retains the owner configuration path for an explicit host profile', () => {
+  const settingsPath = join(HOME, 'private', 'fleet-settings.json');
+  const plan = planFleet({ home: HOME, configPath: PROFILE_CFG, settingsPath, isDefaultStateDir: false });
+  assert.equal(plan.configPath, join(HOME, 'fleet.yaml'));
+  assert.deepEqual(plan.init, ['ours-fleet', 'init', '--configuration', join(HOME, 'fleet.yaml'), '--settings', settingsPath]);
 });
 
 test('ours-fleet FOLLOWS the channel, so a nightly stack does not get stable fleet', () => {
@@ -156,8 +164,8 @@ test('ours-fleet FOLLOWS the channel, so a nightly stack does not get stable fle
 
 test('the hand-off explains the staged Fleet and Telegram state', () => {
   const result = buildHandoffPromptV3({ fleet: true, telegram: true, stateDir: OURS, isDefaultStateDir: true });
-  assert.match(result.text, /Review ~\/fleet\.yaml/);
-  assert.match(result.text, /stopped FleetCoordinator/);
+  assert.match(result.text, /Review the Fleet wizard output in ~\/fleet\.yaml/);
+  assert.match(result.text, /selected.*models.*roles.*templates.*permissions/s);
   assert.match(result.text, /connector service that ours-install already started/);
 });
 

@@ -66,6 +66,59 @@ export class InstallUsageError extends Error {
   }
 }
 
+const PROFILE_KEYS = ['endpoint', 'expectedInstanceId', 'credentialPath'];
+const LEGACY_PROFILE_KEYS = ['port', 'stateDir', 'apiToken', 'apiVisibility'];
+const PROFILE_CONFLICT_ENV = ['OURS_API_TOKEN', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_DAEMON_ID'];
+const PROFILE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+const profileError = (message) => new InstallUsageError(`Invalid external host profile: ${message}`);
+
+export function validateHostProfile(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw profileError('expected a complete host profile object.');
+  }
+  const present = PROFILE_KEYS.filter((key) => Object.hasOwn(value, key));
+  if (present.length !== 0 && present.length !== PROFILE_KEYS.length) {
+    throw profileError('expected a complete host profile tuple: endpoint, expectedInstanceId, credentialPath.');
+  }
+  if (present.length === 0) return null;
+  const mixed = LEGACY_PROFILE_KEYS.filter((key) => Object.hasOwn(value, key));
+  if (mixed.length) throw profileError(`legacy selection keys cannot be mixed with a host profile (${mixed.join(', ')}).`);
+  const { endpoint, expectedInstanceId, credentialPath } = value;
+  if (typeof endpoint !== 'string' || endpoint.trim() !== endpoint || endpoint === '') throw profileError('endpoint must be a non-empty HTTP origin.');
+  if (typeof expectedInstanceId !== 'string' || !PROFILE_UUID.test(expectedInstanceId)) throw profileError('expectedInstanceId must be a lowercase UUID.');
+  if (typeof credentialPath !== 'string' || credentialPath === '' || !credentialPath.startsWith('/') || resolve(credentialPath) !== credentialPath) {
+    throw profileError('credentialPath must be a normalized absolute path.');
+  }
+  let url;
+  try { url = new URL(endpoint); } catch { throw profileError('endpoint must be an HTTP origin.'); }
+  if (url.protocol !== 'http:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    throw profileError('endpoint must be an HTTP origin without credentials, path, query, or fragment.');
+  }
+  return { endpoint: url.origin, expectedInstanceId, credentialPath };
+}
+
+export function resolveProfileSelection({ args, env = {}, home = homedir(), exists, readProfile }) {
+  const explicit = (env.OURS_CONFIG ?? '').trim();
+  const configPath = explicit ? resolve(explicit) : resolve(home, DEFAULT_STATE_DIR_NAME, DAEMON_CONFIG);
+  if (!explicit && !exists(configPath)) return { mode: 'local' };
+  if (explicit && !exists(configPath)) throw new InstallUsageError(`Cannot read host profile ${JSON.stringify(configPath)}.`);
+  let value;
+  try { value = readProfile(configPath); }
+  catch (error) { throw new InstallUsageError(error instanceof Error ? error.message : String(error)); }
+  const profile = value === null ? null : validateHostProfile(value);
+  if (profile === null) return { mode: 'local' };
+  if (args.stateDirExplicit || args.portExplicit) throw profileError('--state-dir or --port conflicts with host-profile mode.');
+  const conflicting = PROFILE_CONFLICT_ENV.filter((key) => (env[key] ?? '').trim() !== '');
+  if (conflicting.length) throw profileError(`${conflicting.join(', ')} conflicts with host-profile mode.`);
+  return { mode: 'host-profile', configPath, profile };
+}
+
+export function profileEnv(selection) {
+  if (selection?.mode !== 'host-profile' || typeof selection.configPath !== 'string') throw new Error('profileEnv requires a host-profile selection');
+  return { OURS_CONFIG: selection.configPath };
+}
+
 // Lexical path comparison, matching how the SDK compares a reported state
 // directory against a selected one. Resolving symlinks would mean touching the
 // filesystem before validation, which is what this comparison exists to avoid.
@@ -395,4 +448,51 @@ export function searchFreePort(isTaken, { floor = FREE_PORT_FLOOR, reserved = IN
     if (!isTaken(p)) return p;
   }
   return null;
+}
+
+/** Explicit network operations never fall through to legacy Human provisioning. */
+export function parseNetworkArgs(argv) {
+  if (!['server', 'client'].includes(argv[0])) return null;
+  const [role, operation] = argv;
+  const operations = role === 'client' ? ['install'] : ['install', 'status', 'start', 'stop', 'restart', 'access-issue', 'access-replace', 'backup', 'restore', 'reset', 'update', 'rebuild'];
+  if (!operations.includes(operation)) throw new InstallUsageError(`Unsupported ${role} operation: ${operation ?? '(missing)'}`);
+  const allowed = role === 'client' ? ['config'] : ['state-dir'];
+  if (role === 'server' && operation === 'install') allowed.push('mode', 'sources', 'migrate');
+  if (operation === 'access-issue') allowed.push('output');
+  if (['access-replace', 'reset'].includes(operation)) allowed.push('confirm');
+  if (['restore', 'update'].includes(operation)) allowed.push('compatible');
+  if (operation === 'update') allowed.push('sources');
+  const result = { role, operation };
+  let optionsStart = 2;
+  if (['backup', 'restore', 'reset'].includes(operation)) {
+    result.domain = argv[optionsStart++];
+    if (!['server', 'daemon', 'telegram', 'cowork', 'messenger'].includes(result.domain)) throw new InstallUsageError('Select server, daemon, telegram, cowork or messenger');
+    if (result.domain === 'server' && operation === 'reset') throw new InstallUsageError('Full-server reset is not supported');
+    if (operation !== 'reset') {
+      result.label = argv[optionsStart++];
+      if (typeof result.label !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(result.label)) throw new InstallUsageError('Backup label must be a plain basename');
+    }
+  }
+  const seen = new Set();
+  for (let i = optionsStart; i < argv.length; i++) {
+    const match = /^--([a-z-]+)(?:=(.*))?$/.exec(argv[i]);
+    if (!match || !allowed.includes(match[1]) || seen.has(match[1])) throw new InstallUsageError(`Unexpected or repeated option: ${argv[i]}`);
+    const [, name, inline] = match;
+    seen.add(name);
+    const key = name.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    if (['confirm', 'migrate', 'compatible'].includes(name)) {
+      if (inline !== undefined) throw new InstallUsageError(`--${name} does not take a value`);
+      result[key] = true;
+    } else {
+      const value = inline ?? argv[++i];
+      if (!value || value.startsWith('--')) throw new InstallUsageError(`--${name} requires a value`);
+      result[key] = name === 'mode' ? value : resolve(value);
+    }
+  }
+  const required = role === 'client' ? [] : ['stateDir'];
+  if (operation === 'access-issue') required.push('output');
+  if (['access-replace', 'reset'].includes(operation)) required.push('confirm');
+  for (const key of required) if (!result[key]) throw new InstallUsageError(`${operation} requires --${key.replace(/[A-Z]/g, c => '-' + c.toLowerCase())}`);
+  if (result.mode && !['packages', 'docker'].includes(result.mode)) throw new InstallUsageError('--mode must be packages or docker');
+  return result;
 }

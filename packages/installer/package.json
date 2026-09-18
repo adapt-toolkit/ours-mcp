@@ -2,7 +2,7 @@
   "name": "@ours.network/install",
   "version": "1.1.1",
   "private": false,
-  "description": "The all-in-one ours.network installer: one shared daemon, MCP, cowork, Telegram, Fleet, harness plugins, Human identity, stopped Fleet starter, progress UI, and guided next steps.",
+  "description": "The all-in-one ours.network installer: one shared daemon, MCP, cowork, Telegram, Fleet initialization, harness plugins, Human identity, progress UI, and guided next steps.",
   "type": "module",
   "bin": {
     "ours-install": "install.mjs"
@@ -11,6 +11,7 @@
     "install.mjs",
     "install.sh",
     "lib",
+    "assets",
     "uninstall.mjs",
     "uninstall.sh",
     "README.md",
@@ -29,5 +30,11 @@
   },
   "scripts": {
     "test": "node --test"
+  },
+  "dependencies": {
+    "koffi": "3.2.1",
+    "tar-stream": "3.1.7",
+    "jsonc-parser": "3.3.1",
+    "semver": "7.8.5"
   }
 }

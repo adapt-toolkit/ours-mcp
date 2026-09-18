@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { resolveDaemonProfile } from './profile.mjs';
+import { resolveDaemonProfile } from '../dist/profile.mjs';
 import { connectAppServer } from './app-server-client.mjs';
 import { AtomicStateStore, ControlServer } from './control-server.mjs';
 import { MonitorWatcher } from './watcher.mjs';
@@ -23,19 +23,23 @@ export const remoteTuiArgs = (url, codexArgs) => ['--remote', url, ...codexArgs]
 export function launcherEnvironment(env, profile, control) {
   const out = {
     ...env,
-    OURS_PORT: String(profile.port),
     OURS_CONFIG: profile.configPath,
-    OURS_AUTOSTART: '0',
     OURS_CODEX_CONTROL_SOCKET: control.socketPath,
     OURS_CODEX_CAPABILITY: control.capability,
     OURS_CODEX_LIVE: '1',
     // One stable owner pid for the MCP proxy, hooks, and launcher's own cleanup
     // call. The bin shim preserves an explicit value instead of replacing it
     // with whichever child happened to spawn it.
-    OURS_CLIENT_PID: String(process.pid),
   };
-  if (profile.token) out.OURS_API_TOKEN = profile.token;
-  else delete out.OURS_API_TOKEN;
+  if (profile.profile) {
+    for (const key of ['OURS_PORT', 'OURS_API_TOKEN', 'OURS_STATE_DIR', 'OURS_CLIENT_PID', 'OURS_AUTOSTART', 'OURS_DAEMON_ID']) delete out[key];
+  } else {
+    out.OURS_PORT = String(profile.port);
+    out.OURS_AUTOSTART = '0';
+    out.OURS_CLIENT_PID = String(process.pid);
+    if (profile.token) out.OURS_API_TOKEN = profile.token;
+    else delete out.OURS_API_TOKEN;
+  }
   return out;
 }
 
@@ -50,6 +54,12 @@ export function sessionRegistrationFromNotification(message, cwd) {
       : null;
   return typeof threadId === 'string' && threadId
     ? { command: 'register_session', sessionId: threadId, threadId, cwd }
+    : null;
+}
+
+export function sessionEndPayload(profile, state) {
+  return profile.profile && typeof state?.threadId === 'string' && state.threadId
+    ? `${JSON.stringify({ session_id: state.threadId })}\n`
     : null;
 }
 
@@ -75,6 +85,16 @@ function waitExit(child) {
   return once(child, 'exit').then(([code, signal]) => ({ code, signal }));
 }
 
+function waitCleanupExit(child) {
+  if (child.exitCode != null || child.signalCode != null) return Promise.resolve({ kind: 'exit', code: child.exitCode, signal: child.signalCode });
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (outcome) => { if (!settled) { settled = true; resolve(outcome); } };
+    child.once('error', (error) => finish({ kind: 'error', error }));
+    child.once('exit', (code, signal) => finish({ kind: 'exit', code, signal }));
+  });
+}
+
 export async function runLauncher({
   argv = process.argv.slice(2), env = process.env, platform = process.platform,
   spawn = nodeSpawn, fetch: fetchImpl = globalThis.fetch,
@@ -96,23 +116,37 @@ export async function runLauncher({
   let watcher;
   const sessionEndShim = join(dirname(dirname(fileURLToPath(import.meta.url))), 'bin', 'proxy.mjs');
   const cleanup = async () => {
-    watcher?.stop();
+    await watcher?.stop();
+    const retainedState = control?.state;
     await control?.close().catch(() => {});
     client?.close();
     // The TUI exit is an authoritative normal session end. Run the same lease
     // DELETE seam as the native hook while the shared daemon is still reachable;
     // duplicate hook+launcher cleanup is intentionally idempotent.
+    const input = sessionEndPayload(profile, retainedState);
+    if (profile.profile && input === null) {
+      if (tui && tui.exitCode == null) tui.kill('SIGTERM');
+      if (appServer && appServer.exitCode == null) appServer.kill('SIGTERM');
+      await rm(runtimeDir, { recursive: true, force: true });
+      return;
+    }
     const end = spawn(process.execPath, [sessionEndShim, 'session-end'], {
       env: processEnvs.appServer,
-      stdio: 'ignore',
+      stdio: input === null ? 'ignore' : ['pipe', 'ignore', 'inherit'],
     });
-    end.once('error', () => {});
+    if (input !== null) end.stdin?.end(input);
     let cleanupDeadline;
-    await Promise.race([
-      waitExit(end),
-      new Promise((resolve) => { cleanupDeadline = setTimeout(resolve, 30_000); }),
-    ]).catch(() => {}).finally(() => clearTimeout(cleanupDeadline));
-    if (end.exitCode == null) end.kill('SIGTERM');
+    const cleanupOutcome = await Promise.race([
+      waitCleanupExit(end),
+      new Promise((resolve) => { cleanupDeadline = setTimeout(() => resolve({ kind: 'timeout' }), 30_000); }),
+    ]).finally(() => clearTimeout(cleanupDeadline));
+    if (end.exitCode == null && end.signalCode == null) end.kill('SIGTERM');
+    let cleanupFailure;
+    if (cleanupOutcome.kind === 'error') cleanupFailure = `spawn error: ${cleanupOutcome.error.message}`;
+    else if (cleanupOutcome.kind === 'timeout') cleanupFailure = 'timed out';
+    else if (cleanupOutcome.signal) cleanupFailure = `signal ${cleanupOutcome.signal}`;
+    else if ((cleanupOutcome.code ?? 0) !== 0) cleanupFailure = `exit ${cleanupOutcome.code}`;
+    if (cleanupFailure) process.stderr.write(`ours: SessionEnd cleanup failed: ${cleanupFailure}\n`);
     if (tui && tui.exitCode == null) tui.kill('SIGTERM');
     if (appServer && appServer.exitCode == null) appServer.kill('SIGTERM');
     await rm(runtimeDir, { recursive: true, force: true });
@@ -129,7 +163,7 @@ export async function runLauncher({
       throw new Error(`ours monitor cannot answer ${message.method}`);
     });
     watcher = new MonitorWatcher({
-      baseUrl: profile.baseUrl, token: profile.token, fetch: fetchImpl, appServer: client,
+      baseUrl: profile.baseUrl, token: profile.token, profile: profile.profile, fetch: fetchImpl, appServer: client,
       stateStore: new AtomicStateStore(join(runtimeDir, 'cursor.json')),
     });
     control = new ControlServer({

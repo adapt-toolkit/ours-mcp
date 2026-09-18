@@ -5,7 +5,7 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,6 +75,8 @@ async function stopProxy(child) {
 const stateDir = mkdtempSync(join(tmpdir(), 'ours-session-end-'));
 const port = await freePort();
 const sessionId = `session-end-${process.pid}`;
+const configPath = join(stateDir, 'config.json');
+writeFileSync(configPath, JSON.stringify({ port, stateDir, apiVisibility: 'open', apiTokenDeliveryFiles: [] }), { mode: 0o600 });
 const env = {
   ...process.env,
   CLAUDE_CODE_SESSION_ID: sessionId,
@@ -83,6 +85,7 @@ const env = {
   OURS_BROKER_URL: 'wss://invalid.local/none',
   OURS_PORT: String(port),
   OURS_STATE_DIR: stateDir,
+  OURS_CONFIG: configPath,
   OURS_TRANSPORT: 'http',
 };
 const proxyEnv = { ...env };

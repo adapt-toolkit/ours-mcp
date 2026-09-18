@@ -2,10 +2,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { hostProfileFromEnv } from '../../core/src/host-client/index.ts';
 import { sendControlCommand } from './control-server.mjs';
 
 const require = createRequire(import.meta.url);
+const networkWatchPath = fileURLToPath(new URL('../bin/network-watch.mjs', import.meta.url));
 export const monitorToolNames = ['arm_monitor', 'foreground_monitor', 'disarm_monitor', 'monitor_status'];
 const content = (text, isError = false) => ({ content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) });
 
@@ -20,7 +23,16 @@ const foregroundOffer = (identity) =>
   `Only after an explicit yes, call get_messages once to drain existing unread mail, then ` +
   `call foreground_monitor({ identity: ${JSON.stringify(identity)} }).`;
 
-export function foregroundWatchProcess(identity) {
+export function foregroundWatchProcess(identity, nativeSessionId, env = process.env) {
+  if (hostProfileFromEnv(env)) {
+    if (typeof nativeSessionId !== 'string' || !nativeSessionId.trim()) {
+      throw new Error('Native session metadata is required for host-profile monitoring.');
+    }
+    return {
+      command: process.execPath,
+      args: [networkWatchPath, identity, nativeSessionId],
+    };
+  }
   try {
     const cliPath = require.resolve('@ours.network/mcp/dist/cli.js');
     return { command: process.execPath, args: [cliPath, 'watch', identity] };
@@ -48,7 +60,7 @@ export async function handleMonitorCommand(command, args = {}, { env = process.e
     : `Live ours monitor is available but not armed${state.boundIdentity ? `; current binding is "${state.boundIdentity}"` : '; bind an identity first'}.` };
 }
 
-export function waitForForegroundMail(identity, {
+export function waitForForegroundMail(identity, nativeSessionId, {
   env = process.env,
   spawnImpl = spawn,
   signal,
@@ -57,16 +69,17 @@ export function waitForForegroundMail(identity, {
   if (typeof identity !== 'string' || !identity.trim()) return Promise.reject(new Error('identity is required'));
 
   return new Promise((resolve, reject) => {
-    const invocation = commandFor(identity);
+    const invocation = commandFor(identity, nativeSessionId, env);
     const child = spawnImpl(invocation.command, invocation.args, {
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      env: invocation.env ?? env,
+      stdio: [invocation.stdin ?? 'ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
     let stderr = '';
     let settled = false;
 
     const stop = () => {
+      if (invocation.stdin === 'pipe') child.stdin?.end();
       if (!child.killed) child.kill('SIGTERM');
     };
     const finish = (fn, value) => {
@@ -109,7 +122,7 @@ export function createMonitorMcpServer(deps = {}) {
     identity: z.string().min(1).describe('The already-bound ours identity to monitor.'),
   }, async ({ identity }, extra) => {
     try {
-      const event = await waitForForegroundMail(identity, { ...deps, signal: extra?.signal });
+      const event = await waitForForegroundMail(identity, extra?._meta?.threadId, { ...deps, signal: extra?.signal });
       return content(`Foreground ours monitor received a body-free arrival event: ${event}\nCall get_messages now. After handling the mail, call foreground_monitor again without asking if monitoring should remain armed.`);
     } catch (error) {
       if (extra?.signal?.aborted) return content('Foreground ours monitor stopped. It is no longer armed.');

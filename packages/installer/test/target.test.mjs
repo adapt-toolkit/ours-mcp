@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import {
   parseInstallArgs, InstallUsageError, candidatePort, classifyProbe, findDaemon,
   resolveTarget, searchFreePort, samePath,
+  resolveProfileSelection, profileEnv,
   INSTALL_DEFAULT_PORT, INSTALL_RESERVED_PORTS, CLI_PID_RECORD, DAEMON_CONFIG,
 } from '../lib/target.mjs';
 
@@ -73,6 +74,61 @@ test('parseInstallArgs: bad input is refused, never guessed', async () => {
 test('parseInstallArgs: -h and -V alias --help and --version', async () => {
   assert.equal(parseInstallArgs(['-h'], {}, { home: HOME }).help, true);
   assert.equal(parseInstallArgs(['-V'], {}, { home: HOME }).version, true);
+});
+
+// ----------------------------------------------------------- host profiles --
+
+const PROFILE_PATH = '/home/me/private/host-profile.json';
+const PROFILE = {
+  endpoint: 'http://127.0.0.1:8787',
+  expectedInstanceId: '6d1e0b1a-cba2-4d33-9389-7d1787ea325f',
+  credentialPath: '/home/me/private/daemon-token',
+};
+
+test('a complete OURS_CONFIG host profile is selected before local daemon detection', () => {
+  let localProbeRead = false;
+  const selected = resolveProfileSelection({
+    args: parseInstallArgs([], { OURS_CONFIG: PROFILE_PATH }, { home: HOME }),
+    env: { OURS_CONFIG: PROFILE_PATH },
+    home: HOME,
+    exists: () => true,
+    readProfile: (path) => {
+      assert.equal(path, PROFILE_PATH);
+      return PROFILE;
+    },
+    readLocal: () => { localProbeRead = true; },
+  });
+  assert.deepEqual(selected, { mode: 'host-profile', configPath: PROFILE_PATH, profile: PROFILE });
+  assert.equal(localProbeRead, false, 'profile selection never reads daemon state');
+  assert.deepEqual(profileEnv(selected), { OURS_CONFIG: PROFILE_PATH });
+});
+
+test('partial profile and conflicting local selectors refuse instead of falling through', () => {
+  assert.throws(() => resolveProfileSelection({
+    args: parseInstallArgs([], { OURS_CONFIG: PROFILE_PATH }, { home: HOME }),
+    env: { OURS_CONFIG: PROFILE_PATH }, home: HOME, exists: () => true,
+    readProfile: () => ({ endpoint: PROFILE.endpoint }),
+  }), /complete host profile tuple/i);
+  for (const argv of [['--state-dir', TG], ['--port', '3999']]) {
+    assert.throws(() => resolveProfileSelection({
+      args: parseInstallArgs(argv, { OURS_CONFIG: PROFILE_PATH }, { home: HOME }),
+      env: { OURS_CONFIG: PROFILE_PATH }, home: HOME, exists: () => true,
+      readProfile: () => PROFILE,
+    }), /conflicts with host-profile mode/i);
+  }
+});
+
+test('explicit missing profile refuses while a legacy config retains local mode', () => {
+  assert.throws(() => resolveProfileSelection({
+    args: parseInstallArgs([], { OURS_CONFIG: PROFILE_PATH }, { home: HOME }),
+    env: { OURS_CONFIG: PROFILE_PATH }, home: HOME, exists: () => false,
+    readProfile: () => null,
+  }), /Cannot read host profile/);
+  assert.deepEqual(resolveProfileSelection({
+    args: parseInstallArgs([], { OURS_CONFIG: PROFILE_PATH }, { home: HOME }),
+    env: { OURS_CONFIG: PROFILE_PATH }, home: HOME, exists: () => true,
+    readProfile: () => null,
+  }), { mode: 'local' });
 });
 
 // ------------------------------------------------------------------- lookup --

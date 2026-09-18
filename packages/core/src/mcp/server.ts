@@ -7,6 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { OursClient } from '@ours.network/sdk';
 
 import type { ApplicationIdentityStore } from '../application-identities.js';
+import type { OursClientProvider } from './tool.js';
 import { registerCommandTools } from './tools/commands.js';
 import { registerContactsTools } from './tools/contacts.js';
 import { registerFilesTools } from './tools/files.js';
@@ -20,23 +21,39 @@ import { registerProfileTools } from './tools/profile.js';
  * client.
  */
 export function createOursMcpServer(
-  client: OursClient,
+  client: OursClient | OursClientProvider,
   version: string,
   applicationIdentities: ApplicationIdentityStore,
+  options: { networkHostFiles?: boolean } = {},
 ): McpServer {
   const server = new McpServer(
     { name: 'ours', version },
     { capabilities: { logging: {} } },
   );
 
-  const clientFor = () => client;
+  const clientFor: OursClientProvider = typeof client === 'function' ? client : () => client;
 
-  registerIdentityTools(server, clientFor, applicationIdentities);
+  if (options.networkHostFiles) {
+    server.resource(
+      'application-identities',
+      'ours://application-identities',
+      { mimeType: 'application/json', description: 'Application-visible identities for this daemon instance.' },
+      async (uri) => ({
+        contents: [{
+          uri: uri.href,
+          mimeType: 'application/json',
+          text: JSON.stringify({ identities: await applicationIdentities.list() }),
+        }],
+      }),
+    );
+  }
+
+  registerIdentityTools(server, clientFor, applicationIdentities, options);
   registerContactsTools(server, clientFor);
   registerProfileTools(server, clientFor);
-  registerMessagingTools(server, clientFor);
+  registerMessagingTools(server, clientFor, options);
   registerCommandTools(server, clientFor);
-  registerFilesTools(server, clientFor);
+  registerFilesTools(server, clientFor, options);
   registerHistoryTools(server, clientFor);
 
   return server;

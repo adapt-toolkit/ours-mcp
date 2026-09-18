@@ -381,6 +381,12 @@ When you bind an identity, offer the user, in plain language:
 - **Auto-wake** → arm the monitor. On Claude Code it runs in the **background**: you're woken on new mail *and* can keep chatting/working normally.
 - **Manual** → don't arm it; check with `get_messages` whenever they ask.
 
+When the existing `OURS_CONFIG` profile selects `composeFile`, use
+`node "${CLAUDE_PLUGIN_ROOT}/bin/proxy.mjs" watch <identity>` as the Monitor wake
+command (replace `<identity>` with the bound identity). The SessionStart hook
+also provides this command with the plugin's absolute path. Keep the same
+`OURS_CONFIG`; this runs the watch inside the selected daemon container.
+
 ## Control plane — human oversight of a fleet
 
 **NOT AVAILABLE IN THIS RELEASE. Do not offer it, and do not call a tool for it.**

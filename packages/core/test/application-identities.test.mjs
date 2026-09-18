@@ -34,3 +34,20 @@ await assert.rejects(alpha.list(), /Unsupported ours-mcp application identity co
 chmodSync(path, 0o600);
 
 console.log('application-identities: all passed');
+
+const oldPath = join(root, 'old-version-one.json');
+writeFileSync(oldPath, JSON.stringify({ version: 1, daemons: { [join(root, 'legacy')]: { identities: ['Legacy'] } } }), { mode: 0o600 });
+const firstInstance = '6d1e0b1a-cba2-4d33-9389-7d1787ea325f';
+const secondInstance = '72b7c2d2-b9ce-4e35-9f38-a1f6ab8ce2aa';
+const first = new ApplicationIdentityStore({ instanceId: firstInstance }, { path: oldPath });
+const second = new ApplicationIdentityStore({ instanceId: secondInstance }, { path: oldPath });
+assert.deepEqual(await first.list(), [], 'old version-1 daemon rows remain readable without an instances map');
+await first.add('External-Alice');
+await second.add('External-Bob');
+await first.remove('External-Alice');
+assert.deepEqual(await first.list(), [], 'instance identity removal affects only that instance');
+assert.deepEqual(await second.list(), ['External-Bob'], 'instance UUIDs retain independent identity lists');
+const migrated = JSON.parse(readFileSync(oldPath, 'utf8'));
+assert.deepEqual(migrated.daemons[join(root, 'legacy')].identities, ['Legacy'], 'instance edits do not alter legacy daemon rows');
+assert.ok(Object.hasOwn(migrated.instances, secondInstance), 'instance UUID is used as a data key without path resolution');
+console.log('application-identities external instances: passed');

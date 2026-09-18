@@ -1,0 +1,61 @@
+import assert from 'node:assert/strict';
+import { attachOursClient } from '@ours.network/sdk';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { resolveDaemonProfile } from '../dist/profile.mjs';
+import { handleHook } from '../dist/hooks-runner.mjs';
+import { MonitorWatcher } from '../src/watcher.mjs';
+
+const cli = process.env.OURS_TEST_DAEMON_CLI;
+if (!cli) process.exit(0);
+const root = mkdtempSync(join(tmpdir(), 'ours-codex-refresh-'));
+const daemonState = join(root, 'daemon'); const hostState = join(root, 'host'); const deliveryState = join(root, 'delivery');
+for (const directory of [daemonState, hostState, deliveryState]) mkdirSync(directory, { mode: 0o700 });
+const port = await new Promise((resolve, reject) => { const server = createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const value = server.address().port; server.close(() => resolve(value)); }); });
+const endpoint = `http://127.0.0.1:${port}`;
+const expectedInstanceId = randomUUID();
+const daemonConfig = join(daemonState, 'daemon-config.json');
+const credentialPath = join(hostState, 'daemon-token'); const deliveryPath = join(deliveryState, 'daemon-token'); const profilePath = join(hostState, 'profile.json'); const appConfig = join(hostState, 'mcp-identities.json');
+writeFileSync(daemonConfig, JSON.stringify({ stateDir: daemonState, port, apiVisibility: 'owner', apiTokenDeliveryFiles: [deliveryPath] }), { mode: 0o600 });
+const daemonEnv = { ...process.env, OURS_CONFIG: daemonConfig, OURS_STATE_DIR: daemonState, OURS_PORT: String(port), OURS_DAEMON_ID: expectedInstanceId, OURS_API_VISIBILITY: 'owner', OURS_BROKER_URL: 'wss://invalid.local/none' };
+for (const key of ['OURS_API_TOKEN', 'OURS_TLS_CERT', 'OURS_TLS_KEY', 'OURS_LISTEN_HOST']) delete daemonEnv[key];
+const daemon = spawn('node', [cli, 'daemon', 'serve', '--managed'], { env: daemonEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+let daemonOutput = ''; for (const stream of [daemon.stdout, daemon.stderr]) stream.on('data', (value) => { daemonOutput = (daemonOutput + value).slice(-12000); });
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let owner; let watcher;
+try {
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) { assert.equal(daemon.exitCode, null, daemonOutput); try { const response = await fetch(`${endpoint}/selection`, { signal: AbortSignal.timeout(500) }); if (response.ok && (await response.json()).instanceId === expectedInstanceId) break; } catch {} await pause(100); }
+  assert.equal((await fetch(`${endpoint}/selection`)).status, 200, daemonOutput);
+  copyFileSync(join(daemonState, 'daemon-token'), credentialPath); copyFileSync(join(daemonState, 'daemon-token'), deliveryPath);
+  writeFileSync(profilePath, JSON.stringify({ endpoint, expectedInstanceId, credentialPath }), { mode: 0o600 });
+  writeFileSync(appConfig, JSON.stringify({ version: 1, daemons: {}, instances: { [expectedInstanceId]: { identities: ['RefreshCodex'] } } }), { mode: 0o600 });
+  const env = { OURS_CONFIG: profilePath, OURS_MCP_CONFIG: appConfig };
+  const resolved = await resolveDaemonProfile({ env });
+  assert.equal(resolved.profile.expectedInstanceId, expectedInstanceId);
+  owner = await attachOursClient({ endpoint, expectedInstanceId, credentialPath, sessionMode: 'external', leaseToken: 'codex-refresh-owner', env: {} });
+  await owner.createIdentity({ name: 'RefreshCodex', bio: '', expose_local: false, local_auto_accept: true });
+  assert.equal((await owner.currentIdentity()).name, 'RefreshCodex');
+  assert.deepEqual(await handleHook({ hook_event_name: 'UserPromptSubmit', cwd: root }, { env, findPin: async () => null }), { continue: true });
+  const saved = [];
+  watcher = new MonitorWatcher({ profile: resolved.profile, appServer: { startTurn: async () => assert.fail('empty backlog must not wake') }, stateStore: { save: async (value) => saved.push(value) } });
+  let current = await watcher.pollOnce({ identity: 'RefreshCodex', threadId: 'thread', cursor: null });
+  const oldToken = readFileSync(credentialPath, 'utf8').trim();
+  const updateEnv = { ...process.env, OURS_CONFIG: profilePath }; for (const key of Object.keys(updateEnv)) if (key.startsWith('OURS_') && key !== 'OURS_CONFIG') delete updateEnv[key];
+  const update = spawn('node', [cli, 'config', 'token-update', '--config', profilePath, '--json'], { env: updateEnv, stdio: ['ignore', 'pipe', 'pipe'] }); let updateOut = ''; let updateErr = ''; update.stdout.on('data', (value) => { updateOut += value; }); update.stderr.on('data', (value) => { updateErr += value; }); const [code] = await once(update, 'exit'); assert.equal(code, 0, updateErr || updateOut);
+  assert.equal((await fetch(`${endpoint}/version`, { headers: { authorization: `Bearer ${oldToken}` } })).status, 401);
+  assert.deepEqual(await handleHook({ hook_event_name: 'UserPromptSubmit', cwd: root }, { env, findPin: async () => null }), { continue: true });
+  current = await watcher.pollOnce(current);
+  assert.equal(saved.at(-1).cursor, current.cursor);
+  assert.equal((await owner.currentIdentity()).name, 'RefreshCodex');
+  console.log('codex-profile-refresh: resolver, hook, and one living watcher used the replaced credential');
+} finally {
+  await watcher?.stop(); await owner?.close();
+  if (daemon.exitCode === null) daemon.kill('SIGTERM');
+  await Promise.race([once(daemon, 'exit'), pause(7000)]); if (daemon.exitCode === null) daemon.kill('SIGKILL');
+}

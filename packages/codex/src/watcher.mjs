@@ -1,10 +1,15 @@
+import { randomUUID } from 'node:crypto';
+import { attachOursClient } from '@ours.network/sdk';
+
 export const WAKE_PROMPT = 'New ours mail is available for the identity already bound to this session. Use the ours skill and get_messages now, then handle the unread mail. Do not change identities or reveal message bodies outside the normal get_messages result.';
 
 export class MonitorWatcher {
-  constructor({ baseUrl, token = null, fetch: fetchImpl = globalThis.fetch, appServer, stateStore = { save: async () => {} }, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  constructor({ baseUrl, token = null, profile = null, clientFactory = attachOursClient, fetch: fetchImpl = globalThis.fetch, appServer, stateStore = { save: async () => {} }, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
     this.baseUrl = baseUrl;
     this.headers = token ? { 'x-ours-api-token': token } : {};
     this.fetch = fetchImpl;
+    this.profile = profile;
+    this.clientFactory = clientFactory;
     this.appServer = appServer;
     this.stateStore = stateStore;
     this.sleep = sleep;
@@ -21,6 +26,11 @@ export class MonitorWatcher {
         if (this.pending && this.current) void this.#wake(this.current.threadId);
       }
     });
+  }
+
+  async #client() {
+    this.clientPromise ??= this.clientFactory({ ...this.profile, sessionMode: 'external', leaseToken: randomUUID(), env: {} });
+    return this.clientPromise;
   }
 
   async #json(path, signal) {
@@ -62,11 +72,24 @@ export class MonitorWatcher {
 
   async pollOnce({ identity, threadId, cursor }, signal) {
     const since = cursor == null ? 'tip' : encodeURIComponent(cursor);
-    const data = await this.#json(`/identities/${encodeURIComponent(identity)}/notifications?since=${since}`, signal);
+    let data;
+    let unread;
+    try {
+      if (this.profile) {
+        const client = await this.#client();
+        data = await client.readNotificationPage(identity, { since: cursor == null ? 'tip' : Number(cursor), signal });
+        if (cursor == null) unread = await client.unread();
+      } else {
+        data = await this.#json(`/identities/${encodeURIComponent(identity)}/notifications?since=${since}`, signal);
+        if (cursor == null) unread = await this.#json('/unread', signal);
+      }
+    } catch (error) {
+      if (error?.status === 401 || error?.status === 403 || /HTTP (401|403)|authentication/i.test(error?.message || '')) this.authFailed = true;
+      throw error;
+    }
     const next = { identity, threadId, cursor: String(data.cursor ?? cursor ?? '') };
     await this.stateStore.save(next);
     if (cursor == null) {
-      const unread = await this.#json('/unread', signal);
       const entry = unread.identities?.find((item) => item.name === identity);
       if (entry && (Number(entry.count) > 0 || Number(entry.files) > 0)) await this.#wake(threadId);
     } else if (Array.isArray(data.events) && data.events.length > 0) {
@@ -106,5 +129,8 @@ export class MonitorWatcher {
     this.controller = null;
     this.pending = false;
     this.queued = false;
+    const clientPromise = this.clientPromise;
+    this.clientPromise = null;
+    return clientPromise ? clientPromise.then((client) => client.close()).catch(() => {}) : Promise.resolve();
   }
 }

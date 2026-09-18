@@ -10,7 +10,7 @@
 // src/api/identity.ts — none of them is re-derived here.
 //
 // WHY ctxFor IS CALLED PER HANDLER, NOT ONCE AT REGISTRATION
-// `SessionContext`'s three members are getters, and `clientFor()` is the per-session
+// `SessionContext`'s three members are getters, and `clientFor(extra)` is the per-session
 // factory the MCP server owns. chooseIdentity and createIdentity REBIND the
 // session as part of the call, so they must read the lease table as it is now.
 // Nothing below captures ctx.leaseToken() or ctx.sessionId() into a local.
@@ -18,6 +18,7 @@
 // Tool descriptions and zod schemas are compatibility-sensitive and kept byte-stable.
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { isAbsolute } from 'node:path';
 
 import {
   OursError,
@@ -26,7 +27,7 @@ import type { OursClient } from '@ours.network/sdk';
 
 import { filterApplicationIdentities } from '../../application-identities.js';
 import type { ApplicationIdentityStore } from '../../application-identities.js';
-import { runTool, textResult } from '../tool.js';
+import { runTool, textResult, type OursClientProvider } from '../tool.js';
 
 type IdentityTreeRow = Awaited<ReturnType<OursClient['listIdentities']>>[number];
 type ActiveIdentityTreeRow = Extract<IdentityTreeRow, { cid: string }>;
@@ -127,8 +128,9 @@ const tempTag = (row: IdentityTreeRow): string => {
 
 export function registerIdentityTools(
   server: McpServer,
-  clientFor: () => OursClient,
+  clientFor: OursClientProvider,
   applicationIdentities: ApplicationIdentityStore,
+  options: { networkHostFiles?: boolean } = {},
 ): void {
   server.tool(
     'create_identity',
@@ -145,9 +147,9 @@ export function registerIdentityTools(
       expose_local: z.boolean().default(true).describe('Publish this identity in the host-local contact book.'),
       local_auto_accept: z.boolean().default(true).describe('Auto-accept local contact-book introductions (false = they queue for approval).'),
     },
-    async ({ name, bio, expose_local, local_auto_accept }) =>
+    async ({ name, bio, expose_local, local_auto_accept }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => adoptBeforeMutation(
           applicationIdentities,
           name,
@@ -176,15 +178,14 @@ export function registerIdentityTools(
   server.tool(
     'create_temporary_identity',
     'Create a TEMPORARY identity owned by this session and bind it. Temporary ' +
-      'means session-scoped LOCAL lifetime: when this session ends (explicit ' +
-      'close_temporary_identity, releasing the connection, or the client process ' +
-      'dying), each contact is sent one best-effort "remove me from your contacts" ' +
+      'means session-scoped LOCAL lifetime: when it is explicitly closed or its ' +
+      'owner is authoritatively released, each contact is sent one best-effort "remove me from your contacts" ' +
       'notice and then ALL local state — keys, profile, contacts, messages, files — ' +
       'is deleted; the identity disappears from listings. The remove-me notice is ' +
       'fire-and-forget: remote contact deletion is NOT guaranteed (an offline or ' +
       'pre-0.13 peer keeps its entry). Ownership is exclusive: no other session can ' +
-      'bind or delete it while this session lives. The identity is flat (never ' +
-      'delegated under the host root) and, unlike create_identity, NOT published to ' +
+      'bind or delete it while this session lives. An existing root is required; ' +
+      'the identity is delegated under it and, unlike create_identity, NOT published to ' +
       'the local contact book unless expose_local=true. Omit name for a ' +
       'collision-resistant random one.',
     {
@@ -193,9 +194,9 @@ export function registerIdentityTools(
       expose_local: z.boolean().default(false).describe('Publish in the host-local contact book (default false for a temporary identity).'),
       local_auto_accept: z.boolean().default(true).describe('Auto-accept local contact-book introductions (only relevant with expose_local).'),
     },
-    async ({ name, bio, expose_local, local_auto_accept }) =>
+    async ({ name, bio, expose_local, local_auto_accept }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         async (c) => {
           if (name) {
             return adoptBeforeMutation(
@@ -231,9 +232,10 @@ export function registerIdentityTools(
           const exposure = exposureClause(r.exposedLocal, r.localAutoAccept, '');
           return textResult(
             `Created TEMPORARY identity "${r.info.name}" (${r.info.cid}) and bound it to this session ` +
-              `(owner: this session's lease, client pid ${r.ownerPid}).${exposure}\n\n` +
+              `(owner: this session's lease).${exposure}\n\n` +
               'Lifetime: session-scoped and local. Close it explicitly with close_temporary_identity ' +
-              'when done; if the session ends or dies first, the daemon reclaims it automatically. ' +
+              'when done. In native host-profile mode a delivered SessionEnd hook releases the owner; ' +
+              'without that hook, MCP/stdio exit retains it for resume and does not claim cleanup. ' +
               'On close, contacts get one best-effort remove-me notice (remote deletion NOT ' +
               'guaranteed) and all local state is deleted permanently.',
           );
@@ -253,9 +255,9 @@ export function registerIdentityTools(
       'dead) may be closed by anyone to reclaim it. Defaults to the identity bound ' +
       'to this session.',
     { name: z.string().min(1).optional().describe('Temporary identity to close. Defaults to the one bound to this session.') },
-    async ({ name }) =>
+    async ({ name }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         async (c) => {
           const target = name ?? (await c.currentIdentity()).name;
           return dropBeforeMutation(
@@ -291,9 +293,9 @@ export function registerIdentityTools(
       local_auto_accept: z.boolean().default(true).describe('Auto-accept local contact-book introductions (false = they queue for approval).'),
       skip_if_root_exists: z.boolean().default(false).describe('Installer seam: if a root already exists, do NOTHING (fail with "a root identity already exists") instead of adopting the name as a role. The ours installer sets this so re-runs stay idempotent; leave false for the interactive tool.'),
     },
-    async ({ name, bio, expose_local, local_auto_accept, skip_if_root_exists }) =>
+    async ({ name, bio, expose_local, local_auto_accept, skip_if_root_exists }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => adoptBeforeMutation(
           applicationIdentities,
           name,
@@ -330,7 +332,7 @@ export function registerIdentityTools(
   server.tool(
     'define_local_identity_file',
     'Write a `.ours-identity` workspace-pin file that ties a directory to an ' +
-      'identity. The pin is ADVISORY: a future Claude Code session here is told about ' +
+      'identity. The pin is ADVISORY: a future Codex or Claude Code session here is told about ' +
       'it and asks the user before binding (or creating) the identity — nothing is ' +
       'auto-triggered by the file alone. Use this instead of hand-writing the file. ' +
       'Because this daemon is shared and its CWD is not the user\'s ' +
@@ -353,13 +355,21 @@ export function registerIdentityTools(
         .describe('Auto-accept local contact-book introductions (false = they queue for approval).'),
       overwrite: z.boolean().default(false).describe('Replace an existing .ours-identity file.'),
     },
-    async ({ name, path, force, expose_local, local_auto_accept, overwrite }) =>
-      runTool(
-        clientFor(),
+    async ({ name, path, force, expose_local, local_auto_accept, overwrite }, extra) => {
+      if (options.networkHostFiles) {
+        if (!isAbsolute(path)) return textResult('define_local_identity_file: path must be absolute.', true);
+        return {
+          content: [{ type: 'text' as const, text: 'Host identity file write requested.' }],
+          structuredContent: { oursHostIdentityFile: { name, path, force, expose_local, local_auto_accept, overwrite } },
+          isError: false,
+        };
+      }
+      return runTool(
+        clientFor(extra),
         // The one operation in this slice that is not session-scoped: it writes a
         // file, so the SDK takes no SessionContext.
-        () =>
-          clientFor().defineLocalIdentityFile({
+        (client) =>
+          client.defineLocalIdentityFile({
             name,
             path,
             force,
@@ -369,7 +379,8 @@ export function registerIdentityTools(
           }),
         // `json` is the pin OBJECT; the pretty-printing is this layer's job.
         (r) => textResult(`Wrote ${r.written}:\n${JSON.stringify(r.json, null, 2)}`),
-      ),
+      );
+    },
   );
 
   server.tool(
@@ -383,9 +394,9 @@ export function registerIdentityTools(
       name: z.string().min(1).describe('Name of the identity to bind.'),
       force: z.boolean().default(false).describe('Evict another session that holds this identity.'),
     },
-    async ({ name, force }) =>
+    async ({ name, force }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => adoptBeforeMutation(
           applicationIdentities,
           name,
@@ -411,19 +422,22 @@ export function registerIdentityTools(
       'session, owned by another live session, stale (owner gone, pending cleanup), ' +
       'or closing.',
     {},
-    async () =>
+    async (_args, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.listIdentities(),
         async (daemonRows) => {
           const rows = await filterApplicationIdentities(applicationIdentities, daemonRows);
-          if (rows.length === 0) {
+          if (daemonRows.length === 0) {
             return textResult('No identities yet. Create a root with create_root_identity (or a flat identity with create_identity).');
+          }
+          if (rows.length === 0) {
+            return textResult('No identities are adopted by this application. The daemon contains identities outside this view.');
           }
           // The rows arrive in RENDER ORDER (root, roles, flat). A no-root host is
           // detected exactly as the SDK documents it: no row claims 'root', because
           // a flat identity never asks the packet for a role id in that case.
-          const hasRoot = rows.some((row) => isActiveIdentity(row) && row.kind === 'root');
+          const hasRoot = daemonRows.some((row) => isActiveIdentity(row) && row.kind === 'root');
           const lines = rows.map((row) => {
             if (!isActiveIdentity(row)) {
               const status = row.status === 'awaiting-root'
@@ -457,9 +471,10 @@ export function registerIdentityTools(
     // unmodified, and a non-OursError is still rethrown as a protocol error exactly
     // as runTool does. Keeping this exception local avoids widening the common
     // adapter contract for this one exception.
-    async () => {
+    async (_args, extra) => {
+      const client = await clientFor(extra);
       try {
-        const r = await clientFor().currentIdentity();
+        const r = await client.currentIdentity();
         // `described: false` means ::actor::describe_identity threw — the five
         // described fields are UNKNOWN, not empty, so the response degrades to the
         // bare line, dropping the hierarchy, temporary, bio and persona sentences.
@@ -471,8 +486,8 @@ export function registerIdentityTools(
             : '';
         const temp = r.temporary
           ? '\nTEMPORARY identity owned by this session — session-scoped local lifetime: closed ' +
-            '(best-effort remove-me to each contact, then full local deletion) when this session ' +
-            'ends or on close_temporary_identity.'
+            '(best-effort remove-me to each contact, then full local deletion) on ' +
+            'close_temporary_identity or an authoritative owner release. Native MCP/stdio exit alone retains it for resume.'
           : '';
         const bio = r.bio ? `\nBio: ${r.bio}` : '';
         const persona = r.persona ? `\nPersona: ${r.persona}` : '';
@@ -489,14 +504,15 @@ export function registerIdentityTools(
   server.tool(
     'remove_identity',
     'Permanently delete a persisted identity — its packet and all on-disk state. ' +
-      'This cannot be undone.',
+    'This cannot be undone.',
     { name: z.string().min(1).describe('Name of the identity to delete.') },
-    async ({ name }) => {
+    async ({ name }, extra) => {
+      const client = await clientFor(extra);
       try {
         const r = await dropBeforeMutation(
           applicationIdentities,
           name,
-          () => clientFor().removeIdentity({ name }),
+          () => client.removeIdentity({ name }),
         );
         return r.kind === 'temporary' && r.close
           ? textResult(`Removed temporary identity "${r.name}" and its state.${removeNotice(r.close)}`)

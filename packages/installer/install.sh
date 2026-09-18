@@ -30,7 +30,8 @@
 #   OURS_INSTALL_DRY_RUN=1                   walk the whole flow WITHOUT installing/changing anything
 #                                            (prints exactly what it WOULD do — safe on any machine)
 #   OURS_NPM="npm"                           npm binary to use
-#   OURS_CONFIG=/path/config.json            daemon config file (default ~/.ours/config.json)
+#   OURS_CONFIG=/path/config.json            legacy daemon config or prepared private host profile;
+#                                            a complete host profile performs client-only setup
 #   OURS_INSTALLER_MJS=/path/install.mjs     run this Node installer directly (dev/testing)
 #   OURS_INSTALL_PKG=@ours.network/install   the package to install for the command (override for dev)
 set -euo pipefail

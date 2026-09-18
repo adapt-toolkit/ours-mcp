@@ -34,7 +34,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,7 +67,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, '..', 'dist', 'cli.js');
 const STATE = mkdtempSync(join(tmpdir(), 'a2a-core-envbind-'));
 const BROKER = 'ws://127.0.0.1:59997/nobroker'; // unreachable on purpose — binding is local
-const BIND_MS = 1500; // the seeded bind rides Claude's first `initialized`
+const BIND_MS = 1500;
+const CONFIG = join(STATE, 'config.json'); // the seeded bind rides Claude's first `initialized`
 
 const baseEnv = () => ({
   ...process.env,
@@ -77,6 +78,7 @@ const baseEnv = () => ({
   OURS_BIND_IDENTITY: undefined,
   OURS_PORT: String(PORT),
   OURS_STATE_DIR: STATE,
+  OURS_CONFIG: CONFIG,
   OURS_BROKER_URL: BROKER,
 });
 
@@ -160,6 +162,7 @@ try {
   PORT = await freePort();
   rmSync(STATE, { recursive: true, force: true });
   mkdirSync(STATE, { recursive: true });
+  writeFileSync(CONFIG, JSON.stringify({ port: PORT, stateDir: STATE, apiVisibility: 'open', apiTokenDeliveryFiles: [] }), { mode: 0o600 });
   daemon = spawn('node', [CLI, 'serve'], {
     env: { ...baseEnv(), OURS_GC_INTERVAL_MS: '3600000' },
     stdio: ['ignore', 'ignore', 'pipe'],

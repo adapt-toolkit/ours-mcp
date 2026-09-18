@@ -18,7 +18,7 @@
 //   here that cannot be undone by re-running the installer.
 
 import { join } from 'node:path';
-import { parseInstallArgs, InstallUsageError } from './target.mjs';
+import { parseInstallArgs, resolveProfileSelection, profileEnv, InstallUsageError } from './target.mjs';
 import { planUninstall, planComponentDetach, planStatePurge, stripManagedBlock, planHarnessSelection, selectHarnesses, planGlobalPackages, planPluginRemoval, parseUninstallEnv } from './uninstall.mjs';
 import { tgConfigPath, coworkConfigPath } from './components.mjs';
 import { configJournal, reportRollback } from './journal.mjs';
@@ -89,6 +89,35 @@ export async function runUninstall(argv, effects) {
   if (contract.action === 'refuse') {
     effects.out(warn(`ours: ${contract.message}`));
     return EXIT_REFUSED;
+  }
+
+  let profileSelection;
+  try {
+    profileSelection = resolveProfileSelection({
+      args, env: effects.env, home: effects.home, exists: effects.exists, readProfile: effects.readProfile,
+    });
+  } catch (error) {
+    if (error instanceof InstallUsageError) {
+      effects.out(warn(`ours: ${error.message}. Nothing was changed.`));
+      return EXIT_REFUSED;
+    }
+    throw error;
+  }
+  if (profileSelection.mode === 'host-profile') {
+    effects.out(info(`removing client attachments for external daemon ${profileSelection.profile.endpoint}; daemon and Compose services are untouched`));
+    const discoveredPlugins = planPluginRemoval({
+      home: effects.home, env: effects.env, exists: effects.exists,
+      lastDaemon: true, explicitSelection: contract.engaged,
+    });
+    const harnesses = discoveredPlugins.harnesses.filter((harness) => harness.key !== 'hermes');
+    const plugins = { ...discoveredPlugins, harnesses, packages: harnesses.map((harness) => harness.pkg) };
+    const outcome = await runPluginPhase(plugins, { args, effects, selection: contract.engaged ? contract.harnesses : null });
+    const env = profileEnv(profileSelection);
+    for (const pkg of outcome.packages) {
+      await perform(effects, args.dryRun, `npm rm -g ${pkg}`, () => effects.run('npm', ['rm', '-g', pkg], { env }));
+    }
+    effects.out(info(`operator-owned host profile ${profileSelection.configPath} and shared credential ${profileSelection.profile.credentialPath} kept${purge ? ' under --purge' : ''}`));
+    return EXIT_OK;
   }
 
   // OURS_UNINSTALL_DAEMON decides whether this is an uninstall of the daemon at

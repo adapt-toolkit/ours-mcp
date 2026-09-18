@@ -26,6 +26,10 @@
   "bin": {
     "ours-mcp": "dist/cli.js"
   },
+  "exports": {
+    "./network-integration": "./dist/network-integration.js",
+    "./dist/*": "./dist/*"
+  },
   "files": [
     "dist",
     "README.md"
@@ -43,11 +47,12 @@
     "dev": "tsx src/cli.ts proxy",
     "prepublishOnly": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node test/application-identities.test.mjs && node test/cli-delegation.test.mjs && node test/sdk-pin.test.mjs && node test/skill-tool-vocabulary.test.mjs && node test/inbox-push.test.mjs && node test/contact-lines.test.mjs && node test/env-bind-identity.test.mjs && node test/proxy-exit-on-stdin-eof.test.mjs && node test/proxy-dead-stderr.test.mjs && node test/session-end-temp-cleanup.test.mjs"
+    "test": "node test/application-identities.test.mjs && node test/network-server.test.mjs && node test/network-integration.test.mjs && node test/host-client.test.mjs && node test/cli-delegation.test.mjs && node test/sdk-pin.test.mjs && node test/skill-tool-vocabulary.test.mjs && node test/inbox-push.test.mjs && node test/contact-lines.test.mjs && node test/env-bind-identity.test.mjs && node test/proxy-exit-on-stdin-eof.test.mjs && node test/proxy-dead-stderr.test.mjs && node test/session-end-temp-cleanup.test.mjs && node test/host-profile.test.mjs && node test/container.test.mjs",
+    "test:external-profile": "node test/native-profile-session.test.mjs && node test/external-profile-stdio-refresh.test.mjs"
   },
   "dependencies": {
-    "@ours.network/cli": "2.2.0",
-    "@ours.network/sdk": "3.7.0"
+    "@ours.network/cli": "2.8.1-nightly.1",
+    "@ours.network/sdk": "3.8.1-nightly.3"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

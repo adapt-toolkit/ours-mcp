@@ -13,14 +13,20 @@ const OURS = resolve(HOME, '.ours');
 const TG_CFG = join(HOME, '.ours-telegram', 'config.json');
 const COWORK_CFG = join(HOME, '.ours-cowork', 'config.json');
 
-function fx({ json = {}, text = {}, env = {}, answers = [], typed = null, known = [OURS], isStateDir = true, present = () => false, runFails = [] } = {}) {
-  const recorder = { ran: [], wrote: [], out: [], asked: [], removed: [], wroteText: [], restored: [] };
+function fx({ json = {}, text = {}, env = {}, answers = [], typed = null, known = [OURS], isStateDir = true, present = () => false, runFails = [], profile = null, profileVerificationError = null } = {}) {
+  const recorder = { ran: [], wrote: [], out: [], asked: [], removed: [], wroteText: [], restored: [], profileVerifications: 0 };
   let i = 0;
   return {
     recorder,
     home: HOME,
     env,
     readJson: (p) => (Object.prototype.hasOwnProperty.call(json, p) ? json[p] : null),
+    readProfile: () => profile,
+    verifyHostProfile: async () => {
+      recorder.profileVerifications += 1;
+      if (profileVerificationError) throw new Error(profileVerificationError);
+      return { profile, version: { instanceId: profile?.expectedInstanceId } };
+    },
     writeJson: (p, body) => { recorder.wrote.push([p, body]); },
     run: async (cmd, a) => {
       recorder.ran.push([cmd, ...a]);
@@ -39,7 +45,7 @@ function fx({ json = {}, text = {}, env = {}, answers = [], typed = null, known 
     knownStateDirs: () => known,
     // `isStateDir` answers the purge gate; `present` answers "does this plugin
     // file exist", so a test can leave the plugin phase with nothing to do.
-    exists: (p) => (String(p).includes('.hermes') || String(p).includes('.codex') || String(p).includes('skills') ? present(p) : isStateDir),
+    exists: (p) => (p === env.OURS_CONFIG && profile ? true : String(p).includes('.hermes') || String(p).includes('.codex') || String(p).includes('skills') ? present(p) : isStateDir),
     out: (l) => recorder.out.push(String(l)),
     // The real `ask` takes a DEFAULT, and questions in this file disagree about
     // what it is — the component confirmation defaults to no, the per-harness
@@ -51,6 +57,41 @@ function fx({ json = {}, text = {}, env = {}, answers = [], typed = null, known 
 }
 const said = (e) => e.recorder.out.join('\n');
 const CFG = { port: 3050, stateDir: OURS };
+const PROFILE_PATH = '/home/me/private/profile.json';
+const PROFILE = { endpoint: 'http://127.0.0.1:8787', expectedInstanceId: '6d1e0b1a-cba2-4d33-9389-7d1787ea325f', credentialPath: '/home/me/private/token' };
+
+test('host-profile uninstall removes selected client attachments but never daemon state or shared credentials, even with --purge', async () => {
+  const e = fx({
+    env: { OURS_CONFIG: PROFILE_PATH, OURS_UNINSTALL: 'codex' }, profile: PROFILE,
+    present: (path) => String(path).includes('.codex'),
+  });
+  assert.equal(await runUninstall(['--purge'], e), EXIT_OK);
+  const commands = e.recorder.ran.map((command) => command.join(' '));
+  assert.ok(commands.some((command) => command === 'npm rm -g @ours.network/codex'));
+  assert.ok(!commands.some((command) => /daemon|install-service|uninstall-service/.test(command)));
+  assert.ok(!e.recorder.removed.includes(PROFILE_PATH));
+  assert.ok(!e.recorder.removed.includes(PROFILE.credentialPath));
+  assert.match(said(e), /profile.*credential.*kept/i);
+  assert.equal(e.recorder.profileVerifications, 0, 'client-only removal has no online daemon precondition');
+});
+
+test('invalid selected profile refuses uninstall before mutation without probing a daemon', async () => {
+  const e = fx({ env: { OURS_CONFIG: PROFILE_PATH }, profile: { endpoint: PROFILE.endpoint } });
+  assert.equal(await runUninstall([], e), EXIT_REFUSED);
+  assert.deepEqual(e.recorder.ran, []);
+  assert.deepEqual(e.recorder.removed, []);
+  assert.equal(e.recorder.profileVerifications, 0);
+});
+
+test('host-profile removal excludes a pre-existing local Hermes integration', async () => {
+  const e = fx({
+    env: { OURS_CONFIG: PROFILE_PATH, OURS_UNINSTALL: 'all' }, profile: PROFILE,
+    present: (path) => String(path).includes('.hermes') || String(path).includes('.codex'),
+  });
+  assert.equal(await runUninstall([], e), EXIT_OK);
+  assert.ok(!e.recorder.ran.some((command) => command.includes('@ours.network/hermes')));
+  assert.ok(!e.recorder.removed.some((path) => String(path).includes('.hermes')));
+});
 
 test('NO uninstall path ever runs systemctl', async () => {
   const e = fx({ json: { [join(OURS, 'config.json')]: CFG } });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleHook } from '../src/hooks/runner.mjs';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { handleHook } from '../dist/hooks-runner.mjs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,9 +56,93 @@ test('PostToolUse matcher accepts plugin-qualified ours tool names', () => {
   assert.ok(matcher.test('mcp__ours__create_temporary_identity'));
 });
 
+test('shipped hooks invoke the package-local bundled runner', () => {
+  const config = JSON.parse(readFileSync(join(root, 'hooks/hooks.json'), 'utf8'));
+  for (const event of ['SessionStart', 'UserPromptSubmit', 'PostToolUse']) {
+    assert.match(config.hooks[event][0].hooks[0].command, /dist\/hooks-runner\.mjs/);
+  }
+});
+
 test('SessionEnd invokes deterministic temporary-identity cleanup', () => {
   const config = JSON.parse(readFileSync(join(root, 'hooks/hooks.json'), 'utf8'));
   assert.ok(Array.isArray(config.hooks.SessionEnd));
   const command = config.hooks.SessionEnd[0].hooks[0].command;
   assert.match(command, /^exec node .*proxy\.mjs.*session-end/);
+});
+
+for (const managed of [false, true]) test(`${managed ? 'managed' : 'explicit'} profile filters SDK unread through the authenticated application resource`, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'ours-codex-profile-hook-'));
+  const appConfig = join(home, 'ours-mcp.json');
+  if (managed) mkdirSync(join(home, '.ours-client'), { mode: 0o700 });
+  const profilePath = managed ? join(home, '.ours-client', 'profile.json') : join(home, 'profile.json');
+  const instanceId = '12345678-1234-1234-1234-123456789abc';
+  writeFileSync(appConfig, JSON.stringify({ version: 1, daemons: {}, instances: { [instanceId]: { identities: ['Mallory'] } } }));
+  writeFileSync(profilePath, JSON.stringify({ endpoint: 'http://127.0.0.1:4050', expectedInstanceId: instanceId, credentialPath: join(home, 'token') }), { mode: 0o600 });
+  const calls = [];
+  const result = await handleHook({ hook_event_name: 'UserPromptSubmit', session_id: 'thread-a', cwd: '/repo' }, {
+    env: { HOME: home, ...(managed ? {} : { OURS_CONFIG: profilePath }), OURS_MCP_CONFIG: appConfig },
+    networkSessionFactory: () => async (selector) => {
+      calls.push(['session', selector]);
+      return {
+        fileClient: { unread: async () => ({ identities: [{ name: 'Alice', count: 2 }, { name: 'Mallory', count: 9 }] }) },
+        request: async (request) => {
+          calls.push(['request', request]);
+          return { contents: [{ uri: 'ours://application-identities', text: JSON.stringify({ identities: ['Alice'] }) }] };
+        },
+        close: async () => { calls.push(['close']); },
+      };
+    },
+    fetch: async () => assert.fail('explicit profile must not fetch unread directly'), findPin: async () => null,
+  });
+  assert.match(result.hookSpecificOutput.additionalContext, /Alice.*2 unread/s);
+  assert.doesNotMatch(result.hookSpecificOutput.additionalContext, /Mallory/);
+  assert.deepEqual(calls, [
+    ['session', 'thread-a'],
+    ['request', { method: 'resources/read', params: { uri: 'ours://application-identities' } }],
+    ['close'],
+  ]);
+});
+
+test('explicit profile resolution failure never falls back to legacy unread', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'ours-codex-profile-failure-'));
+  const profilePath = join(home, 'profile.json');
+  writeFileSync(profilePath, JSON.stringify({ endpoint: 'http://127.0.0.1:4050', expectedInstanceId: '12345678-1234-1234-1234-123456789abc', credentialPath: join(home, 'token') }), { mode: 0o600 });
+  let fetched = false;
+  const result = await handleHook({ hook_event_name: 'UserPromptSubmit', cwd: '/repo' }, {
+    env: { HOME: home, OURS_CONFIG: profilePath },
+    profileResolver: async () => { throw new Error('daemon instance mismatch'); },
+    fetch: async () => { fetched = true; return Response.json({ identities: [] }); },
+    findPin: async () => null,
+  });
+  assert.deepEqual(result, { continue: true });
+  assert.equal(fetched, false);
+});
+
+test('network profile never invokes the obsolete Docker application-identity route', async () => {
+  const { chmodSync, existsSync, rmSync } = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'ours-hooks-container-'));
+  try {
+    const profile = join(dir, 'profile.json');
+    const marker = join(dir, 'docker-called');
+    writeFileSync(profile, JSON.stringify({ endpoint: 'http://localhost:3050', expectedInstanceId: '12345678-1234-1234-1234-123456789abc', credentialPath: '/token', composeFile: '/compose.yml' }), { mode: 0o600 });
+    const appConfig = join(dir, 'host.json');
+    writeFileSync(appConfig, JSON.stringify({ version: 1, daemons: {}, instances: { '12345678-1234-1234-1234-123456789abc': { identities: ['HostOnly'] } } }));
+    writeFileSync(join(dir, 'docker'), `#!${process.execPath}\nimport fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(marker)}, 'called'); process.exit(41);`);
+    chmodSync(join(dir, 'docker'), 0o755);
+    const env = { PATH: dir, OURS_CONFIG: profile, OURS_MCP_CONFIG: appConfig };
+    const deps = {
+      env,
+      findPin: async () => null,
+      networkSessionFactory: () => async () => ({
+        fileClient: { unread: async () => ({ identities: [{ name: 'NetworkOnly', count: 2 }, { name: 'HostOnly', count: 8 }] }) },
+        request: async () => ({ contents: [{ uri: 'ours://application-identities', text: JSON.stringify({ identities: ['NetworkOnly'] }) }] }),
+        close: async () => {},
+      }),
+    };
+    const payload = { hook_event_name: 'SessionStart', session_id: 'thread-a' };
+    const result = await handleHook(payload, deps);
+    assert.match(result.hookSpecificOutput.additionalContext, /NetworkOnly: 2/);
+    assert.doesNotMatch(result.hookSpecificOutput.additionalContext, /HostOnly/);
+    assert.equal(existsSync(marker), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

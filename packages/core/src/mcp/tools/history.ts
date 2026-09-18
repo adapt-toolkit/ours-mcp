@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { OursClient } from '@ours.network/sdk';
 
-import { runTool, type McpTextResult } from '../tool.js';
+import { runTool, type McpTextResult, type OursClientProvider } from '../tool.js';
 
 const historyQuery = {
   peer_cid: z.string().min(1).optional().describe('Authenticated peer container id to filter by.'),
@@ -29,14 +29,14 @@ function itemResult<T>(item: T | null): McpTextResult {
   };
 }
 
-export function registerHistoryTools(server: McpServer, clientFor: () => OursClient): void {
+export function registerHistoryTools(server: McpServer, clientFor: OursClientProvider): void {
   server.tool(
     'list_history',
     'Search persistent message history for the bound identity, newest first. Filter by ' +
       'authenticated peer container id and/or direction, and paginate with before_seq. ' +
       'Returns message bodies, read/delivery state, reply metadata, and next_cursor. Read-only.',
     historyQuery,
-    async (query) => runTool(clientFor(), (c) => c.listHistory(query), pageResult),
+    async (query, extra) => runTool(clientFor(extra), (c) => c.listHistory(query), pageResult),
   );
 
   server.tool(
@@ -44,7 +44,7 @@ export function registerHistoryTools(server: McpServer, clientFor: () => OursCli
     'Look up one persistent message-history item by exact wire_id for the bound identity. ' +
       'Returns null when it is not present. Read-only.',
     { wire_id: z.string().min(1).describe('Exact message wire_id.') },
-    async ({ wire_id }) => runTool(clientFor(), (c) => c.getHistoryItem({ wire_id }), itemResult),
+    async ({ wire_id }, extra) => runTool(clientFor(extra), (c) => c.getHistoryItem({ wire_id }), itemResult),
   );
 
   server.tool(
@@ -53,7 +53,7 @@ export function registerHistoryTools(server: McpServer, clientFor: () => OursCli
       'authenticated peer container id and/or direction, and paginate with before_seq. ' +
       'Returns metadata and blob provenance, never file bytes. Read-only.',
     historyQuery,
-    async (query) => runTool(clientFor(), (c) => c.listFiles(query), pageResult),
+    async (query, extra) => runTool(clientFor(extra), (c) => c.listFiles(query), pageResult),
   );
 
   server.tool(
@@ -61,6 +61,6 @@ export function registerHistoryTools(server: McpServer, clientFor: () => OursCli
     'Look up one persistent file-history item by exact wire_id for the bound identity. ' +
       'Returns metadata only, or null when absent. Use save_file to stream its bytes to a chosen path.',
     { wire_id: z.string().min(1).describe('Exact file wire_id.') },
-    async ({ wire_id }) => runTool(clientFor(), (c) => c.getFileInfo({ wire_id }), itemResult),
+    async ({ wire_id }, extra) => runTool(clientFor(extra), (c) => c.getFileInfo({ wire_id }), itemResult),
   );
 }
