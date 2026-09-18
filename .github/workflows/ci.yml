@@ -20,7 +20,7 @@ on:
     #              nightly can NEVER move @latest (see scripts/publish-guard.sh).
     branches: [main, prerelease]
   pull_request:
-    branches: [main, prerelease, review/optional-docker-2.3-0mu3p73g]
+    branches: [main, prerelease]
   workflow_dispatch:
 
 # Cancel superseded runs on the same ref so a burst of pushes doesn't queue a
