@@ -104,3 +104,10 @@ chmodSync(managedDir, 0);
 assert.throws(() => hostProfileFromEnv({ HOME: defaultHome }), /cannot read/i);
 chmodSync(managedDir, 0o700);
 console.log('managed client selection: passed');
+
+const secureTuple = { ...tuple, endpoint: 'https://server.example:8443/' };
+assert.deepEqual(validateHostProfile(secureTuple), { ...secureTuple, endpoint: 'https://server.example:8443' });
+for (const endpoint of ['ftp://server.example', 'wss://server.example', 'https://user:pass@server.example', 'https://server.example/path', 'https://server.example?q=1', 'https://server.example#fragment']) {
+  assert.throws(() => validateHostProfile({ ...tuple, endpoint }));
+}
+console.log('HTTPS profile validation: passed');
