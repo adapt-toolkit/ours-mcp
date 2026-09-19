@@ -247,7 +247,9 @@ export async function runConnector(options: ConnectorOptions): Promise<void> {
   }
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log(`MCP server v${options.version} ready (transport=stdio, daemon=${endpoint})`);
+  const displayEndpoint = new URL(endpoint);
+  displayEndpoint.search = '';
+  log(`MCP server v${options.version} ready (transport=stdio, daemon=${displayEndpoint.origin}${displayEndpoint.pathname})`);
 
   let stdioBroken: (() => void) | undefined;
   await new Promise<void>((resolve) => {

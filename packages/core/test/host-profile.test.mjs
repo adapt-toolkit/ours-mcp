@@ -122,3 +122,10 @@ for (const endpoint of ['https://server.example/gate?tenant=8hats&tag=a%2Fb&tag=
 }
 assert.equal(validateHostProfile({ ...tuple, endpoint:'https://server.example/gate/../other?q=1' }).endpoint,'https://server.example/other?q=1');
 console.log('URL path and query normalization: passed');
+
+const queryProfile=join(root,'query-profile.json');
+writeFileSync(queryProfile,JSON.stringify({ ...tuple, endpoint:'https://server.example/gate?private-route=do-not-log' }),{mode:0o600});
+const queryProxy=spawnSync('node',[cli,'proxy'],{env:{...bareEnv,OURS_CONFIG:queryProfile},input:'',encoding:'utf8'});
+assert.equal(queryProxy.status,0,queryProxy.stderr);
+assert.match(queryProxy.stderr,/MCP server .* ready/);
+assert(!queryProxy.stderr.includes('do-not-log'),'proxy query values never appear in startup log');
