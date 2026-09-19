@@ -51,8 +51,8 @@
     "test:external-profile": "node test/native-profile-session.test.mjs && node test/external-profile-stdio-refresh.test.mjs"
   },
   "dependencies": {
-    "@ours.network/cli": "2.8.1-nightly.1",
-    "@ours.network/sdk": "3.8.1-nightly.3"
+    "@ours.network/cli": "2.8.1-nightly.2",
+    "@ours.network/sdk": "3.8.1-nightly.4"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
