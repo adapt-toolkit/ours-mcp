@@ -33,7 +33,7 @@ export function validateHostProfile(value: unknown): HostProfile {
   const expectedInstanceId = record.expectedInstanceId;
   const credentialPath = record.credentialPath;
   if (typeof endpoint !== 'string' || endpoint.trim() !== endpoint || endpoint === '') {
-    throw profileError('endpoint must be a non-empty HTTP or HTTPS origin.');
+    throw profileError('endpoint must be a non-empty HTTP or HTTPS base URL.');
   }
   if (typeof expectedInstanceId !== 'string' || !UUID.test(expectedInstanceId)) {
     throw profileError('expectedInstanceId must be a lowercase UUID.');
@@ -42,12 +42,13 @@ export function validateHostProfile(value: unknown): HostProfile {
     throw profileError('credentialPath must be a normalized absolute path.');
   }
 
-  let url: URL;
-  try { url = new URL(endpoint); } catch { throw profileError('endpoint must be an HTTP or HTTPS origin.'); }
-  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-    throw profileError('endpoint must be an HTTP or HTTPS origin without credentials, path, query, or fragment.');
+  if (/[\s\\#]/.test(endpoint) || !/^https?:\/\//i.test(endpoint)) {
+    throw profileError('endpoint must be an HTTP or HTTPS URL without credentials or fragment.');
   }
-  return { endpoint: url.origin, expectedInstanceId, credentialPath };
+  let url: URL;
+  try { url = new URL(endpoint); } catch { throw profileError('invalid endpoint URL.'); }
+  if (url.username || url.password || url.hash) throw profileError('endpoint cannot contain credentials or fragment.');
+  return { endpoint: url.origin + url.pathname.replace(/\/+$/, '') + url.search, expectedInstanceId, credentialPath };
 }
 
 function readProfileObject(configPath: string): Record<string, unknown> {

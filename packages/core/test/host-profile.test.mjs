@@ -107,7 +107,25 @@ console.log('managed client selection: passed');
 
 const secureTuple = { ...tuple, endpoint: 'https://server.example:8443/' };
 assert.deepEqual(validateHostProfile(secureTuple), { ...secureTuple, endpoint: 'https://server.example:8443' });
-for (const endpoint of ['ftp://server.example', 'wss://server.example', 'https://user:pass@server.example', 'https://server.example/path', 'https://server.example?q=1', 'https://server.example#fragment']) {
+for (const endpoint of ['ftp://server.example', 'wss://server.example', 'https://user:pass@server.example', 'https://server.example#fragment']) {
   assert.throws(() => validateHostProfile({ ...tuple, endpoint }));
 }
 console.log('HTTPS profile validation: passed');
+
+for (const endpoint of ['https://server.example/gate', 'https://server.example/gate/']) {
+  assert.deepEqual(validateHostProfile({ ...tuple, endpoint }), { ...tuple, endpoint: 'https://server.example/gate' });
+}
+console.log('proxy prefix preserved: passed');
+
+for (const endpoint of ['https://server.example/gate?tenant=8hats&tag=a%2Fb&tag=c+z', 'https://server.example/a%20b?q=%23', 'https://server.example/gate//inner']) {
+  assert.equal(validateHostProfile({ ...tuple, endpoint }).endpoint, endpoint);
+}
+assert.equal(validateHostProfile({ ...tuple, endpoint:'https://server.example/gate/../other?q=1' }).endpoint,'https://server.example/other?q=1');
+console.log('URL path and query normalization: passed');
+
+const queryProfile=join(root,'query-profile.json');
+writeFileSync(queryProfile,JSON.stringify({ ...tuple, endpoint:'https://server.example/gate?private-route=do-not-log' }),{mode:0o600});
+const queryProxy=spawnSync('node',[cli,'proxy'],{env:{...bareEnv,OURS_CONFIG:queryProfile},input:'',encoding:'utf8'});
+assert.equal(queryProxy.status,0,queryProxy.stderr);
+assert.match(queryProxy.stderr,/MCP server .* ready/);
+assert(!queryProxy.stderr.includes('do-not-log'),'proxy query values never appear in startup log');
