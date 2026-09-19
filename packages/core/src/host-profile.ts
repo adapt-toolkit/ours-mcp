@@ -33,7 +33,7 @@ export function validateHostProfile(value: unknown): HostProfile {
   const expectedInstanceId = record.expectedInstanceId;
   const credentialPath = record.credentialPath;
   if (typeof endpoint !== 'string' || endpoint.trim() !== endpoint || endpoint === '') {
-    throw profileError('endpoint must be a non-empty HTTP origin.');
+    throw profileError('endpoint must be a non-empty HTTP or HTTPS origin.');
   }
   if (typeof expectedInstanceId !== 'string' || !UUID.test(expectedInstanceId)) {
     throw profileError('expectedInstanceId must be a lowercase UUID.');
@@ -43,9 +43,9 @@ export function validateHostProfile(value: unknown): HostProfile {
   }
 
   let url: URL;
-  try { url = new URL(endpoint); } catch { throw profileError('endpoint must be an HTTP origin.'); }
-  if (url.protocol !== 'http:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-    throw profileError('endpoint must be an HTTP origin without credentials, path, query, or fragment.');
+  try { url = new URL(endpoint); } catch { throw profileError('endpoint must be an HTTP or HTTPS origin.'); }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    throw profileError('endpoint must be an HTTP or HTTPS origin without credentials, path, query, or fragment.');
   }
   return { endpoint: url.origin, expectedInstanceId, credentialPath };
 }
