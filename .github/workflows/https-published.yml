@@ -1,0 +1,62 @@
+name: HTTPS published dependency qualification
+on:
+  pull_request:
+    branches: [prerelease, main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: https-published-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  published-sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: adapt-toolkit/ours-sdk
+          ref: dbfe5444bea476351f61240fc0ff60a8f337c967
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bash scripts/npm-ci-major-workspace.sh
+      - run: bash scripts/compile-mufl.sh
+      - run: npm run build
+      - uses: actions/checkout@v4
+        with:
+          path: .https/mcp
+      - uses: actions/checkout@v4
+        with:
+          repository: adapt-toolkit/ours-fleet
+          ref: 7b8647dfaa326727d89b6452a4cc1750746c3881
+          path: .https/fleet
+      - uses: actions/checkout@v4
+        with:
+          repository: adapt-toolkit/ours-network
+          ref: f222a39f0fc9fe94891fa4c9424d864920fabe1b
+          path: .https/network
+      - run: npm ci && npm run build
+        working-directory: .https/mcp
+      - run: npm ci && npm run build
+        working-directory: .https/fleet
+      - name: Verify every consumer resolves the published HTTPS SDK
+        run: |
+          node --input-type=module <<'JS'
+          import { createRequire } from 'node:module';
+          import { readFileSync } from 'node:fs';
+          import { resolve, dirname, join } from 'node:path';
+          import assert from 'node:assert/strict';
+          for (const consumer of ['.https/mcp/packages/core', '.https/mcp/packages/codex', '.https/mcp/packages/claude-code', '.https/fleet']) {
+            const require = createRequire(resolve(consumer, 'package.json'));
+            const entry = require.resolve('@ours.network/sdk');
+            const pkg = JSON.parse(readFileSync(join(dirname(entry), '..', 'package.json')));
+            assert.equal(pkg.version, '3.8.1-nightly.4');
+            console.log(consumer, pkg.version, entry);
+          }
+          JS
+      - name: Exercise published SDK through actual consumer entry points over TLS
+        run: node test/https-client.test.mjs
+        env:
+          OURS_HTTPS_CONSUMERS: ${{ github.workspace }}/.https
