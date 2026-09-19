@@ -33,7 +33,7 @@ export function validateHostProfile(value: unknown): HostProfile {
   const expectedInstanceId = record.expectedInstanceId;
   const credentialPath = record.credentialPath;
   if (typeof endpoint !== 'string' || endpoint.trim() !== endpoint || endpoint === '') {
-    throw profileError('endpoint must be a non-empty HTTP or HTTPS origin.');
+    throw profileError('endpoint must be a non-empty HTTP or HTTPS base URL.');
   }
   if (typeof expectedInstanceId !== 'string' || !UUID.test(expectedInstanceId)) {
     throw profileError('expectedInstanceId must be a lowercase UUID.');
@@ -42,12 +42,21 @@ export function validateHostProfile(value: unknown): HostProfile {
     throw profileError('credentialPath must be a normalized absolute path.');
   }
 
-  let url: URL;
-  try { url = new URL(endpoint); } catch { throw profileError('endpoint must be an HTTP or HTTPS origin.'); }
-  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-    throw profileError('endpoint must be an HTTP or HTTPS origin without credentials, path, query, or fragment.');
+  // Validate raw path before URL normalization can erase dot segments.
+  if (/[\s\\?#]/.test(endpoint)) throw profileError('endpoint must be a safe HTTP or HTTPS base URL.');
+  const raw = /^(https?:\/\/[^/]+)(\/.*)?$/.exec(endpoint);
+  if (!raw) throw profileError('endpoint must be an HTTP or HTTPS base URL.');
+  const path = raw[2] ?? '/';
+  const prefix = path === '/' ? '' : path.replace(/\/$/, '');
+  if (prefix && prefix.slice(1).split('/').some(segment => !/^[A-Za-z0-9._~-]+$/.test(segment) || segment === '.' || segment === '..')) {
+    throw profileError('endpoint has an unsafe base path.');
   }
-  return { endpoint: url.origin, expectedInstanceId, credentialPath };
+  let url: URL;
+  try { url = new URL(endpoint); } catch { throw profileError('endpoint must be an HTTP or HTTPS base URL.'); }
+  if (url.username || url.password || url.search || url.hash || url.pathname !== (prefix ? prefix + (path.endsWith('/') ? '/' : '') : '/')) {
+    throw profileError('endpoint has an unsafe base path or credentials.');
+  }
+  return { endpoint: url.origin + prefix, expectedInstanceId, credentialPath };
 }
 
 function readProfileObject(configPath: string): Record<string, unknown> {

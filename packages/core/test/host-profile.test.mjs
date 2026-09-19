@@ -107,7 +107,12 @@ console.log('managed client selection: passed');
 
 const secureTuple = { ...tuple, endpoint: 'https://server.example:8443/' };
 assert.deepEqual(validateHostProfile(secureTuple), { ...secureTuple, endpoint: 'https://server.example:8443' });
-for (const endpoint of ['ftp://server.example', 'wss://server.example', 'https://user:pass@server.example', 'https://server.example/path', 'https://server.example?q=1', 'https://server.example#fragment']) {
+for (const endpoint of ['ftp://server.example', 'wss://server.example', 'https://user:pass@server.example', 'https://server.example/gate/../other', 'https://server.example/gate%2fother', 'https://server.example/gate//other', 'https://server.example?q=1', 'https://server.example#fragment']) {
   assert.throws(() => validateHostProfile({ ...tuple, endpoint }));
 }
 console.log('HTTPS profile validation: passed');
+
+for (const endpoint of ['https://server.example/gate', 'https://server.example/gate/']) {
+  assert.deepEqual(validateHostProfile({ ...tuple, endpoint }), { ...tuple, endpoint: 'https://server.example/gate' });
+}
+console.log('proxy prefix preserved: passed');
