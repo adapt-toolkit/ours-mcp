@@ -25,17 +25,6 @@ await build({
   platform: 'node',
   target: 'node22',
   format: 'esm',
-  external: ['@ours.network/sdk', '@ours.network/sdk/*'],
-  logLevel: 'info',
-  entryPoints: [resolve(root, 'src/network-client.mjs')],
-  outfile: resolve(dist, 'network-client.mjs'),
-});
-
-await build({
-  bundle: true,
-  platform: 'node',
-  target: 'node22',
-  format: 'esm',
   minify: !dev,
   external: ['@ours.network/sdk', '@ours.network/sdk/*'],
   banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" },

@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const daemonCli = process.env.OURS_TEST_DAEMON_CLI;
 assert.ok(daemonCli, 'OURS_TEST_DAEMON_CLI must name the official cached runtime CLI');
-const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+const cli = process.env.OURS_TEST_MCP_CLI ?? fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function freePort() {
@@ -144,6 +144,7 @@ try {
     await pause(100);
   }
   assert.equal((await fetch(`${endpoint}/selection`)).status, 200, daemonOutput);
+  assert.equal((await fetch(`${endpoint}/mcp`, { method: 'POST' })).status, 404, 'production daemon has no remote MCP route');
   copyFileSync(join(daemonState, 'daemon-token'), credentialPath);
   copyFileSync(join(daemonState, 'daemon-token'), deliveryPath);
   writeFileSync(profilePath, JSON.stringify({ endpoint, expectedInstanceId, credentialPath }), { mode: 0o600 });

@@ -239,7 +239,7 @@ export async function runConnector(options: ConnectorOptions): Promise<void> {
       }
     : client!;
 
-  server = createOursMcpServer(clientFor, options.version, identities);
+  server = createOursMcpServer(clientFor, options.version, identities, { remoteDaemonFiles: !!nativeProfile || options.selection?.mode === 'external-profile' });
   if (client) {
     const watcher = new ArrivalWatcher(client, server);
     watchers.add(watcher);

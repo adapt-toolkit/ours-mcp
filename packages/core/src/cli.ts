@@ -9,7 +9,7 @@ import type { NotificationEvent } from '@ours.network/sdk';
 
 import { ApplicationIdentityStore, filterApplicationIdentities } from './application-identities.js';
 import { hostProfileFromEnv } from './host-profile.js';
-import { endNativeSession } from './native-session.js';
+import { nativeClientFor, endNativeSession } from './native-session.js';
 import type { ConnectorOptions } from './connector.js';
 
 declare const __OURS_VERSION__: string;
@@ -121,11 +121,12 @@ async function runWatch(args: string[]): Promise<void> {
   if (args.length > 1 || args[0]?.startsWith('-')) {
     throw new Error('Usage: ours-mcp watch [identity]');
   }
-  if (hostProfileFromEnv(process.env) !== null) throw new Error('External owner context is required.');
-  const selection = resolveDaemonConfig();
-  const identities = new ApplicationIdentityStore(selection.expectStateDir);
+  const profile = hostProfileFromEnv(process.env);
+  const identities = new ApplicationIdentityStore(profile ? { instanceId: profile.expectedInstanceId } : resolveDaemonConfig().expectStateDir);
   await identities.list();
-  const client = await attachOursClient({ leaseToken: LEASE_TOKEN, clientPid: CLIENT_PID });
+  const client = profile
+    ? await nativeClientFor(profile, (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim())
+    : await attachOursClient({ leaseToken: LEASE_TOKEN, clientPid: CLIENT_PID });
   const requested = args[0]?.trim();
   let names: string[];
   if (requested) {
@@ -138,7 +139,11 @@ async function runWatch(args: string[]): Promise<void> {
   process.once('SIGINT', () => abort.abort());
   process.once('SIGTERM', () => abort.abort());
   err(`ours-mcp watch: ${names.length === 0 ? 'no application identities' : `watching ${names.join(', ')}`}`);
-  await Promise.all(names.map((name) => watchIdentity(client, name, abort.signal)));
+  try {
+    await Promise.all(names.map((name) => watchIdentity(client, name, abort.signal)));
+  } finally {
+    await client.close();
+  }
 }
 
 function usage(): void {

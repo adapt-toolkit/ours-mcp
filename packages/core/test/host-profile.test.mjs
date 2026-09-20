@@ -44,7 +44,7 @@ for (const command of ['watch']) {
     encoding: 'utf8',
   });
   assert.notEqual(result.status, 0, `${command} rejects host profiles without an immutable owner context`);
-  assert.match(result.stderr, /External owner context is required/, `${command} refuses before legacy attachment`);
+  assert.match(result.stderr, /Native session metadata is missing or invalid/, `${command} refuses before legacy attachment`);
 }
 const emptyEnd = spawnSync('node', [new URL('../dist/cli.js', import.meta.url).pathname, 'session-end'], {
   env: { ...process.env, OURS_CONFIG: profile, OURS_MCP_CONFIG: join(root, 'mcp.json'), OURS_API_TOKEN: undefined, OURS_PORT: undefined, OURS_STATE_DIR: undefined, OURS_DAEMON_ID: undefined },
@@ -64,7 +64,7 @@ const cli = new URL('../dist/cli.js', import.meta.url).pathname;
 const bareEnv = { ...process.env, HOME: defaultHome };
 for (const key of ['OURS_CONFIG', 'OURS_API_TOKEN', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_DAEMON_ID']) delete bareEnv[key];
 const defaultWatch = spawnSync('node', [cli, 'watch'], { env: bareEnv, encoding: 'utf8' });
-assert.notEqual(defaultWatch.status, 0); assert.match(defaultWatch.stderr, /External owner context is required/);
+assert.notEqual(defaultWatch.status, 0); assert.match(defaultWatch.stderr, /Native session metadata is missing or invalid/);
 const defaultEnd = spawnSync('node', [cli, 'session-end'], { env: { ...bareEnv, OURS_MCP_CONFIG: join(root, 'default-mcp.json') }, input: JSON.stringify({ session_id: 'never-attached' }), encoding: 'utf8' });
 assert.equal(defaultEnd.status, 0, defaultEnd.stderr);
 const defaultProxy = spawnSync('node', [cli, 'proxy'], { env: bareEnv, encoding: 'utf8' });

@@ -14,7 +14,7 @@ const manifests = [
 ];
 
 for (const mode of ['stable', 'nightly', 'promote']) {
-  test(`${mode} release preserves standalone plugin dependencies`, () => {
+  test(`${mode} release pins local MCP and preserves external dependencies`, () => {
     const temp = mkdtempSync(join(tmpdir(), 'ours-bump-test-'));
     try {
       const bin = join(temp, 'bin');
@@ -57,7 +57,9 @@ esac
         const after = JSON.parse(readFileSync(join(temp, file)));
         versions.add(after.version);
         assert.notEqual(after.version, before.get(file).version);
-        assert.deepEqual(after.dependencies, before.get(file).dependencies, `${file}: dependency graph changed`);
+        const expected = before.get(file).dependencies && { ...before.get(file).dependencies };
+        if (expected?.['@ours.network/mcp']) expected['@ours.network/mcp'] = after.version;
+        assert.deepEqual(after.dependencies, expected, `${file}: dependency graph changed`);
       }
       assert.equal(versions.size, 1);
       assert.equal([...versions][0].includes('-nightly.'), mode === 'nightly');
