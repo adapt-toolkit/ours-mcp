@@ -18,3 +18,5 @@ test "$(git -C "$source_dir" rev-parse HEAD)" = "$sdk_revision"
   npm run build
   npm pack --ignore-scripts --pack-destination "$artifact_dir"
 )
+
+node "$repo_root/scripts/normalize-review-tarball.mjs" "$artifact_dir/ours.network-sdk-3.8.1-supervisor.0.tgz"
