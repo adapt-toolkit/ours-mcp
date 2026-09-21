@@ -168,7 +168,7 @@ try {
   assert.equal(missing.result?.isError, true, JSON.stringify(missing));
   assert.match(JSON.stringify(missing), /Native session metadata is missing or invalid/);
 
-  const permanentA = await proxy.call('create_identity', {
+  const permanentA = await proxy.call('create_root_identity', {
     name: 'NativePermanent', bio: '', expose_local: false, local_auto_accept: true,
   }, sessionA);
   assert.equal(permanentA.result?.isError, false, JSON.stringify(permanentA));

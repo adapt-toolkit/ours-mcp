@@ -181,7 +181,7 @@ try {
   {
     const c = fakeClient();
     const s = await connectProxy('setup', 'sess-setup', c.pid, { OURS_NO_AUTORESTORE: '1' });
-    const ana = await call(s.client, 'create_identity', { name: 'Ana', expose_local: false });
+    const ana = await call(s.client, 'create_root_identity', { name: 'Ana', expose_local: false });
     assert(ana.ok, `(1) setup: create Ana${ana.ok ? '' : ` (${ana.text})`}`);
     const bo = await call(s.client, 'create_identity', { name: 'Bo', expose_local: false });
     assert(

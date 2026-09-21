@@ -40,7 +40,7 @@ try {
   let nextId = 1; const request = (method, params) => new Promise((resolve) => { const id = nextId++; pending.set(id, resolve); proxy.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`); });
   const initialize = await request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'refresh', version: '1' } }); assert.ok(initialize.result, stderr); proxy.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
   const tools = await request('tools/list', {}); assert.ok(Array.isArray(tools.result?.tools) && tools.result.tools.some((tool) => tool.name === 'list_identities'));
-  const before = await request('tools/call', { name: 'create_identity', arguments: { name: 'RefreshFixture', bio: '', expose_local: false, local_auto_accept: true } }); assert.equal(before.result?.isError, false, JSON.stringify(before));
+  const before = await request('tools/call', { name: 'create_root_identity', arguments: { name: 'RefreshFixture', bio: '', expose_local: false, local_auto_accept: true } }); assert.equal(before.result?.isError, false, JSON.stringify(before));
   const currentBefore = await request('tools/call', { name: 'current_identity', arguments: {} }); assert.match(JSON.stringify(currentBefore), /RefreshFixture/);
   const oldToken = readFileSync(credentialPath, 'utf8').trim();
   const updateEnv = { ...process.env, OURS_CONFIG: profilePath }; for (const key of Object.keys(updateEnv)) if (key.startsWith('OURS_') && key !== 'OURS_CONFIG') delete updateEnv[key];

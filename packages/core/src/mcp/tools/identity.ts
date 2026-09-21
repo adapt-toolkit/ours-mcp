@@ -136,9 +136,9 @@ export function registerIdentityTools(
     'create_identity',
     'Create a new self-sovereign identity (an ADAPT node) with the given display ' +
       'name and bind it to this session. The name is what peers see for you in invites. ' +
-      'Persisted permanently; reject if the name already exists. When a root identity ' +
-      'exists on this host, the new identity is automatically delegated as a ROLE under ' +
-      'it (its invites then carry the verified "role X of person Y" chain). By default the ' +
+      'Persisted permanently; reject if the name already exists. An existing Human/root identity ' +
+      'is required. The new identity is delegated as a ROLE under it ' +
+      '(its invites carry the verified "role X of person Y" chain). By default the ' +
       'identity is published to the LOCAL contact book, so other identities on this ' +
       'host can message it by name without an invite; pass expose_local=false to opt out.',
     {
@@ -159,14 +159,7 @@ export function registerIdentityTools(
           // Use `underRoot` rather than r.info.rootName: it names the root from the
           // in-memory Identity and cannot degrade to '' when
           // the describe_identity read-back fails.
-          const hierarchy =
-            r.hierarchy === 'role'
-              ? ` Delegated as a role under root "${r.underRoot}".`
-              : ' No host root existed yet, so this identity is now the host ROOT (the person ' +
-                'behind all roles); create more with create_identity and they become roles under it.' +
-                (r.adopted.length
-                  ? ` Adopted ${r.adopted.length} pre-existing identit${r.adopted.length === 1 ? 'y' : 'ies'} as role(s): ${r.adopted.join(', ')}.`
-                  : '');
+          const hierarchy = ` Delegated as a role under root "${r.underRoot}".`;
           const exposure = exposureClause(r.exposedLocal, r.localAutoAccept, ' Not exposed in the local contact book.');
           return textResult(
             `Created identity "${r.info.name}" (${r.info.cid}) and bound it to this session.${hierarchy}${exposure}${monitorHintFor(r.info.name)}`,
