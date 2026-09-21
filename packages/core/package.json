@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/mcp",
-  "version": "1.1.2-supervisor.0",
+  "version": "1.1.1",
   "description": "MCP adapter for the shared ours daemon, with application-local identity bookkeeping and secure agent-to-agent messaging tools over stdio.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -58,7 +58,7 @@
     "test:external-profile": "node test/native-profile-session.test.mjs && node test/external-profile-stdio-refresh.test.mjs"
   },
   "dependencies": {
-    "@ours.network/sdk": "3.8.1-supervisor.0",
+    "@ours.network/sdk": "3.8.1-nightly.10",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "zod": "^3.23.8"
   },
@@ -67,7 +67,7 @@
     "esbuild": "^0.24.2",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4",
-    "@ours.network/cli": "2.8.1-nightly.7",
-    "@ours.network/daemon": "3.8.1-nightly.1"
+    "@ours.network/cli": "2.8.1-nightly.8",
+    "@ours.network/daemon": "3.8.1-nightly.2"
   }
 }

@@ -42,29 +42,6 @@ jobs:
           cache: npm
       - name: Verify release versioning preserves package dependencies
         run: node --test .github/workflows/scripts/bump-versions.test.mjs
-      - name: Read pinned dependency source
-        id: dependency-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.VERSION_BUMP_APP_ID }}
-          private-key: ${{ secrets.VERSION_BUMP_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ours-sdk
-          permission-contents: read
-      - name: Build pinned review SDK artifact
-        env:
-          GH_TOKEN: ${{ steps.dependency-token.outputs.token }}
-        run: bash scripts/prepare-supervisor-sdk.sh
-      - name: Stage built review SDK
-        run: |
-          mkdir -p .review-artifacts
-          cp ../ours.network-sdk-3.8.1-supervisor.0.tgz .review-artifacts/
-      - name: Retain built review SDK for reproducibility checks
-        uses: actions/upload-artifact@v4
-        with:
-          name: review-sdk
-          path: .review-artifacts/ours.network-sdk-3.8.1-supervisor.0.tgz
-          retention-days: 3
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build

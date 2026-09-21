@@ -18,6 +18,6 @@
   },
   "devDependencies": {
     "@adapt-toolkit/broker": "0.10.12",
-    "@ours.network/sdk": "file:../ours.network-sdk-3.8.1-supervisor.0.tgz"
+    "@ours.network/sdk": "3.8.1-nightly.10"
   }
 }
