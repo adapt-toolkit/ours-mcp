@@ -19,7 +19,7 @@ const out = (value: string): void => { process.stdout.write(`${value}\n`); };
 const err = (value: string): void => { process.stderr.write(`${value}\n`); };
 
 const validPid = (value: number): boolean => Number.isInteger(value) && value > 1;
-const configuredPid = Number(process.env.OURS_CLIENT_PID);
+const configuredPid = Number(process.env.OURS_DAEMON_CLIENT_PID);
 const CLIENT_PID = validPid(configuredPid)
   ? configuredPid
   : validPid(process.ppid) ? process.ppid : process.pid;
@@ -47,15 +47,15 @@ function rejectApplicationFlag(args: string[]): void {
 }
 
 async function runOurs(args: string[]): Promise<void> {
-  const explicit = (process.env.OURS_CLI ?? '').trim();
-  const executable = explicit || 'ours';
+  const explicit = (process.env.OURS_DAEMON_CLI ?? '').trim();
+  const executable = explicit || 'ours-daemon';
   await new Promise<void>((resolve, reject) => {
     const child = spawn(executable, args, { stdio: 'inherit', env: process.env });
     child.once('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') {
         reject(new Error(
-          `Cannot find the ${JSON.stringify(executable)} CLI. Install @ours.network/cli@2.7.2, ` +
-          'put `ours` on PATH, or set OURS_CLI to its executable path.',
+          `Cannot find the ${JSON.stringify(executable)} CLI. Install @ours.network/daemon, ` +
+          'put `ours-daemon` on PATH, or set OURS_DAEMON_CLI to its executable path.',
         ));
         return;
       }
@@ -155,11 +155,11 @@ function usage(): void {
   out('  watch [identity]      stream inbound JSON Lines; without a name, only ours-mcp identities');
   out('  start|stop|restart|serve|status');
   out('  install-service|uninstall-service');
-  out('                        compatibility aliases for `ours daemon <command>`');
+  out('                        compatibility aliases for `ours-daemon <command>`');
   out('  version               print the ours-mcp package version');
   out('');
-  out('Daemon configuration and identity CLI operations moved to @ours.network/cli@2.7.2:');
-  out('  ours config setup');
+  out('Daemon administration uses @ours.network/daemon; API commands use @ours.network/cli:');
+  out('  ours-daemon config setup');
   out('  ours identity --help');
 }
 
@@ -169,7 +169,7 @@ async function main(): Promise<void> {
   const command = args.shift() ?? 'help';
 
   if (DAEMON_COMMANDS.has(command)) {
-    await runOurs(['daemon', command === 'run' ? 'serve' : command, ...args]);
+    await runOurs([command === 'run' ? 'serve' : command, ...args]);
     return;
   }
 
@@ -186,7 +186,7 @@ async function main(): Promise<void> {
       await runWatch(args);
       return;
     case 'setup':
-      throw new Error('ours-mcp no longer owns daemon configuration. Run `ours config setup` instead.');
+      throw new Error('ours-mcp no longer owns daemon configuration. Run `ours-daemon config setup` instead.');
     case 'create-root':
     case 'define-local-identity-file':
     case 'voice-setup':

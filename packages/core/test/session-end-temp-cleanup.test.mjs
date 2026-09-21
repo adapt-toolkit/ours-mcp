@@ -1,3 +1,4 @@
+process.env.OURS_DAEMON_CLI ??= new URL('../test-support/legacy-daemon.mjs', import.meta.url).pathname;
 // Normal harness SessionEnd -> ours-mcp session-end -> MCP DELETE.
 // Proves the shipped proxy/CLI lease-token seam performs deterministic cleanup
 // for every temporary role owned by the session, including one switched away
@@ -96,10 +97,14 @@ delete proxyEnv.OURS_TRANSPORT;
 const daemon = spawn(process.execPath, [CLI, 'serve'], { env, stdio: 'ignore' });
 let proxy;
 try {
-  for (let i = 0; i < 120; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/version`)).ok) break; } catch { /* booting */ }
+  const deadline = Date.now() + 180_000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    if (daemon.exitCode !== null) throw new Error(`Runtime fixture exited before readiness: ${daemon.exitCode}`);
+    try { if ((await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(1000) })).ok) { ready = true; break; } } catch { /* booting */ }
     await sleep(100);
   }
+  if (!ready) throw new Error('Runtime fixture did not become ready before the test deadline');
 
   let connected = await connectProxy(proxyEnv, 'claude-session-end-test');
   proxy = connected.child;
@@ -107,7 +112,7 @@ try {
   ok(connected.initialized, 'Claude-style proxy session initialized');
 
   const human = await call('create_identity', { name: 'Human', expose_local: false });
-  ok(Boolean(human.result) && !human.result.isError, 'Human/root created');
+  ok(Boolean(human.result) && !human.result.isError, `Human/root created${human.result?.isError || human.error ? ': ' + JSON.stringify(human) : ''}`);
   const first = await call('create_temporary_identity', { name: 'EphemeralOne' });
   ok(Boolean(first.result) && !first.result.isError, 'first delegated temporary role created');
   const second = await call('create_temporary_identity', { name: 'EphemeralTwo' });
@@ -126,8 +131,8 @@ try {
   proxy = undefined;
 
   // Codex has no CLAUDE_CODE_SESSION_ID, so both proxy and hook derive the
-  // same lease from the stable OURS_CLIENT_PID supplied by the harness shim.
-  const codexEnv = { ...proxyEnv, OURS_CLIENT_PID: String(process.pid) };
+  // same lease from the stable OURS_DAEMON_CLIENT_PID supplied by the harness shim.
+  const codexEnv = { ...proxyEnv, OURS_DAEMON_CLIENT_PID: String(process.pid) };
   delete codexEnv.CLAUDE_CODE_SESSION_ID;
   connected = await connectProxy(codexEnv, 'codex-session-end-test');
   proxy = connected.child;

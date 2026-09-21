@@ -3,8 +3,8 @@
 The agent-facing MCP adapter for the shared ours daemon.
 
 `ours-mcp` does not contain, start, configure, or install a daemon. Install
-`@ours.network/cli@2.2.0`, configure it with `ours config setup`, and start the
-single shared service with `ours daemon start` (or `ours daemon install-service`).
+`@ours.network/daemon`, configure it with `ours-daemon config setup`, and start the
+single shared service with `ours-daemon start` (or `ours-daemon install-service`).
 
 ## MCP configuration
 
@@ -95,8 +95,8 @@ names remain recorded but are not rendered; idempotent close/remove cleans them.
 ## Compatibility CLI
 
 Former ours-mcp lifecycle entry points remain compatibility aliases that
-delegate argv, stdio, and exit status to `ours daemon`. The `ours` executable
-must be on `PATH`, or its exact path may be provided through `OURS_CLI`. No
+delegate argv, stdio, and exit status to `ours-daemon`. The `ours-daemon` executable
+must be on `PATH`, or its exact path may be provided through `OURS_DAEMON_CLI`. No
 command falls back to an embedded daemon.
 
 `ours-mcp watch [identity]` streams inbound JSON Lines. With no identity argument,
@@ -118,9 +118,9 @@ that finds old packet state refuses startup without changing it. Operators may
 back it up and must remove it themselves before starting clean; installers never
 delete identity state implicitly.
 
-The external-history and typed-command integration requires the published `@ours.network/sdk@3.7.0`
-and `@ours.network/cli@2.2.0` artifacts. Both are pinned exactly so registry-only
-installs use the validated contract; there is no compatibility fallback.
+The SDK dependency remains pinned to the previously validated published artifact.
+Qualifying this source split is separate from selecting newly published thin SDK
+and daemon artifacts. The daemon is installed separately and is not an MCP dependency.
 
 ## Typed commands
 

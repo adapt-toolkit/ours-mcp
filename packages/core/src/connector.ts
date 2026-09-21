@@ -49,7 +49,7 @@ function rejectObsoleteDaemonEnvironment(env: NodeJS.ProcessEnv): void {
   if (found.length === 0) return;
   throw new Error(
     `${found.join(', ')} ${found.length === 1 ? 'is' : 'are'} obsolete in ours-mcp. ` +
-    'The shared daemon is owned by the `ours` CLI; remove these variables and configure it with `ours config setup`.',
+    'The shared daemon is owned by the `ours-daemon` CLI; remove these variables and configure it with `ours-daemon config setup`.',
   );
 }
 

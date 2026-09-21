@@ -1,3 +1,4 @@
+process.env.OURS_DAEMON_CLI ??= new URL('../test-support/legacy-daemon.mjs', import.meta.url).pathname;
 // OURS_BIND_IDENTITY — can a SUPERVISOR say which identity a session starts on,
 // without the MODEL performing the bind?
 //
@@ -125,7 +126,7 @@ function fakeClient() {
 // sessionId null => no CLAUDE_CODE_SESSION_ID at all (lease token falls back to
 // `client:<pid>`), which is what a non-Claude supervisor actually looks like.
 async function connectProxy(label, sessionId, clientPid, extra = {}) {
-  const env = { ...baseEnv(), OURS_CLIENT_PID: String(clientPid), ...extra };
+  const env = { ...baseEnv(), OURS_DAEMON_CLIENT_PID: String(clientPid), ...extra };
   // The shared daemon owns broker and maintenance settings. The stdio adapter
   // selects it by the coherent port/state pair and intentionally rejects daemon-
   // only environment inherited from older embedded-daemon launchers.
