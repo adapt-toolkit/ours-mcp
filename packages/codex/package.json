@@ -49,7 +49,7 @@
     "@ours.network/sdk": "3.8.1-nightly.9",
     "ws": "^8.21.0",
     "zod": "^3.25.76",
-    "@ours.network/mcp": "1.1.1"
+    "@ours.network/mcp": "1.1.2-supervisor.0"
   },
   "devDependencies": {
     "esbuild": "^0.24.2"

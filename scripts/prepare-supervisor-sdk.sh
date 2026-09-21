@@ -8,11 +8,12 @@ trap 'rm -rf -- "$source_dir"' EXIT
 sdk_revision=82aaab5081807aa0ddd26e8753920ea464b78d69
 git -C "$source_dir" init -q
 git -C "$source_dir" remote add origin https://github.com/adapt-toolkit/ours-sdk.git
-git -C "$source_dir" fetch --depth=1 origin "$sdk_revision"
+git -c credential.helper='!gh auth git-credential' -C "$source_dir" fetch --depth=1 origin "$sdk_revision"
 git -C "$source_dir" checkout --detach FETCH_HEAD
 test "$(git -C "$source_dir" rev-parse HEAD)" = "$sdk_revision"
 (
   cd -- "$source_dir"
+  unset GH_TOKEN
   npm ci --ignore-scripts
   npm run build
   npm pack --ignore-scripts --pack-destination "$artifact_dir"
