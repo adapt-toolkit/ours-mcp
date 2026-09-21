@@ -64,6 +64,10 @@ export function textResult(text: string, isError = false): McpTextResult {
 // Retrying is safe precisely because the call FAILED with NOT_BOUND: it did nothing,
 // so there is no mutation to repeat. Only NOT_BOUND is retried, only once, and a
 // refused re-bind clears the memory rather than looping.
+const managedClients = new WeakSet<OursClient>();
+/** Managed clients never bind or retry behind the supervisor recovery gate. */
+export function markManagedClient(client: OursClient): void { managedClients.add(client); }
+
 const boundIdentities = new WeakMap<OursClient, string>();
 export function rememberBinding(client: OursClient, name: string): void { boundIdentities.set(client, name); }
 /** What runTool has learned. The inbox watch reads this rather than asking again. */
@@ -71,6 +75,7 @@ export function getBoundIdentity(client: OursClient): string | null { return bou
 export function forgetBinding(client: OursClient): void { boundIdentities.delete(client); }
 
 async function reassertBinding(client: OursClient): Promise<boolean> {
+  if (managedClients.has(client)) return false;
   const boundIdentity = getBoundIdentity(client);
   if (!boundIdentity) return false;
   try {
@@ -112,7 +117,7 @@ export async function runTool<T>(
   // nothing. This is what feeds reassertBinding above, and it is deliberately NOT a
   // list of which tools rebind — that list would be a second vocabulary, and it
   // would be wrong the first time an operation started or stopped binding.
-  if (getBoundIdentity(client) === null) {
+  if (!managedClients.has(client) && getBoundIdentity(client) === null) {
     void client.currentIdentity().then((r) => { rememberBinding(client, r.name); }).catch(() => {});
   }
   return render(value);

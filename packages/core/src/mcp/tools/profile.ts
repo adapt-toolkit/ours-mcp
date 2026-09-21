@@ -16,15 +16,15 @@
 //
 // Tool descriptions and zod schemas are compatibility-sensitive. The ux-strings
 // gate keeps them byte-stable.
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolRegistry } from '../registry.js';
 import { z } from 'zod';
 
 import type { OursClient } from '@ours.network/sdk';
 
 import { runTool, textResult, type OursClientProvider } from '../tool.js';
 
-export function registerProfileTools(server: McpServer, clientFor: OursClientProvider): void {
-  server.tool(
+export function registerProfileTools(server: ToolRegistry, clientFor: OursClientProvider): void {
+  server.tool('profile')(
     'set_bio',
     "Set the bound identity's profile bio (free text). For a role, the bio is " +
       'embedded in the invites it generates. For the root identity, the refreshed ' +
@@ -41,7 +41,7 @@ export function registerProfileTools(server: McpServer, clientFor: OursClientPro
       ),
   );
 
-  server.tool(
+  server.tool('profile')(
     'advertise_migrate',
     'Enable the e2e-migration capability (core.e2e.migrate) at runtime on the bound ' +
       'identity and proactively offer migration to every already-known eligible e2e ' +
@@ -66,7 +66,7 @@ export function registerProfileTools(server: McpServer, clientFor: OursClientPro
       ),
   );
 
-  server.tool(
+  server.tool('profile')(
     'set_persona',
     "Set the bound identity's local operating contract (persona, free text). The " +
       'persona is how the agent behaves when it adopts this identity; it is NEVER shared ' +

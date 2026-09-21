@@ -30,16 +30,13 @@
 // byte-identically. Re-typing the templates here would silently lose real
 // message content on every failed transcription.
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { createWriteStream, mkdirSync, statSync } from 'node:fs';
-import { dirname, resolve as resolvePath } from 'node:path';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import type { ToolRegistry } from '../registry.js';
+import { localFileContext, type FileExecutionContext } from '../file-context.js';
 
 import { FILE_SELECTION_CAP, OursError } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 
-import { annotateGetFilesResult, canRead, FILES_ALWAYS_PROMPT, renderFiles } from '../format.js';
+import { annotateGetFilesResult, FILES_ALWAYS_PROMPT, renderFiles } from '../format.js';
 import { runTool, textResult, type McpTextResult, type OursClientProvider } from '../tool.js';
 
 // The four selection codes, and the `error_category` each one renders as. An
@@ -61,11 +58,12 @@ const SELECTION_CATEGORY: Record<string, string> = {
 const GET_FILES_PREFIX = 'get_files failed: ';
 
 export function registerFilesTools(
-  server: McpServer,
+  server: ToolRegistry,
   clientFor: OursClientProvider,
-  options: { remoteDaemonFiles?: boolean } = {},
+  options: { remoteDaemonFiles?: boolean; fileContext?: FileExecutionContext } = {},
 ): void {
-  server.tool(
+  const files = options.fileContext ?? localFileContext;
+  server.tool('bound')(
     'list_incoming_files',
     'List unread received files as structured metadata only — authenticated sender CID in ' +
       '`from.id`, untrusted display label in `from.name`, stable file_id/wire_id, filename, ' +
@@ -85,7 +83,7 @@ export function registerFilesTools(
       ),
   );
 
-  server.tool(
+  server.tool('filesystem')(
     'get_files',
     'Retrieve selected unread files by stable wire_id, or the oldest bounded unread batch ' +
       'when wire_ids is omitted (default 50, maximum 200). The immutable bytes already live ' +
@@ -133,9 +131,20 @@ export function registerFilesTools(
         // wrapper existed only because the proxy saw frames, and passing it a frame
         // annotates nothing, silently. PREPENDS, never substitutes: the daemon text
         // can carry a voice transcript this side cannot reconstruct.
+        const readable = new Map<string, boolean>();
+        if (!options.remoteDaemonFiles && !FILES_ALWAYS_PROMPT) {
+          for (const file of out.files) {
+            if (typeof file.path === 'string') {
+              // The unread commit already happened. A failed probe must not hide its result.
+              let allowed = false;
+              try { allowed = await files.canRead(file.path, extra); } catch { /* conservatively unreadable */ }
+              readable.set(file.path, allowed);
+            }
+          }
+        }
         annotateGetFilesResult(
           result,
-          options.remoteDaemonFiles || FILES_ALWAYS_PROMPT ? () => false : canRead,
+          path => readable.get(path) ?? false,
         );
         return result;
       } catch (e) {
@@ -174,7 +183,7 @@ export function registerFilesTools(
     },
   );
 
-  server.tool(
+  server.tool('filesystem')(
     'save_file',
     'Stream a file from the bound identity\'s persistent history to a path YOUR OS user ' +
       'can write, WITHOUT the bytes ever entering your context. Use this when you run as a ' +
@@ -202,12 +211,9 @@ export function registerFilesTools(
         extra.signal.throwIfAborted();
         const body = await client.openFile(wire_id);
         if (extra.signal.aborted) { await body.cancel(); extra.signal.throwIfAborted(); }
-        const abs = resolvePath(dest_path);
-        mkdirSync(dirname(abs), { recursive: true });
-        await pipeline(Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(abs), { signal: extra.signal });
-        const size = statSync(abs).size;
+        const saved = await files.write(dest_path, body, extra);
         return textResult(
-          `Saved file (wire_id ${wire_id}) to ${abs} (${size} bytes). ` +
+          `Saved file (wire_id ${wire_id}) to ${saved.path} (${saved.size} bytes). ` +
           'The bytes were streamed daemon→disk and never entered this result.',
         );
       } catch (e) {

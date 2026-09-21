@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolRegistry } from '../registry.js';
 import type { OursClient } from '@ours.network/sdk';
 
 import { runTool, type McpTextResult, type OursClientProvider } from '../tool.js';
@@ -29,8 +29,8 @@ function itemResult<T>(item: T | null): McpTextResult {
   };
 }
 
-export function registerHistoryTools(server: McpServer, clientFor: OursClientProvider): void {
-  server.tool(
+export function registerHistoryTools(server: ToolRegistry, clientFor: OursClientProvider): void {
+  server.tool('bound')(
     'list_history',
     'Search persistent message history for the bound identity, newest first. Filter by ' +
       'authenticated peer container id and/or direction, and paginate with before_seq. ' +
@@ -39,7 +39,7 @@ export function registerHistoryTools(server: McpServer, clientFor: OursClientPro
     async (query, extra) => runTool(clientFor(extra), (c) => c.listHistory(query), pageResult),
   );
 
-  server.tool(
+  server.tool('bound')(
     'get_history_item',
     'Look up one persistent message-history item by exact wire_id for the bound identity. ' +
       'Returns null when it is not present. Read-only.',
@@ -47,7 +47,7 @@ export function registerHistoryTools(server: McpServer, clientFor: OursClientPro
     async ({ wire_id }, extra) => runTool(clientFor(extra), (c) => c.getHistoryItem({ wire_id }), itemResult),
   );
 
-  server.tool(
+  server.tool('bound')(
     'list_files',
     'Search persistent file history for the bound identity, newest first. Filter by ' +
       'authenticated peer container id and/or direction, and paginate with before_seq. ' +
@@ -56,7 +56,7 @@ export function registerHistoryTools(server: McpServer, clientFor: OursClientPro
     async (query, extra) => runTool(clientFor(extra), (c) => c.listFiles(query), pageResult),
   );
 
-  server.tool(
+  server.tool('bound')(
     'get_file_info',
     'Look up one persistent file-history item by exact wire_id for the bound identity. ' +
       'Returns metadata only, or null when absent. Use save_file to stream its bytes to a chosen path.',

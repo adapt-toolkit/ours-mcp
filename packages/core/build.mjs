@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -31,3 +32,5 @@ for (const entry of ['cli', 'container', 'connector', 'host-client/index', 'appl
     outfile: resolve(dist, entry === 'host-client/index' ? 'host-client.js' : `${entry.split('/').at(-1)}.js`),
   });
 }
+
+execFileSync("tsc", ["-p", resolve(root, "tsconfig.json"), "--declaration", "--emitDeclarationOnly", "--outDir", resolve(dist, "types")], { stdio: "inherit" });
