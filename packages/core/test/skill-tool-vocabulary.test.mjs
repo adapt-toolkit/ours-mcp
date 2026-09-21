@@ -39,7 +39,7 @@ const toolsDir = join(HERE, '..', 'src', 'mcp', 'tools');
 const registered = new Set();
 for (const f of readdirSync(toolsDir).filter((n) => n.endsWith('.ts'))) {
   const src = readFileSync(join(toolsDir, f), 'utf8');
-  for (const m of src.matchAll(/server\.tool\(\s*'([a-z_]+)'/g)) registered.add(m[1]);
+  for (const m of src.matchAll(/server\.tool\('[a-z-]+'\)\(\s*'([a-z_]+)'/g)) registered.add(m[1]);
 }
 ok(registered.size >= 25, `derived the registered tool set from src/mcp/tools/ (${registered.size} tools)`);
 

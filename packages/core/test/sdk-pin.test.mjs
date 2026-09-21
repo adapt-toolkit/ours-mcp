@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-assert.equal(pkg.dependencies['@ours.network/sdk'], '3.8.1-nightly.9', 'SDK must stay exactly pinned');
+assert.equal(pkg.dependencies['@ours.network/sdk'], '3.8.1-supervisor.0', 'SDK must stay exactly pinned');
 assert.equal(pkg.dependencies['@ours.network/cli'], undefined, 'MCP must not install the operator CLI');
 assert.equal(pkg.dependencies['@ours.network/daemon'], undefined, 'MCP must not install a daemon');
 
@@ -23,16 +23,16 @@ function packageRoot(entry, expectedName) {
 }
 
 const sdk = packageRoot('@ours.network/sdk', '@ours.network/sdk');
-assert.equal(sdk.value.version, '3.8.1-nightly.9');
+assert.equal(sdk.value.version, '3.8.1-supervisor.0');
 assert.equal(lstatSync(sdk.current).isSymbolicLink(), false, 'SDK must be a registry artifact, not a link');
 
 const lock = JSON.parse(readFileSync(new URL('../../../package-lock.json', import.meta.url), 'utf8'));
 for (const [path, version] of [
-  ['node_modules/@ours.network/sdk', '3.8.1-nightly.9'],
+  ['node_modules/@ours.network/sdk', '3.8.1-supervisor.0'],
 ]) {
   const entry = lock.packages[path];
   assert.equal(entry.version, version);
-  assert.match(entry.resolved, /^https:\/\/registry\.npmjs\.org\//);
+  assert.equal(entry.resolved, 'file:../ours.network-sdk-3.8.1-supervisor.0.tgz');
 }
 
 for (const file of ['src', 'build.mjs']) {
@@ -43,4 +43,4 @@ for (const file of ['src', 'build.mjs']) {
   assert.doesNotMatch(text, /@ours\.network\/sdk\/daemon/);
 }
 
-console.log('sdk-pin: SDK 3.8.1-nightly.9 pin and standalone runtime boundary verified');
+console.log('sdk-pin: SDK 3.8.1-supervisor.0 pin and standalone runtime boundary verified');

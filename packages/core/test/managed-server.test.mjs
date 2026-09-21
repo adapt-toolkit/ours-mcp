@@ -9,7 +9,7 @@ const noFiles = { read: async () => { throw Error('denied'); }, write: async () 
 async function connect(sdk, managed, options = {}) {
   const server = managed
     ? createManagedOursMcpServer(sdk,'test',{list:async()=>['Agent']},{fileContext:noFiles,admit:async()=>()=>{},...options})
-    : createOursMcpServer(sdk,'test',{list:async()=>['Agent']});
+    : createOursMcpServer(sdk,'test',{list:async()=>['Agent']},options);
   const client = new Client({name:'test',version:'1'});
   const [a,b] = InMemoryTransport.createLinkedPair(); await server.connect(b); await client.connect(a);
   return {client,close:async()=>{await client.close();await server.close();}};
@@ -62,4 +62,41 @@ test('failed readability callback preserves committed unread batch and transcrip
   let commits=0;
   const b=await connect({getFiles:async()=>{commits++;return {text:'irreplaceable transcript',files:[{path:'/private',wire_id:'ABC',filename:'x'}],mode:'unread',remaining:2};}},true,{fileContext:{...noFiles,canRead:async()=>{throw Error('callback disconnected');}}});
   try{const r=await b.client.callTool({name:'get_files',arguments:{}});assert.equal(r.isError,false);assert.equal(r.structuredContent.remaining,2);assert.equal(r.structuredContent.files[0].readable,false);assert.match(JSON.stringify(r.content),/irreplaceable transcript/);assert.equal(commits,1);}finally{await b.close();}
+});
+
+test('all retained tools preserve successful results, structured payloads and SDK error rendering',async()=>{
+ const results={
+  listIdentities:[],currentIdentity:{name:'Agent',cid:'CID',described:false},
+  generateInvite:{mode:'one_time',inviteId:'invite',blob:'fixture'},listInvites:[],revokeInvite:{revoked:false},
+  addContact:{display:'Peer',cid:'PEER'},listContacts:{contacts:[],pending:[],roots:{},degraded:[],renames:{}},
+  listLocalContactBook:[],setLocalBookPolicy:{identity:'Agent',changes:[]},respondToIntroduction:{action:'reject',name:'Peer',dropped:0},
+  removeContact:{name:'Peer',cid:'PEER',notified:false},renameContact:{from:'Peer',cid:'PEER'},
+  setBio:{identity:'Agent',rolesRefreshed:0},setPersona:{identity:'Agent'},advertiseMigrate:{advertising:true,offers:0},
+  sendMessage:{kind:'e2e',wireId:'WIRE'},sendFile:{kind:'e2e',wireId:'WIRE',filename:'x',bytes:1},
+  getMessages:{messages:[],remaining:2},listContactCommands:[],sendCommand:{kind:'e2e',wireId:'WIRE'},
+  listIncomingFiles:[],getFiles:{text:'files transcript',files:[],mode:'unread',remaining:3},
+  listHistory:{items:[],next_cursor:null},getHistoryItem:null,listFiles:{items:[],next_cursor:null},getFileInfo:null,
+ };
+ for(const failing of [false,true]){
+  const calls=[[],[]];
+  const sdk=index=>new Proxy({}, {get:(_t,key)=>key==='then'?undefined:async(...args)=>{
+   calls[index].push([key,args]);if(failing)throw new OursError('FIXTURE_ERROR','same precise error');
+   if(key==='openFile')return new Blob(['x']).stream();
+   assert(key in results,`uncovered SDK operation ${key}`);return structuredClone(results[key]);
+  }});
+  const files={...noFiles,write:async(path,body)=>({path, size:(await new Response(body).arrayBuffer()).byteLength})};
+  const a=await connect(sdk(0),false,{fileContext:files}),b=await connect(sdk(1),true,{fileContext:files});
+  try{
+   const tools=(await b.client.listTools()).tools;
+   for(const tool of tools){
+    const args={};for(const key of tool.inputSchema.required??[]){const p=tool.inputSchema.properties[key];args[key]=p.enum?.[0]??(p.type==='string'?'fixture':null);}
+    if(tool.name==='send_file')args.data_base64='eA==';
+    const left=await a.client.callTool({name:tool.name,arguments:args});
+    const right=await b.client.callTool({name:tool.name,arguments:args});
+    assert.deepEqual(right,left,`${tool.name} ${failing?'error':'success'} parity`);
+    if(!failing)assert.equal(right.isError,false,`${tool.name} must exercise a successful handler`);
+   }
+   assert.deepEqual(calls[1].filter(c=>c[0]!=='currentIdentity'),calls[0].filter(c=>c[0]!=='currentIdentity'));assert.equal(tools.length,27);
+  }finally{await a.close();await b.close();}
+ }
 });

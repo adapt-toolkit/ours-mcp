@@ -17,6 +17,7 @@
     "dev": "npm --workspace @ours.network/mcp run dev"
   },
   "devDependencies": {
-    "@adapt-toolkit/broker": "0.10.12"
+    "@adapt-toolkit/broker": "0.10.12",
+    "@ours.network/sdk": "file:../ours.network-sdk-3.8.1-supervisor.0.tgz"
   }
 }
