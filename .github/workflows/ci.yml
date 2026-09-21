@@ -55,11 +55,15 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.dependency-token.outputs.token }}
         run: bash scripts/prepare-supervisor-sdk.sh
+      - name: Stage built review SDK
+        run: |
+          mkdir -p .review-artifacts
+          cp ../ours.network-sdk-3.8.1-supervisor.0.tgz .review-artifacts/
       - name: Retain built review SDK for reproducibility checks
         uses: actions/upload-artifact@v4
         with:
           name: review-sdk
-          path: ../ours.network-sdk-3.8.1-supervisor.0.tgz
+          path: .review-artifacts/ours.network-sdk-3.8.1-supervisor.0.tgz
           retention-days: 3
       - run: npm ci
       - run: npm run typecheck
