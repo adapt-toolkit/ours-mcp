@@ -23,14 +23,11 @@
 // already happened. Pass that string straight to textResult
 // and so does this file. Re-deriving those two sentences here is
 // exactly the drift the split exists to prevent.
-import { createReadStream, statSync } from 'node:fs';
-import { Readable } from 'node:stream';
-import { basename, resolve as resolvePath } from 'node:path';
+import { localFileContext, type FileExecutionContext } from '../file-context.js';
 
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolRegistry } from '../registry.js';
 import {
-  errFileUnreadable,
   OursError,
 } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
@@ -49,10 +46,11 @@ function sendResult<T extends object>(text: string, outcome: T, isError = false)
 }
 
 export function registerMessagingTools(
-  server: McpServer,
+  server: ToolRegistry,
   clientFor: OursClientProvider,
+  files: FileExecutionContext = localFileContext,
 ): void {
-  server.tool(
+  server.tool('bound')(
     'send_message',
     'Send an end-to-end-encrypted message to a known contact (by name or container id). ' +
       'If the recipient is not a contact yet, the connection is established automatically ' +
@@ -121,7 +119,7 @@ export function registerMessagingTools(
       ),
   );
 
-  server.tool(
+  server.tool('filesystem')(
     'send_file',
     'Send a file to a known contact (by name or container id). Provide EITHER `path` ' +
       '(the connector reads it as your OS user) OR `data_base64` + `filename` (inline bytes). ' +
@@ -158,16 +156,13 @@ export function registerMessagingTools(
           if (!path) {
             return c.sendFile({ contact, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence });
           }
-          const abs = resolvePath(path);
-          let size: number;
-          try { size = statSync(abs).size; } catch (error) { throw errFileUnreadable(String(error)); }
-          const source = createReadStream(abs, { signal: extra.signal });
+          const source = await files.read(path, extra);
           let staged: { upload_id: string };
           try {
-            staged = await c.uploadFile(Readable.toWeb(source) as ReadableStream<Uint8Array>, {
-              filename: filename ?? basename(abs), mime, size,
+            staged = await c.uploadFile(source.body, {
+              filename: filename ?? source.filename, mime, size: source.size,
             });
-          } finally { source.destroy(); }
+          } finally { await source.close(); }
           extra.signal.throwIfAborted();
           return c.sendFile({
             contact,
@@ -221,7 +216,7 @@ export function registerMessagingTools(
       ),
   );
 
-  server.tool(
+  server.tool('bound')(
     'get_messages',
     'Fetch the oldest unread messages for the bound identity and atomically mark that ' +
       'bounded batch read. Defaults to 50 and returns at most 200, plus the remaining unread ' +

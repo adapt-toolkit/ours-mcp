@@ -19,7 +19,7 @@
 // which is the point of the split.
 //
 // Tool descriptions and zod schemas are compatibility-sensitive and kept byte-stable.
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolRegistry } from '../registry.js';
 import { z } from 'zod';
 
 import type { OursClient } from '@ours.network/sdk';
@@ -39,8 +39,8 @@ function fmtContactRoot(r: ContactRoot | undefined): string {
   return r.role_id ? `  [role "${r.role_id}" of ${who}]` : `  [root identity of ${who}]`;
 }
 
-export function registerContactsTools(server: McpServer, clientFor: OursClientProvider): void {
-  server.tool(
+export function registerContactsTools(server: ToolRegistry, clientFor: OursClientProvider): void {
+  server.tool('contact')(
     'generate_invite',
     'Generate an invite to share out-of-band with another agent. The invite ' +
       'carries your identity and display name. If you pass a name, whoever redeems ' +
@@ -76,7 +76,7 @@ export function registerContactsTools(server: McpServer, clientFor: OursClientPr
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'list_invites',
     'List the outstanding invites the bound identity has minted and not yet seen ' +
       'redeemed or revoked: invite_id, kind (one_time | public), assigned peer name ' +
@@ -99,7 +99,7 @@ export function registerContactsTools(server: McpServer, clientFor: OursClientPr
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'revoke_invite',
     'Revoke an outstanding invite by invite_id (from generate_invite or ' +
       'list_invites). The only way to close a public invite, which has no expiry ' +
@@ -123,7 +123,7 @@ export function registerContactsTools(server: McpServer, clientFor: OursClientPr
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'add_contact',
     "Add a contact from an invite blob produced by another agent's generate_invite. " +
       "If no name is given, the inviter's embedded display name is used. Also replies " +
@@ -142,7 +142,7 @@ export function registerContactsTools(server: McpServer, clientFor: OursClientPr
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'list_contacts',
     'List the contacts the bound identity knows about (name + container id), plus ' +
       'any pending local-contact-book introductions awaiting approval.',
@@ -178,7 +178,7 @@ export function registerContactsTools(server: McpServer, clientFor: OursClientPr
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'list_local_contact_book',
     'List the host-local contact book: identities on THIS host that are exposed for ' +
       'inviteless connection. Any of them can be messaged directly with send_message.',
@@ -201,7 +201,7 @@ export function registerContactsTools(server: McpServer, clientFor: OursClientPr
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'set_local_book_policy',
     "Change the bound identity's local-contact-book settings: expose (publish/" +
       'unpublish it in the book) and/or auto_accept (whether local introductions are ' +
@@ -221,7 +221,7 @@ export function registerContactsTools(server: McpServer, clientFor: OursClientPr
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'respond_to_introduction',
     'Approve or reject a pending local-contact-book introduction (see list_contacts ' +
       'for the pending list). Approving registers the contact and delivers any messages ' +
@@ -246,7 +246,7 @@ export function registerContactsTools(server: McpServer, clientFor: OursClientPr
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'remove_contact',
     'Forget a contact (by name or container id) — drops it from the bound identity\'s ' +
       'contacts, so you can no longer message them and inbound messages from them are ' +
@@ -285,7 +285,7 @@ export function registerContactsTools(server: McpServer, clientFor: OursClientPr
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'rename_contact',
     'Rename a contact (addressed by current name or container id) — rewrites the ' +
       'display name only; the container id, keys and the established encrypted ' +

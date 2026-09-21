@@ -112,7 +112,7 @@ try {
   let call = connected.call;
   ok(connected.initialized, 'Claude-style proxy session initialized');
 
-  const human = await call('create_identity', { name: 'Human', expose_local: false });
+  const human = await call('create_root_identity', { name: 'Human', expose_local: false });
   ok(Boolean(human.result) && !human.result.isError, `Human/root created${human.result?.isError || human.error ? ': ' + JSON.stringify(human) : ''}`);
   const first = await call('create_temporary_identity', { name: 'EphemeralOne' });
   ok(Boolean(first.result) && !first.result.isError, 'first delegated temporary role created');

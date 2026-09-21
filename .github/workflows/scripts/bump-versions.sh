@@ -109,7 +109,7 @@ if [[ "$MODE" == stable ]]; then
 fi
 
 bump() { # <version> <level>
-  local a b c; IFS=. read -r a b c <<<"$1"
+  local a b c base=${1%%[-+]*}; IFS=. read -r a b c <<<"$base"
   case "$2" in
     major) echo "$((a + 1)).0.0" ;;
     minor) echo "${a}.$((b + 1)).0" ;;

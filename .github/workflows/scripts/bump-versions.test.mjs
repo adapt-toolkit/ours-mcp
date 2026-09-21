@@ -63,6 +63,7 @@ esac
       }
       assert.equal(versions.size, 1);
       assert.equal([...versions][0].includes('-nightly.'), mode === 'nightly');
+      if (mode === 'stable') assert.match([...versions][0], /^\d+\.\d+\.\d+$/);
       assert.equal(run('git', ['rev-parse', 'HEAD']), head, 'dry-run must not commit');
       assert.equal(readFileSync(join(temp, 'package-lock.json'), 'utf8'), '{"fixture":true}\n');
     } finally {

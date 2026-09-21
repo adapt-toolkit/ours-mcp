@@ -1,7 +1,7 @@
 // Fixed agent-facing adapters for remote typed commands. Remote catalogs stay
 // data: they are never converted into dynamically registered MCP tools.
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolRegistry } from '../registry.js';
 import type { JsonValue, OursClient } from '@ours.network/sdk';
 
 import { runTool, type OursClientProvider } from '../tool.js';
@@ -15,8 +15,8 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
   z.record(JsonValueSchema),
 ]));
 
-export function registerCommandTools(server: McpServer, clientFor: OursClientProvider): void {
-  server.tool(
+export function registerCommandTools(server: ToolRegistry, clientFor: OursClientProvider): void {
+  server.tool('bound')(
     'list_contact_commands',
     'List the typed commands a contact currently advertises. The returned catalog is data; remote commands are not registered as MCP tools.',
     {
@@ -36,7 +36,7 @@ export function registerCommandTools(server: McpServer, clientFor: OursClientPro
     ),
   );
 
-  server.tool(
+  server.tool('bound')(
     'send_command',
     'Send a typed command to a contact after the SDK validates it against that contact\'s advertised schema. Use get_messages to retrieve a correlated command_result whose reply_to.wire_id matches request_wire_id.',
     {

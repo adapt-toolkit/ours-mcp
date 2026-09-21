@@ -16,7 +16,7 @@
 // Nothing below captures ctx.leaseToken() or ctx.sessionId() into a local.
 //
 // Tool descriptions and zod schemas are compatibility-sensitive and kept byte-stable.
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolRegistry } from '../registry.js';
 import { z } from 'zod';
 import { buildIdentityFile, writeIdentityFile } from '@ours.network/sdk/connector';
 
@@ -127,17 +127,18 @@ const tempTag = (row: IdentityTreeRow): string => {
 };
 
 export function registerIdentityTools(
-  server: McpServer,
+  server: ToolRegistry,
   clientFor: OursClientProvider,
   applicationIdentities: ApplicationIdentityStore,
+  options: { managedLifetime?: boolean } = {},
 ): void {
-  server.tool(
+  server.tool('binding')(
     'create_identity',
     'Create a new self-sovereign identity (an ADAPT node) with the given display ' +
       'name and bind it to this session. The name is what peers see for you in invites. ' +
-      'Persisted permanently; reject if the name already exists. When a root identity ' +
-      'exists on this host, the new identity is automatically delegated as a ROLE under ' +
-      'it (its invites then carry the verified "role X of person Y" chain). By default the ' +
+      'Persisted permanently; reject if the name already exists. An existing Human/root identity ' +
+      'is required. The new identity is delegated as a ROLE under it ' +
+      '(its invites carry the verified "role X of person Y" chain). By default the ' +
       'identity is published to the LOCAL contact book, so other identities on this ' +
       'host can message it by name without an invite; pass expose_local=false to opt out.',
     {
@@ -158,14 +159,7 @@ export function registerIdentityTools(
           // Use `underRoot` rather than r.info.rootName: it names the root from the
           // in-memory Identity and cannot degrade to '' when
           // the describe_identity read-back fails.
-          const hierarchy =
-            r.hierarchy === 'role'
-              ? ` Delegated as a role under root "${r.underRoot}".`
-              : ' No host root existed yet, so this identity is now the host ROOT (the person ' +
-                'behind all roles); create more with create_identity and they become roles under it.' +
-                (r.adopted.length
-                  ? ` Adopted ${r.adopted.length} pre-existing identit${r.adopted.length === 1 ? 'y' : 'ies'} as role(s): ${r.adopted.join(', ')}.`
-                  : '');
+          const hierarchy = ` Delegated as a role under root "${r.underRoot}".`;
           const exposure = exposureClause(r.exposedLocal, r.localAutoAccept, ' Not exposed in the local contact book.');
           return textResult(
             `Created identity "${r.info.name}" (${r.info.cid}) and bound it to this session.${hierarchy}${exposure}${monitorHintFor(r.info.name)}`,
@@ -174,7 +168,7 @@ export function registerIdentityTools(
       ),
   );
 
-  server.tool(
+  server.tool('binding')(
     'create_temporary_identity',
     'Create a TEMPORARY identity owned by this session and bind it. Temporary ' +
       'means session-scoped LOCAL lifetime: when it is explicitly closed or its ' +
@@ -242,7 +236,7 @@ export function registerIdentityTools(
       ),
   );
 
-  server.tool(
+  server.tool('lifecycle')(
     'close_temporary_identity',
     'Close a temporary identity NOW: it stops accepting work, each contact is sent ' +
       'one best-effort fire-and-forget remove-me notice (delivery and remote ' +
@@ -276,7 +270,7 @@ export function registerIdentityTools(
       ),
   );
 
-  server.tool(
+  server.tool('binding')(
     'create_root_identity',
     'Create THE root identity for this host — the identity that represents the ' +
       'person behind all roles (see the identity hierarchy: one root, many roles). ' +
@@ -328,7 +322,7 @@ export function registerIdentityTools(
       ),
   );
 
-  server.tool(
+  server.tool('workspace-pin')(
     'define_local_identity_file',
     'Write a `.ours-identity` workspace-pin file that ties a directory to an ' +
       'identity. The pin is ADVISORY: a future Codex or Claude Code session here is told about ' +
@@ -365,7 +359,7 @@ export function registerIdentityTools(
     },
   );
 
-  server.tool(
+  server.tool('binding')(
     'choose_identity',
     'Bind an existing identity to this session so the messaging tools act as it. ' +
       'Binding is exclusive: if the identity is already in use by another session, ' +
@@ -395,7 +389,7 @@ export function registerIdentityTools(
       ),
   );
 
-  server.tool(
+  server.tool('inventory')(
     'list_identities',
     'List identities adopted by this ours-mcp application (name + container id) as a hierarchy — ' +
       'the root identity first with its roles indented under it — marking which one ' +
@@ -439,7 +433,7 @@ export function registerIdentityTools(
       ),
   );
 
-  server.tool(
+  server.tool('bound')(
     'current_identity',
     'Report the identity currently bound to this session (if any), including its ' +
       'place in the identity hierarchy.',
@@ -467,7 +461,9 @@ export function registerIdentityTools(
             ? ` — role "${r.roleId}" under root "${r.rootName}"`
             : '';
         const temp = r.temporary
-          ? '\nTEMPORARY identity owned by this session — session-scoped local lifetime: closed ' +
+          ? options.managedLifetime
+            ? '\nTEMPORARY identity owned by the Fleet supervisor for this logical agent instance. Bridge or harness disconnect retains it; terminal supervisor release deletes local state with best-effort peer notices.'
+            : '\nTEMPORARY identity owned by this session — session-scoped local lifetime: closed ' +
             '(best-effort remove-me to each contact, then full local deletion) on ' +
             'close_temporary_identity or an authoritative owner release. Native MCP/stdio exit alone retains it for resume.'
           : '';
@@ -483,7 +479,7 @@ export function registerIdentityTools(
     },
   );
 
-  server.tool(
+  server.tool('lifecycle')(
     'remove_identity',
     'Permanently delete a persisted identity — its packet and all on-disk state. ' +
     'This cannot be undone.',
