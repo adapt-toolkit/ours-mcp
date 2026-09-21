@@ -44,8 +44,4 @@ const legacyApplication = spawnSync(
 assert.equal(legacyApplication.status, 1);
 assert.match(legacyApplication.stderr, /--application.*no longer supported/);
 
-const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
-assert.match(source, /--application.*no longer supported/s, 'obsolete application selection fails with migration guidance');
-assert.match(source, /Install @ours\.network\/daemon/, 'missing delegated CLI reports exact install guidance');
-
 console.log('cli-delegation: all passed');

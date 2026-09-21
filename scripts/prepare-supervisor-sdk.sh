@@ -5,7 +5,7 @@ repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 artifact_dir=$(cd -- "${1:-$repo_root/..}" && pwd)
 source_dir=$(mktemp -d)
 trap 'rm -rf -- "$source_dir"' EXIT
-sdk_revision=82aaab5081807aa0ddd26e8753920ea464b78d69
+sdk_revision=d910ab912ca6e6fa835dfe97751500363d9396dc
 git -C "$source_dir" init -q
 git -C "$source_dir" remote add origin https://github.com/adapt-toolkit/ours-sdk.git
 git -c credential.helper='!gh auth git-credential' -C "$source_dir" fetch --depth=1 origin "$sdk_revision"
