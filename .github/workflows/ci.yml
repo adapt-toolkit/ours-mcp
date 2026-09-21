@@ -42,6 +42,8 @@ jobs:
           cache: npm
       - name: Verify release versioning preserves package dependencies
         run: node --test .github/workflows/scripts/bump-versions.test.mjs
+      - name: Build pinned review SDK artifact
+        run: bash scripts/prepare-supervisor-sdk.sh
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
