@@ -118,9 +118,10 @@ that finds old packet state refuses startup without changing it. Operators may
 back it up and must remove it themselves before starting clean; installers never
 delete identity state implicitly.
 
-The SDK dependency remains pinned to the previously validated published artifact.
-Qualifying this source split is separate from selecting newly published thin SDK
-and daemon artifacts. The daemon is installed separately and is not an MCP dependency.
+The SDK dependency is pinned to the published thin client `3.8.1-nightly.9`.
+Native integration tests use `@ours.network/daemon@3.8.1-nightly.1` as a development
+dependency. Production MCP installs do not include a daemon; operators install
+and manage `ours-daemon` separately.
 
 ## Typed commands
 

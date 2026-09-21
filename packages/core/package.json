@@ -50,7 +50,7 @@
     "test:external-profile": "node test/native-profile-session.test.mjs && node test/external-profile-stdio-refresh.test.mjs"
   },
   "dependencies": {
-    "@ours.network/sdk": "3.8.1-nightly.4"
+    "@ours.network/sdk": "3.8.1-nightly.9"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
@@ -59,6 +59,7 @@
     "tsx": "^4.19.0",
     "typescript": "^5.5.4",
     "zod": "^3.23.8",
-    "@ours.network/cli": "2.8.1-nightly.2"
+    "@ours.network/cli": "2.8.1-nightly.7",
+    "@ours.network/daemon": "3.8.1-nightly.1"
   }
 }

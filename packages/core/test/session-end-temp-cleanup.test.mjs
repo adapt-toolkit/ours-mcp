@@ -1,4 +1,4 @@
-process.env.OURS_DAEMON_CLI ??= new URL('../test-support/legacy-daemon.mjs', import.meta.url).pathname;
+process.env.OURS_DAEMON_CLI ??= new URL('../../../node_modules/.bin/ours-daemon', import.meta.url).pathname;
 // Normal harness SessionEnd -> ours-mcp session-end -> MCP DELETE.
 // Proves the shipped proxy/CLI lease-token seam performs deterministic cleanup
 // for every temporary role owned by the session, including one switched away
