@@ -126,7 +126,7 @@ function fakeClient() {
 // sessionId null => no CLAUDE_CODE_SESSION_ID at all (lease token falls back to
 // `client:<pid>`), which is what a non-Claude supervisor actually looks like.
 async function connectProxy(label, sessionId, clientPid, extra = {}) {
-  const env = { ...baseEnv(), OURS_DAEMON_CLIENT_PID: String(clientPid), ...extra };
+  const env = { ...baseEnv(), OURS_CLIENT_PID: String(clientPid), ...extra };
   // The shared daemon owns broker and maintenance settings. The stdio adapter
   // selects it by the coherent port/state pair and intentionally rejects daemon-
   // only environment inherited from older embedded-daemon launchers.

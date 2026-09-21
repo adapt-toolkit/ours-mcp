@@ -19,7 +19,7 @@ const out = (value: string): void => { process.stdout.write(`${value}\n`); };
 const err = (value: string): void => { process.stderr.write(`${value}\n`); };
 
 const validPid = (value: number): boolean => Number.isInteger(value) && value > 1;
-const configuredPid = Number(process.env.OURS_DAEMON_CLIENT_PID);
+const configuredPid = Number(process.env.OURS_CLIENT_PID);
 const CLIENT_PID = validPid(configuredPid)
   ? configuredPid
   : validPid(process.ppid) ? process.ppid : process.pid;

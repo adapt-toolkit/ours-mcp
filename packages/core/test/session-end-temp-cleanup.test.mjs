@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, '..', 'dist', 'cli.js');
+const CODEX_PROXY = join(HERE, '..', '..', 'codex', 'bin', 'proxy.mjs');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const freePort = () => new Promise((resolve, reject) => {
   const server = createServer();
@@ -30,8 +31,8 @@ const ok = (condition, message) => {
   else { fail++; console.log('  ✗ FAIL:', message); }
 };
 
-async function connectProxy(sessionEnv, clientName) {
-  const child = spawn(process.execPath, [CLI, 'proxy'], { env: sessionEnv, stdio: ['pipe', 'pipe', 'ignore'] });
+async function connectProxy(sessionEnv, clientName, args = [CLI, 'proxy']) {
+  const child = spawn(process.execPath, args, { env: sessionEnv, stdio: ['pipe', 'pipe', 'ignore'] });
   let nextId = 1;
   let buffer = '';
   const pending = new Map();
@@ -131,10 +132,12 @@ try {
   proxy = undefined;
 
   // Codex has no CLAUDE_CODE_SESSION_ID, so both proxy and hook derive the
-  // same lease from the stable OURS_DAEMON_CLIENT_PID supplied by the harness shim.
-  const codexEnv = { ...proxyEnv, OURS_DAEMON_CLIENT_PID: String(process.pid) };
+  // same lease from the stable OURS_CLIENT_PID supplied by the harness shim.
+  const codexEnv = { ...proxyEnv };
+  // Exercise the real wrapper producer: both wrappers share this test as parent.
+  delete codexEnv.OURS_CLIENT_PID;
   delete codexEnv.CLAUDE_CODE_SESSION_ID;
-  connected = await connectProxy(codexEnv, 'codex-session-end-test');
+  connected = await connectProxy(codexEnv, 'codex-session-end-test', [CODEX_PROXY]);
   proxy = connected.child;
   call = connected.call;
   ok(connected.initialized, 'Codex-style proxy session initialized from a stable client pid');
@@ -142,7 +145,7 @@ try {
   ok(Boolean(codexFirst.result) && !codexFirst.result.isError, 'Codex first delegated temporary role created');
   const codexSecond = await call('create_temporary_identity', { name: 'CodexEphemeralTwo' });
   ok(Boolean(codexSecond.result) && !codexSecond.result.isError, 'Codex second delegated temporary role created after switching away');
-  const codexHook = spawn(process.execPath, [CLI, 'session-end'], { env: codexEnv, stdio: 'ignore' });
+  const codexHook = spawn(process.execPath, [CODEX_PROXY, 'session-end'], { env: codexEnv, stdio: 'ignore' });
   const [codexCode, codexSignal] = await once(codexHook, 'exit');
   ok(codexCode === 0 && codexSignal === null, `Codex session-end hook exits cleanly (code=${codexCode}, signal=${codexSignal})`);
   ok(
