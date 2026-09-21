@@ -23,7 +23,8 @@
 // already happened. Pass that string straight to textResult
 // and so does this file. Re-deriving those two sentences here is
 // exactly the drift the split exists to prevent.
-import { readFileSync } from 'node:fs';
+import { createReadStream, statSync } from 'node:fs';
+import { Readable } from 'node:stream';
 import { basename, resolve as resolvePath } from 'node:path';
 
 import { z } from 'zod';
@@ -50,7 +51,6 @@ function sendResult<T extends object>(text: string, outcome: T, isError = false)
 export function registerMessagingTools(
   server: McpServer,
   clientFor: OursClientProvider,
-  options: { networkHostFiles?: boolean } = {},
 ): void {
   server.tool(
     'send_message',
@@ -130,7 +130,6 @@ export function registerMessagingTools(
     {
       contact: z.string().min(1).describe('Contact name or container id to send to.'),
       path: z.string().min(1).optional().describe('Filesystem path to the file to send (preferred). Read by the ours connector as YOUR OS user, then streamed to the daemon.'),
-      upload_id: z.string().min(1).optional().describe('Host-bridge staged upload identifier. Do not supply this directly.'),
       data_base64: z.string().min(1).optional().describe('Inline file bytes, base64-encoded (alternative to path).'),
       filename: z.string().min(1).optional().describe('Filename to advertise (required with data_base64; defaults to basename of path).'),
       mime: z.string().optional().describe('MIME type (inferred from the path extension when omitted).'),
@@ -147,39 +146,29 @@ export function registerMessagingTools(
     // Passing `path` straight through typechecks perfectly and fails only at
     // runtime, on someone else's machine, with a permissions error that has no
     // workaround. A green compile on this handler is not evidence of correctness.
-    async ({ contact, path, upload_id, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }, extra) =>
+    async ({ contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }, extra) =>
       runTool(
         clientFor(extra),
         async (c) => {
-          const inputs = Number(Boolean(path)) + Number(Boolean(upload_id)) + Number(Boolean(data_base64));
+          extra.signal.throwIfAborted();
+          const inputs = Number(Boolean(path)) + Number(Boolean(data_base64));
           if (inputs !== 1) {
-            throw new OursError('FILE_UNREADABLE', 'send_file requires exactly one of path, upload_id, or data_base64.');
-          }
-          if (upload_id) {
-            if (!options.networkHostFiles) {
-              throw new OursError('FILE_UNREADABLE', 'send_file upload_id is available only through the network host bridge.');
-            }
-            return c.sendFile({ contact, upload_id, filename, mime, reply_to_wire_id, reply_to_sentence });
+            throw new OursError('FILE_UNREADABLE', 'send_file requires exactly one of path or data_base64.');
           }
           if (!path) {
             return c.sendFile({ contact, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence });
           }
-          if (options.networkHostFiles) {
-            throw new OursError('FILE_UNREADABLE', 'send_file path must be staged by the network host bridge.');
-          }
           const abs = resolvePath(path);
-          let bytes: Buffer;
+          let size: number;
+          try { size = statSync(abs).size; } catch (error) { throw errFileUnreadable(String(error)); }
+          const source = createReadStream(abs, { signal: extra.signal });
+          let staged: { upload_id: string };
           try {
-            bytes = readFileSync(abs);
-          } catch (e) {
-            // The SDK's own row for an unreadable file, raised on the side that
-            // actually tried to read it.
-            throw errFileUnreadable(String(e));
-          }
-          const staged = await c.uploadFile(new Uint8Array(bytes), {
-            filename: filename ?? basename(abs),
-            mime,
-          });
+            staged = await c.uploadFile(Readable.toWeb(source) as ReadableStream<Uint8Array>, {
+              filename: filename ?? basename(abs), mime, size,
+            });
+          } finally { source.destroy(); }
+          extra.signal.throwIfAborted();
           return c.sendFile({
             contact,
             upload_id: staged.upload_id,

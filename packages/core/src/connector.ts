@@ -49,7 +49,7 @@ function rejectObsoleteDaemonEnvironment(env: NodeJS.ProcessEnv): void {
   if (found.length === 0) return;
   throw new Error(
     `${found.join(', ')} ${found.length === 1 ? 'is' : 'are'} obsolete in ours-mcp. ` +
-    'The shared daemon is owned by the `ours` CLI; remove these variables and configure it with `ours config setup`.',
+    'The shared daemon is owned by the `ours-daemon` CLI; remove these variables and configure it with `ours-daemon config setup`.',
   );
 }
 
@@ -239,7 +239,7 @@ export async function runConnector(options: ConnectorOptions): Promise<void> {
       }
     : client!;
 
-  server = createOursMcpServer(clientFor, options.version, identities);
+  server = createOursMcpServer(clientFor, options.version, identities, { remoteDaemonFiles: !!nativeProfile || options.selection?.mode === 'external-profile' });
   if (client) {
     const watcher = new ArrivalWatcher(client, server);
     watchers.add(watcher);

@@ -63,7 +63,7 @@ const GET_FILES_PREFIX = 'get_files failed: ';
 export function registerFilesTools(
   server: McpServer,
   clientFor: OursClientProvider,
-  options: { networkHostFiles?: boolean } = {},
+  options: { remoteDaemonFiles?: boolean } = {},
 ): void {
   server.tool(
     'list_incoming_files',
@@ -135,7 +135,7 @@ export function registerFilesTools(
         // can carry a voice transcript this side cannot reconstruct.
         annotateGetFilesResult(
           result,
-          options.networkHostFiles || FILES_ALWAYS_PROMPT ? () => false : canRead,
+          options.remoteDaemonFiles || FILES_ALWAYS_PROMPT ? () => false : canRead,
         );
         return result;
       } catch (e) {
@@ -197,18 +197,14 @@ export function registerFilesTools(
       // proxy.ts:557, verbatim. A wire_id names a path segment on the daemon, so a
       // charset check belongs before the request, not after it.
       if (!/^[A-Za-z0-9]+$/.test(wire_id)) return textResult('save_file: invalid wire_id.', true);
-      if (options.networkHostFiles) {
-        return {
-          content: [{ type: 'text', text: `Host save requested for wire_id ${wire_id}.` }],
-          structuredContent: { oursHostSave: { wire_id, dest_path } },
-          isError: false,
-        };
-      }
+
       try {
+        extra.signal.throwIfAborted();
         const body = await client.openFile(wire_id);
+        if (extra.signal.aborted) { await body.cancel(); extra.signal.throwIfAborted(); }
         const abs = resolvePath(dest_path);
         mkdirSync(dirname(abs), { recursive: true });
-        await pipeline(Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(abs));
+        await pipeline(Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(abs), { signal: extra.signal });
         const size = statSync(abs).size;
         return textResult(
           `Saved file (wire_id ${wire_id}) to ${abs} (${size} bytes). ` +

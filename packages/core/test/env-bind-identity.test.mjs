@@ -1,3 +1,4 @@
+process.env.OURS_DAEMON_CLI ??= new URL('../../../node_modules/.bin/ours-daemon', import.meta.url).pathname;
 // OURS_BIND_IDENTITY — can a SUPERVISOR say which identity a session starts on,
 // without the MODEL performing the bind?
 //

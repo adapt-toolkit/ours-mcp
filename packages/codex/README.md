@@ -67,8 +67,8 @@ local-daemon precedence remains:
 5. port `3050`
 
 All MCP, hooks, unread, and watcher calls inherit the same selected profile. Host-profile
-traffic goes directly to the selected daemon's authenticated `/mcp` endpoint through the
-Codex package; it does not require Docker or an installed `@ours.network/mcp` package.
+tools run in the local `@ours.network/mcp` stdio server included as a plugin dependency.
+The MCP server calls the selected daemon's authenticated HTTP API through the SDK.
 Example:
 
 ```sh

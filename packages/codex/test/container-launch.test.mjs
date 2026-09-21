@@ -1,5 +1,4 @@
-// Legacy Compose tuples cannot select the network proxy. Network transport,
-// streamed files, watch ownership and SessionEnd are covered by network-* tests.
+// Incomplete legacy profiles must never execute a server-side MCP through Docker.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
@@ -7,29 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-
-for (const plugin of ['codex', 'claude-code']) {
-  test(`${plugin} container selection validates profile and isolates Compose UUID from exec environment`, async () => {
-    const { containerInvocation, readContainerJson } = await import(`../../${plugin}/bin/container-launch.mjs`);
-    const dir = mkdtempSync(join(tmpdir(), 'ours-container-selection-'));
-    try {
-      const path = join(dir, 'profile.json');
-      const env = { OURS_CONFIG: path, OURS_DAEMON_ID: 'unrelated', OURS_API_TOKEN: 'host-secret' };
-      writeFileSync(path, '{}');
-      assert.equal(containerInvocation('watch', ['alice'], env), null);
-      writeFileSync(path, JSON.stringify({ composeFile: 'relative.yml', expectedInstanceId: 'selected' }));
-      assert.throws(() => containerInvocation('watch', ['alice'], env), /absolute path/);
-      writeFileSync(path, JSON.stringify({ composeFile: '/compose.yml' }));
-      assert.throws(() => containerInvocation('watch', ['alice'], env), /expectedInstanceId/);
-      writeFileSync(path, JSON.stringify({ composeFile: '/compose.yml', expectedInstanceId: 'selected' }));
-      const invocation = containerInvocation('watch', ['alice'], env);
-      assert.deepEqual(invocation.args, ['compose', '-f', '/compose.yml', 'exec', '-T', 'daemon', 'node', '/opt/ours/node_modules/@ours.network/mcp/dist/container.js', 'selected', 'watch', 'alice']);
-      assert.equal(invocation.env.OURS_DAEMON_ID, 'selected');
-      assert.equal(env.OURS_DAEMON_ID, 'unrelated');
-      assert.throws(() => readContainerJson('application-identities', { ...env, PATH: dir }), /ENOENT/);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
-  });
-}
 
 for (const plugin of ['codex', 'claude-code']) {
   for (const [scenario, contents, mode, reason] of [

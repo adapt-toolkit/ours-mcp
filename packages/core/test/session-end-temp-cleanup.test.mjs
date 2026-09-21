@@ -1,3 +1,4 @@
+process.env.OURS_DAEMON_CLI ??= new URL('../../../node_modules/.bin/ours-daemon', import.meta.url).pathname;
 // Normal harness SessionEnd -> ours-mcp session-end -> MCP DELETE.
 // Proves the shipped proxy/CLI lease-token seam performs deterministic cleanup
 // for every temporary role owned by the session, including one switched away
@@ -12,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, '..', 'dist', 'cli.js');
+const CODEX_PROXY = join(HERE, '..', '..', 'codex', 'bin', 'proxy.mjs');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const freePort = () => new Promise((resolve, reject) => {
   const server = createServer();
@@ -29,8 +31,8 @@ const ok = (condition, message) => {
   else { fail++; console.log('  ✗ FAIL:', message); }
 };
 
-async function connectProxy(sessionEnv, clientName) {
-  const child = spawn(process.execPath, [CLI, 'proxy'], { env: sessionEnv, stdio: ['pipe', 'pipe', 'ignore'] });
+async function connectProxy(sessionEnv, clientName, args = [CLI, 'proxy']) {
+  const child = spawn(process.execPath, args, { env: sessionEnv, stdio: ['pipe', 'pipe', 'ignore'] });
   let nextId = 1;
   let buffer = '';
   const pending = new Map();
@@ -96,10 +98,14 @@ delete proxyEnv.OURS_TRANSPORT;
 const daemon = spawn(process.execPath, [CLI, 'serve'], { env, stdio: 'ignore' });
 let proxy;
 try {
-  for (let i = 0; i < 120; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/version`)).ok) break; } catch { /* booting */ }
+  const deadline = Date.now() + 180_000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    if (daemon.exitCode !== null) throw new Error(`Runtime fixture exited before readiness: ${daemon.exitCode}`);
+    try { if ((await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(1000) })).ok) { ready = true; break; } } catch { /* booting */ }
     await sleep(100);
   }
+  if (!ready) throw new Error('Runtime fixture did not become ready before the test deadline');
 
   let connected = await connectProxy(proxyEnv, 'claude-session-end-test');
   proxy = connected.child;
@@ -107,7 +113,7 @@ try {
   ok(connected.initialized, 'Claude-style proxy session initialized');
 
   const human = await call('create_identity', { name: 'Human', expose_local: false });
-  ok(Boolean(human.result) && !human.result.isError, 'Human/root created');
+  ok(Boolean(human.result) && !human.result.isError, `Human/root created${human.result?.isError || human.error ? ': ' + JSON.stringify(human) : ''}`);
   const first = await call('create_temporary_identity', { name: 'EphemeralOne' });
   ok(Boolean(first.result) && !first.result.isError, 'first delegated temporary role created');
   const second = await call('create_temporary_identity', { name: 'EphemeralTwo' });
@@ -127,9 +133,11 @@ try {
 
   // Codex has no CLAUDE_CODE_SESSION_ID, so both proxy and hook derive the
   // same lease from the stable OURS_CLIENT_PID supplied by the harness shim.
-  const codexEnv = { ...proxyEnv, OURS_CLIENT_PID: String(process.pid) };
+  const codexEnv = { ...proxyEnv };
+  // Exercise the real wrapper producer: both wrappers share this test as parent.
+  delete codexEnv.OURS_CLIENT_PID;
   delete codexEnv.CLAUDE_CODE_SESSION_ID;
-  connected = await connectProxy(codexEnv, 'codex-session-end-test');
+  connected = await connectProxy(codexEnv, 'codex-session-end-test', [CODEX_PROXY]);
   proxy = connected.child;
   call = connected.call;
   ok(connected.initialized, 'Codex-style proxy session initialized from a stable client pid');
@@ -137,7 +145,7 @@ try {
   ok(Boolean(codexFirst.result) && !codexFirst.result.isError, 'Codex first delegated temporary role created');
   const codexSecond = await call('create_temporary_identity', { name: 'CodexEphemeralTwo' });
   ok(Boolean(codexSecond.result) && !codexSecond.result.isError, 'Codex second delegated temporary role created after switching away');
-  const codexHook = spawn(process.execPath, [CLI, 'session-end'], { env: codexEnv, stdio: 'ignore' });
+  const codexHook = spawn(process.execPath, [CODEX_PROXY, 'session-end'], { env: codexEnv, stdio: 'ignore' });
   const [codexCode, codexSignal] = await once(codexHook, 'exit');
   ok(codexCode === 0 && codexSignal === null, `Codex session-end hook exits cleanly (code=${codexCode}, signal=${codexSignal})`);
   ok(

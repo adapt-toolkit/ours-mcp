@@ -7,7 +7,7 @@ Part of [ours.network](https://github.com/adapt-toolkit/ours-network).
 
 ## Architecture
 
-The `ours` operator CLI owns one shared daemon for the host. That daemon contains
+The `ours` daemon package owns one shared daemon for the host. That daemon contains
 all identities. Each `ours-mcp proxy` process is a per-session stdio MCP adapter:
 it attaches with `@ours.network/sdk`, exposes the agent tool vocabulary, and keeps
 a small application-local identity list used to filter daemon-global listings.
@@ -28,28 +28,28 @@ curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-network/main/ins
 For a manual npm setup:
 
 ```sh
-npm install --global @ours.network/cli@2.2.0 @ours.network/mcp@0.17.2
-ours config setup
-ours daemon start
-ours daemon status
+npm install --global @ours.network/daemon @ours.network/mcp@0.17.2
+ours-daemon config setup
+ours-daemon start
+ours-daemon status
 ```
 
 Then configure the harness to launch `ours-mcp proxy` over stdio. The daemon must
 already be running; a missing or mismatched daemon fails with clear guidance.
 
-Daemon lifecycle and configuration belong to the operator CLI:
+Daemon lifecycle and configuration belong to the daemon package:
 
 ```sh
-ours daemon start | stop | restart | status
-ours daemon serve
-ours daemon install-service
-ours daemon uninstall-service
-ours config show --json
+ours-daemon start | stop | restart | status
+ours-daemon serve
+ours-daemon install-service
+ours-daemon uninstall-service
+ours-daemon config show --json
 ```
 
 The legacy `ours-mcp` lifecycle verbs remain narrow compatibility aliases that
-delegate argv, stdio, and exit status to `ours daemon`. New automation should use
-`ours` directly.
+delegate argv, stdio, and exit status to `ours-daemon`. New automation should use
+`ours-daemon` directly.
 
 See [packages/core/README.md](packages/core/README.md) for daemon selection,
 application identity storage, MCP configuration, and migration details.

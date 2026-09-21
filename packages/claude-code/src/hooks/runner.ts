@@ -16,12 +16,7 @@
 // and we emit a benign {continue:true}.
 
 import * as fs from 'node:fs';
-import { readContainerJson } from '../../bin/container-launch.mjs';
-import {
-  createClaudeSessionFactory,
-  hostProfileFromEnv,
-  readNetworkHookState,
-} from '../network-client.mjs';
+import { hostProfileFromEnv, readHostHookState } from '../host-hooks.mjs';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { resolve, join, dirname } from 'node:path';
@@ -87,23 +82,8 @@ async function loadNetworkState(payload: Record<string, unknown>): Promise<boole
   const nativeSessionId = payload.session_id;
   if (typeof nativeSessionId !== 'string' || !nativeSessionId) throw new Error('Claude hook requires session_id in network mode');
   const appPath = process.env.OURS_MCP_CONFIG || join(process.env.HOME || homedir(), '.ours-mcp', 'config.json');
-  const sessionFactory = createClaudeSessionFactory({
-    profile,
-    nativeSessionId,
-    hostRecordRoot: dirname(appPath),
-    send: async () => {},
-  });
-  containerState = await readNetworkHookState({ sessionFactory });
+  containerState = await readHostHookState({ profile, nativeSessionId, applicationPath: appPath });
   return true;
-}
-
-function loadContainerState(): void {
-  const value = readContainerJson('hook-state') as ContainerHookState | null;
-  if (value === null) return;
-  if (!Array.isArray(value.identities) || value.identities.some((name) => typeof name !== 'string') ||
-      !Array.isArray(value.bindings) || value.bindings.some((name) => typeof name !== 'string') ||
-      !Array.isArray(value.unread?.identities)) throw new Error('invalid container hook state');
-  containerState = value;
 }
 
 // The daemon writes a content-free unread snapshot per identity (unread.json),
@@ -372,11 +352,11 @@ async function main(): Promise<void> {
     } catch { /* hook handlers preserve their benign malformed-input behavior */ }
     switch (kind) {
       case 'session-start':
-        if (!await loadNetworkState(payload)) loadContainerState();
+        await loadNetworkState(payload);
         sessionStart(raw);
         return;
       case 'user-prompt-submit':
-        if (!await loadNetworkState(payload)) loadContainerState();
+        await loadNetworkState(payload);
         userPromptSubmit(raw);
         return;
       default:

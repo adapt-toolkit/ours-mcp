@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,21 +14,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const env = { ...process.env };
 
 async function main() {
-  const network = await import('../dist/network-proxy.mjs');
-  const profile = network.hostProfileFromEnv(env);
-  if (profile) {
-    const configPath = env.OURS_MCP_CONFIG || join(env.HOME || homedir(), '.ours-mcp', 'config.json');
-    const hostRecordRoot = dirname(configPath);
-    if (sessionEnd) {
-      const payload = JSON.parse(readFileSync(0, 'utf8') || '{}');
-      if (typeof payload.session_id !== 'string' || !payload.session_id) throw new Error('SessionEnd requires session_id.');
-      await network.endNetworkNativeSession({ profile, nativeSessionId: payload.session_id, hostRecordRoot });
-      return;
-    }
-    await network.runNetworkProxy({ profile, hostRecordRoot, env });
-    return;
-  }
-
   let cliPath;
   try { cliPath = require.resolve(spec); } catch { /* try plugin cache layouts */ }
   if (!cliPath) {

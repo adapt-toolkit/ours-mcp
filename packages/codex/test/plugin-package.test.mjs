@@ -64,28 +64,28 @@ test('monitor MCP artifact runs with its declared SDK dependency and no main MCP
   }
 });
 
-test('built Codex network entrypoints load without the main MCP package', async () => {
+test('built Codex entrypoints use the declared local MCP package', async () => {
   const isolated = mkdtempSync(join(tmpdir(), 'ours-codex-network-artifact-'));
   try {
     cpSync(root, isolated, { recursive: true, filter: (source) => !source.includes(`${join(root, 'node_modules')}`) });
     const manifest = JSON.parse(readFileSync(join(isolated, 'package.json'), 'utf8'));
-    assert.equal(manifest.dependencies['@ours.network/mcp'], undefined);
-    for (const artifact of ['dist/profile.mjs', 'dist/hooks-runner.mjs', 'dist/network-proxy.mjs', 'dist/network-watch.mjs']) {
+    assert.equal(manifest.dependencies['@ours.network/mcp'], manifest.version);
+    for (const artifact of ['dist/profile.mjs', 'dist/hooks-runner.mjs', 'dist/host-hooks.mjs', 'dist/network-watch.mjs']) {
       assert.ok(existsSync(join(isolated, artifact)), `package includes ${artifact}`);
     }
     mkdirSync(join(isolated, 'node_modules'), { recursive: true });
-    for (const dependency of ['@modelcontextprotocol/sdk', '@ours.network/sdk', 'ws', 'zod']) {
+    for (const dependency of ['@modelcontextprotocol/sdk', '@ours.network/sdk', '@ours.network/mcp', 'ws', 'zod']) {
       const source = join(workspaceRoot, 'node_modules', dependency);
       if (!existsSync(source)) continue;
       const target = join(isolated, 'node_modules', dependency);
       mkdirSync(dirname(target), { recursive: true });
       symlinkSync(source, target, 'dir');
     }
-    assert.equal(existsSync(join(isolated, 'node_modules/@ours.network/mcp')), false,
-      'isolated client must not have a main MCP runtime');
+    assert.equal(existsSync(join(isolated, 'node_modules/@ours.network/mcp')), true,
+      'plugin carries the local MCP runtime');
     await import(pathToFileURL(join(isolated, 'dist/profile.mjs')));
     await import(pathToFileURL(join(isolated, 'dist/hooks-runner.mjs')));
-    await import(pathToFileURL(join(isolated, 'dist/network-proxy.mjs')));
+    await import(pathToFileURL(join(isolated, 'dist/host-hooks.mjs')));
     await import(pathToFileURL(join(isolated, 'dist/network-watch.mjs')));
     await import(pathToFileURL(join(isolated, 'src/launcher.mjs')));
     const profile = join(isolated, 'profile.json');

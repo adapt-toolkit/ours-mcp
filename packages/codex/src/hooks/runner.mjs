@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sendControlCommand } from '../control-server.mjs';
 import { resolveDaemonProfile } from '../profile.mjs';
-import { createHostSessionFactory } from '../network-proxy.mjs';
+import { readHostHookState } from '../host-hooks.mjs';
 import { attachOursClient } from '@ours.network/sdk';
 import { hostProfileFromEnv } from '../../../core/src/host-client/index.ts';
 
@@ -60,16 +60,7 @@ function renderContext(unread, pin) {
   return lines.join('\n');
 }
 
-function applicationIdentitiesFromResource(value) {
-  const text = value?.contents?.find((item) => item?.uri === 'ours://application-identities')?.text;
-  const parsed = JSON.parse(text);
-  if (!Array.isArray(parsed?.identities) || parsed.identities.some((name) => typeof name !== 'string')) {
-    throw new Error('invalid application identity resource');
-  }
-  return new Set(parsed.identities);
-}
-
-export async function handleHook(payload, { env = process.env, fetch: fetchImpl = globalThis.fetch, send = sendControlCommand, findPin = defaultFindPin, profileResolver = resolveDaemonProfile, clientFactory = attachOursClient, networkSessionFactory = createHostSessionFactory } = {}) {
+export async function handleHook(payload, { env = process.env, fetch: fetchImpl = globalThis.fetch, send = sendControlCommand, findPin = defaultFindPin, profileResolver = resolveDaemonProfile, clientFactory = attachOursClient, readHostState = readHostHookState } = {}) {
   try {
     const event = payload?.hook_event_name;
     const socket = env.OURS_CODEX_CONTROL_SOCKET;
@@ -97,18 +88,12 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
       const nativeSessionId = payload.session_id;
       if (typeof nativeSessionId !== 'string' || !nativeSessionId) return { continue: true };
       const appPath = env.OURS_MCP_CONFIG || join(env.HOME || homedir(), '.ours-mcp', 'config.json');
-      let session;
-      try {
-        const factory = networkSessionFactory({ profile: hostProfile, hostRecordRoot: dirname(appPath), send: async () => {} });
-        session = await factory(nativeSessionId);
-        const resource = await session.request({ method: 'resources/read', params: { uri: 'ours://application-identities' } });
-        const visible = applicationIdentitiesFromResource(resource);
-        const unread = safeUnread(await session.fileClient.unread()).filter((entry) => visible.has(entry.name));
-        const pin = await findPin(payload.cwd || process.cwd());
-        const context = renderContext(unread, pin);
-        return context ? { continue: true, hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { continue: true };
-      } finally { await session?.close(); }
+      const state = await readHostState({ profile: hostProfile, nativeSessionId, applicationPath: appPath });
+      const pin = await findPin(payload.cwd || process.cwd());
+      const context = renderContext(state.unread.identities, pin);
+      return context ? { continue: true, hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { continue: true };
     }
+
     // Standard Codex does not pass through ours-codex's resolved environment.
     // Resolve the same coherent SDK selection here so SessionStart and
     // UserPromptSubmit inspect the same daemon as the stdio proxy.

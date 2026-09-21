@@ -70,7 +70,7 @@ test('SessionEnd invokes deterministic temporary-identity cleanup', () => {
   assert.match(command, /^exec node .*proxy\.mjs.*session-end/);
 });
 
-for (const managed of [false, true]) test(`${managed ? 'managed' : 'explicit'} profile filters SDK unread through the authenticated application resource`, async () => {
+for (const managed of [false, true]) test(`${managed ? 'managed' : 'explicit'} profile filters SDK unread through the local application registry`, async () => {
   const home = mkdtempSync(join(tmpdir(), 'ours-codex-profile-hook-'));
   const appConfig = join(home, 'ours-mcp.json');
   if (managed) mkdirSync(join(home, '.ours-client'), { mode: 0o700 });
@@ -81,26 +81,15 @@ for (const managed of [false, true]) test(`${managed ? 'managed' : 'explicit'} p
   const calls = [];
   const result = await handleHook({ hook_event_name: 'UserPromptSubmit', session_id: 'thread-a', cwd: '/repo' }, {
     env: { HOME: home, ...(managed ? {} : { OURS_CONFIG: profilePath }), OURS_MCP_CONFIG: appConfig },
-    networkSessionFactory: () => async (selector) => {
-      calls.push(['session', selector]);
-      return {
-        fileClient: { unread: async () => ({ identities: [{ name: 'Alice', count: 2 }, { name: 'Mallory', count: 9 }] }) },
-        request: async (request) => {
-          calls.push(['request', request]);
-          return { contents: [{ uri: 'ours://application-identities', text: JSON.stringify({ identities: ['Alice'] }) }] };
-        },
-        close: async () => { calls.push(['close']); },
-      };
+    readHostState: async ({ nativeSessionId, applicationPath }) => {
+      calls.push([nativeSessionId, applicationPath]);
+      return { unread: { identities: [{ name: 'Alice', count: 2, files: 0 }] } };
     },
     fetch: async () => assert.fail('explicit profile must not fetch unread directly'), findPin: async () => null,
   });
   assert.match(result.hookSpecificOutput.additionalContext, /Alice.*2 unread/s);
   assert.doesNotMatch(result.hookSpecificOutput.additionalContext, /Mallory/);
-  assert.deepEqual(calls, [
-    ['session', 'thread-a'],
-    ['request', { method: 'resources/read', params: { uri: 'ours://application-identities' } }],
-    ['close'],
-  ]);
+  assert.deepEqual(calls, [['thread-a', appConfig]]);
 });
 
 test('explicit profile resolution failure never falls back to legacy unread', async () => {
@@ -133,16 +122,12 @@ test('network profile never invokes the obsolete Docker application-identity rou
     const deps = {
       env,
       findPin: async () => null,
-      networkSessionFactory: () => async () => ({
-        fileClient: { unread: async () => ({ identities: [{ name: 'NetworkOnly', count: 2 }, { name: 'HostOnly', count: 8 }] }) },
-        request: async () => ({ contents: [{ uri: 'ours://application-identities', text: JSON.stringify({ identities: ['NetworkOnly'] }) }] }),
-        close: async () => {},
-      }),
+      readHostState: async () => ({ unread: { identities: [{ name: 'HostOnly', count: 8 }] } }),
     };
     const payload = { hook_event_name: 'SessionStart', session_id: 'thread-a' };
     const result = await handleHook(payload, deps);
-    assert.match(result.hookSpecificOutput.additionalContext, /NetworkOnly: 2/);
-    assert.doesNotMatch(result.hookSpecificOutput.additionalContext, /HostOnly/);
+    assert.match(result.hookSpecificOutput.additionalContext, /HostOnly: 8/);
+    assert.doesNotMatch(result.hookSpecificOutput.additionalContext, /NetworkOnly/);
     assert.equal(existsSync(marker), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

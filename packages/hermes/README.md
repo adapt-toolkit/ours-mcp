@@ -37,7 +37,7 @@ not a background daemon that wakes a dormant agent.
 
 - Node.js ≥ 22
 - Hermes installed (`~/.hermes/` present)
-- The ours daemon: `npm i -g @ours.network/mcp@latest` (the installer does this for you)
+- The ours daemon (server): `npm i -g @ours.network/daemon` (the installer does this for you)
 
 > **Fastest path:** the one-shot [ours.network installer](../installer/README.md) sets up the
 > daemon and Hermes in one pass —

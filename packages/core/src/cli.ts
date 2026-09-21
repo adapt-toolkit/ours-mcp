@@ -9,7 +9,7 @@ import type { NotificationEvent } from '@ours.network/sdk';
 
 import { ApplicationIdentityStore, filterApplicationIdentities } from './application-identities.js';
 import { hostProfileFromEnv } from './host-profile.js';
-import { endNativeSession } from './native-session.js';
+import { nativeClientFor, endNativeSession } from './native-session.js';
 import type { ConnectorOptions } from './connector.js';
 
 declare const __OURS_VERSION__: string;
@@ -47,15 +47,15 @@ function rejectApplicationFlag(args: string[]): void {
 }
 
 async function runOurs(args: string[]): Promise<void> {
-  const explicit = (process.env.OURS_CLI ?? '').trim();
-  const executable = explicit || 'ours';
+  const explicit = (process.env.OURS_DAEMON_CLI ?? '').trim();
+  const executable = explicit || 'ours-daemon';
   await new Promise<void>((resolve, reject) => {
     const child = spawn(executable, args, { stdio: 'inherit', env: process.env });
     child.once('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') {
         reject(new Error(
-          `Cannot find the ${JSON.stringify(executable)} CLI. Install @ours.network/cli@2.7.2, ` +
-          'put `ours` on PATH, or set OURS_CLI to its executable path.',
+          `Cannot find the ${JSON.stringify(executable)} CLI. Install @ours.network/daemon, ` +
+          'put `ours-daemon` on PATH, or set OURS_DAEMON_CLI to its executable path.',
         ));
         return;
       }
@@ -121,11 +121,12 @@ async function runWatch(args: string[]): Promise<void> {
   if (args.length > 1 || args[0]?.startsWith('-')) {
     throw new Error('Usage: ours-mcp watch [identity]');
   }
-  if (hostProfileFromEnv(process.env) !== null) throw new Error('External owner context is required.');
-  const selection = resolveDaemonConfig();
-  const identities = new ApplicationIdentityStore(selection.expectStateDir);
+  const profile = hostProfileFromEnv(process.env);
+  const identities = new ApplicationIdentityStore(profile ? { instanceId: profile.expectedInstanceId } : resolveDaemonConfig().expectStateDir);
   await identities.list();
-  const client = await attachOursClient({ leaseToken: LEASE_TOKEN, clientPid: CLIENT_PID });
+  const client = profile
+    ? await nativeClientFor(profile, (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim())
+    : await attachOursClient({ leaseToken: LEASE_TOKEN, clientPid: CLIENT_PID });
   const requested = args[0]?.trim();
   let names: string[];
   if (requested) {
@@ -138,7 +139,11 @@ async function runWatch(args: string[]): Promise<void> {
   process.once('SIGINT', () => abort.abort());
   process.once('SIGTERM', () => abort.abort());
   err(`ours-mcp watch: ${names.length === 0 ? 'no application identities' : `watching ${names.join(', ')}`}`);
-  await Promise.all(names.map((name) => watchIdentity(client, name, abort.signal)));
+  try {
+    await Promise.all(names.map((name) => watchIdentity(client, name, abort.signal)));
+  } finally {
+    await client.close();
+  }
 }
 
 function usage(): void {
@@ -150,11 +155,11 @@ function usage(): void {
   out('  watch [identity]      stream inbound JSON Lines; without a name, only ours-mcp identities');
   out('  start|stop|restart|serve|status');
   out('  install-service|uninstall-service');
-  out('                        compatibility aliases for `ours daemon <command>`');
+  out('                        compatibility aliases for `ours-daemon <command>`');
   out('  version               print the ours-mcp package version');
   out('');
-  out('Daemon configuration and identity CLI operations moved to @ours.network/cli@2.7.2:');
-  out('  ours config setup');
+  out('Daemon administration uses @ours.network/daemon; API commands use @ours.network/cli:');
+  out('  ours-daemon config setup');
   out('  ours identity --help');
 }
 
@@ -164,7 +169,7 @@ async function main(): Promise<void> {
   const command = args.shift() ?? 'help';
 
   if (DAEMON_COMMANDS.has(command)) {
-    await runOurs(['daemon', command === 'run' ? 'serve' : command, ...args]);
+    await runOurs([command === 'run' ? 'serve' : command, ...args]);
     return;
   }
 
@@ -181,7 +186,7 @@ async function main(): Promise<void> {
       await runWatch(args);
       return;
     case 'setup':
-      throw new Error('ours-mcp no longer owns daemon configuration. Run `ours config setup` instead.');
+      throw new Error('ours-mcp no longer owns daemon configuration. Run `ours-daemon config setup` instead.');
     case 'create-root':
     case 'define-local-identity-file':
     case 'voice-setup':

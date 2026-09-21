@@ -24,7 +24,7 @@ export function createOursMcpServer(
   client: OursClient | OursClientProvider,
   version: string,
   applicationIdentities: ApplicationIdentityStore,
-  options: { networkHostFiles?: boolean } = {},
+  options: { remoteDaemonFiles?: boolean } = {},
 ): McpServer {
   const server = new McpServer(
     { name: 'ours', version },
@@ -33,25 +33,10 @@ export function createOursMcpServer(
 
   const clientFor: OursClientProvider = typeof client === 'function' ? client : () => client;
 
-  if (options.networkHostFiles) {
-    server.resource(
-      'application-identities',
-      'ours://application-identities',
-      { mimeType: 'application/json', description: 'Application-visible identities for this daemon instance.' },
-      async (uri) => ({
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify({ identities: await applicationIdentities.list() }),
-        }],
-      }),
-    );
-  }
-
-  registerIdentityTools(server, clientFor, applicationIdentities, options);
+  registerIdentityTools(server, clientFor, applicationIdentities);
   registerContactsTools(server, clientFor);
   registerProfileTools(server, clientFor);
-  registerMessagingTools(server, clientFor, options);
+  registerMessagingTools(server, clientFor);
   registerCommandTools(server, clientFor);
   registerFilesTools(server, clientFor, options);
   registerHistoryTools(server, clientFor);

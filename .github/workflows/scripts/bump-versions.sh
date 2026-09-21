@@ -44,9 +44,9 @@ MODE="${OURS_RELEASE_MODE:-stable}"
 # name|json-path|pin-dep (pin-dep empty = none). Order matters: publish/bump in this order.
 MANAGED=(
   "@ours.network/mcp|packages/core/package.json|"
-  "@ours.network/claude-code|packages/claude-code/package.json|"
+  "@ours.network/claude-code|packages/claude-code/package.json|@ours.network/mcp"
   "@ours.network/hermes|packages/hermes/package.json|"
-  "@ours.network/codex|packages/codex/package.json|"
+  "@ours.network/codex|packages/codex/package.json|@ours.network/mcp"
 )
 
 # Every native plugin manifest in the repo — bumped to the same suite version.

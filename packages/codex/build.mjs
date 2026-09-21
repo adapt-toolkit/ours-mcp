@@ -13,7 +13,7 @@ const entries = {
   'monitor-mcp': 'src/monitor-mcp.mjs',
   profile: 'src/profile.mjs',
   'hooks-runner': 'src/hooks/runner.mjs',
-  'network-proxy': 'src/network-proxy.mjs',
+  'host-hooks': 'src/host-hooks.mjs',
   'network-watch': 'src/network-watch.mjs',
 };
 

@@ -1,18 +1,15 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { containerInvocation } from './container-launch.mjs';
-import { runContainerProxy } from './container-file-transfer.mjs';
 
 const sessionEnd = process.argv[2] === 'session-end';
 const watch = process.argv[2] === 'watch';
-const command = sessionEnd ? 'session-end' : 'proxy';
-const forwarded = process.argv.slice(sessionEnd ? 3 : 2);
+const command = sessionEnd ? 'session-end' : watch ? 'watch' : 'proxy';
+const forwarded = process.argv.slice(sessionEnd || watch ? 3 : 2);
 const env = { ...process.env };
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -48,43 +45,9 @@ function relayChild(child, label) {
 }
 
 async function main() {
-  const network = await import('../dist/network-client.mjs');
-  const profile = network.hostProfileFromEnv(env);
-  if (profile) {
-    const configPath = env.OURS_MCP_CONFIG || join(env.HOME || homedir(), '.ours-mcp', 'config.json');
-    const hostRecordRoot = dirname(configPath);
-    if (sessionEnd) {
-      const payload = JSON.parse(readFileSync(0, 'utf8') || '{}');
-      if (typeof payload.session_id !== 'string' || !payload.session_id) throw new Error('SessionEnd requires session_id.');
-      await network.endNetworkNativeSession({ profile, nativeSessionId: payload.session_id, hostRecordRoot });
-      return;
-    }
-    const nativeSessionId = env.CLAUDE_CODE_SESSION_ID;
-    if (watch) {
-      await network.runNetworkWatch({ identity: process.argv[3], nativeSessionId, profile, hostRecordRoot, env });
-      return;
-    }
-    await network.runNetworkProxy({ nativeSessionId, profile, hostRecordRoot, env });
-    return;
-  }
-
-  const container = containerInvocation(watch ? 'watch' : command, watch ? process.argv.slice(3) : forwarded, env);
-  if (container) {
-    const child = watch || sessionEnd
-      ? spawn(container.command, container.args, { stdio: watch ? ['pipe', 'inherit', 'inherit'] : 'inherit', env: container.env })
-      : runContainerProxy(container);
-    if (watch) {
-      const stop = () => { child.stdin?.end(); if (!child.killed) child.kill('SIGTERM'); };
-      process.on('SIGINT', stop);
-      process.on('SIGTERM', stop);
-    }
-    if (watch || sessionEnd) relayChild(child, 'container MCP');
-    return;
-  }
-
   const cliPath = resolveLocalServer();
   if (!cliPath) {
-    throw new Error('cannot resolve @ours.network/mcp. Install the main MCP server explicitly or select an ours host network profile.');
+    throw new Error('cannot resolve @ours.network/mcp. Reinstall the plugin with its declared MCP dependency.');
   }
   if (!env.OURS_CLIENT_PID && process.ppid > 1) env.OURS_CLIENT_PID = String(process.ppid);
   const child = spawn(process.execPath, [cliPath, command, ...forwarded], { stdio: 'inherit', env });

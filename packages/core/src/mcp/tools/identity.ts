@@ -18,7 +18,7 @@
 // Tool descriptions and zod schemas are compatibility-sensitive and kept byte-stable.
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { isAbsolute } from 'node:path';
+import { buildIdentityFile, writeIdentityFile } from '@ours.network/sdk/connector';
 
 import {
   OursError,
@@ -130,7 +130,6 @@ export function registerIdentityTools(
   server: McpServer,
   clientFor: OursClientProvider,
   applicationIdentities: ApplicationIdentityStore,
-  options: { networkHostFiles?: boolean } = {},
 ): void {
   server.tool(
     'create_identity',
@@ -356,30 +355,13 @@ export function registerIdentityTools(
       overwrite: z.boolean().default(false).describe('Replace an existing .ours-identity file.'),
     },
     async ({ name, path, force, expose_local, local_auto_accept, overwrite }, extra) => {
-      if (options.networkHostFiles) {
-        if (!isAbsolute(path)) return textResult('define_local_identity_file: path must be absolute.', true);
-        return {
-          content: [{ type: 'text' as const, text: 'Host identity file write requested.' }],
-          structuredContent: { oursHostIdentityFile: { name, path, force, expose_local, local_auto_accept, overwrite } },
-          isError: false,
-        };
+      try {
+        const options = { name, force, exposeLocal: expose_local, localAutoAccept: local_auto_accept };
+        const written = writeIdentityFile(path, options, overwrite);
+        return textResult(`Wrote ${written}:\n${JSON.stringify(buildIdentityFile(options), null, 2)}`);
+      } catch (error) {
+        return textResult(`define_local_identity_file failed: ${error instanceof Error ? error.message : String(error)}`, true);
       }
-      return runTool(
-        clientFor(extra),
-        // The one operation in this slice that is not session-scoped: it writes a
-        // file, so the SDK takes no SessionContext.
-        (client) =>
-          client.defineLocalIdentityFile({
-            name,
-            path,
-            force,
-            exposeLocal: expose_local,
-            localAutoAccept: local_auto_accept,
-            overwrite,
-          }),
-        // `json` is the pin OBJECT; the pretty-printing is this layer's job.
-        (r) => textResult(`Wrote ${r.written}:\n${JSON.stringify(r.json, null, 2)}`),
-      );
     },
   );
 

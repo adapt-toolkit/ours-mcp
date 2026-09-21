@@ -3,8 +3,8 @@
 The agent-facing MCP adapter for the shared ours daemon.
 
 `ours-mcp` does not contain, start, configure, or install a daemon. Install
-`@ours.network/cli@2.2.0`, configure it with `ours config setup`, and start the
-single shared service with `ours daemon start` (or `ours daemon install-service`).
+`@ours.network/daemon`, configure it with `ours-daemon config setup`, and start the
+single shared service with `ours-daemon start` (or `ours-daemon install-service`).
 
 ## MCP configuration
 
@@ -28,37 +28,16 @@ Legacy daemon variables such as `OURS_AUTOSTART`, `OURS_TRANSPORT`, and
 `OURS_UNIT_DIR` are rejected. Named `--application` selections are also rejected;
 use the SDK daemon selection variables instead.
 
-For an installer-selected server profile, `@ours.network/cli` loads the fixed
-`@ours.network/mcp/network-integration` export and mounts these tools on the
-daemon's existing authenticated `/mcp` listener. The installer writes one
-`networkMcp` object in the daemon config:
+The plugins include `@ours.network/mcp` and launch its local stdio server.
+Tools call the selected daemon through `@ours.network/sdk` using the existing
+authenticated HTTP API. The profile contains `endpoint`, `expectedInstanceId`,
+and `credentialPath`; the endpoint can be localhost or a remote origin.
+No remote MCP endpoint is used. The daemon does not need the MCP package.
 
-```json
-{
-  "networkMcp": {
-    "profile": {
-      "endpoint": "http://127.0.0.1:3050",
-      "expectedInstanceId": "56bd6f1f-2df1-4844-9a46-d558c021e00f",
-      "credentialPath": "/private/ours/server-client-token"
-    },
-    "applicationConfigPath": "/private/ours/application-identities.json"
-  }
-}
-```
-
-The profile credential is an issued client credential. The integration never
-reads the server's master secret, starts another listener, or attaches before
-the first tool call. It exposes the selected instance's application names at
-`ours://application-identities` and keeps arrival watches scoped to each real
-MCP transport.
-
-In this network mode, a host bridge stages `send_file.path` through the SDK byte
-upload route. `save_file` returns an `oursHostSave` intent for that bridge, and
-final success is produced only after the host has downloaded and written the
-bytes. The shared profile, native-owner-record and file-adapter source lives in
-`src/host-client/` so client packages can bundle it into their own entrypoints.
-Native records receive their host-private root explicitly; they do not derive a
-client path from the server application config.
+Local file paths are interpreted by the local MCP process: `send_file` uploads
+local bytes through the SDK, `save_file` downloads to local disk, and
+`define_local_identity_file` writes the local workspace file. Native session
+records and application identity visibility remain on the client host.
 
 Host-client helpers select explicit `OURS_CONFIG` first, otherwise the private
 `~/.ours-client/profile.json` when present, otherwise their existing unmanaged
@@ -116,8 +95,8 @@ names remain recorded but are not rendered; idempotent close/remove cleans them.
 ## Compatibility CLI
 
 Former ours-mcp lifecycle entry points remain compatibility aliases that
-delegate argv, stdio, and exit status to `ours daemon`. The `ours` executable
-must be on `PATH`, or its exact path may be provided through `OURS_CLI`. No
+delegate argv, stdio, and exit status to `ours-daemon`. The `ours-daemon` executable
+must be on `PATH`, or its exact path may be provided through `OURS_DAEMON_CLI`. No
 command falls back to an embedded daemon.
 
 `ours-mcp watch [identity]` streams inbound JSON Lines. With no identity argument,
@@ -139,9 +118,10 @@ that finds old packet state refuses startup without changing it. Operators may
 back it up and must remove it themselves before starting clean; installers never
 delete identity state implicitly.
 
-The external-history and typed-command integration requires the published `@ours.network/sdk@3.7.0`
-and `@ours.network/cli@2.2.0` artifacts. Both are pinned exactly so registry-only
-installs use the validated contract; there is no compatibility fallback.
+The SDK dependency is pinned to the published thin client `3.8.1-nightly.9`.
+Native integration tests use `@ours.network/daemon@3.8.1-nightly.1` as a development
+dependency. Production MCP installs do not include a daemon; operators install
+and manage `ours-daemon` separately.
 
 ## Typed commands
 
