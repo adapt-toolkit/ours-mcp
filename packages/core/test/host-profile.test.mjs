@@ -107,7 +107,13 @@ console.log('managed client selection: passed');
 
 const secureTuple = { ...tuple, endpoint: 'https://server.example:8443/' };
 assert.deepEqual(validateHostProfile(secureTuple), { ...secureTuple, endpoint: 'https://server.example:8443' });
-for (const endpoint of ['ftp://server.example', 'wss://server.example', 'https://user:pass@server.example', 'https://server.example/path', 'https://server.example?q=1', 'https://server.example#fragment']) {
+for (const [endpoint, expected] of [
+  ['http://127.0.0.1:3050/daemon', 'http://127.0.0.1:3050/daemon'],
+  ['https://server.example/base/daemon///', 'https://server.example/base/daemon'],
+]) {
+  assert.deepEqual(validateHostProfile({ ...tuple, endpoint }), { ...tuple, endpoint: expected }, 'gateway prefix survives profile validation');
+}
+for (const endpoint of ['ftp://server.example', 'wss://server.example', 'https://user:pass@server.example', 'https://server.example?q=1', 'https://server.example#fragment', 'https://server.example/bad path', 'https://server.example/\\\\daemon']) {
   assert.throws(() => validateHostProfile({ ...tuple, endpoint }));
 }
 console.log('HTTPS profile validation: passed');
