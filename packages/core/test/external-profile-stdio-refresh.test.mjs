@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
 import { attachOursClient } from '@ours.network/sdk';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const cli = process.env.OURS_TEST_DAEMON_CLI;
-assert.ok(cli, 'OURS_TEST_DAEMON_CLI must name the official cached runtime CLI');
+// Runtime lifecycle and token administration belong to ours-daemon, not the client CLI.
+const require = createRequire(import.meta.url);
+const cli = process.env.OURS_TEST_DAEMON_CLI
+  ?? join(dirname(require.resolve('@ours.network/daemon/package.json')), 'dist', 'cli.js');
 const root = mkdtempSync(join(tmpdir(), 'ours-mcp-refresh-'));
 const daemonState = join(root, 'daemon'); const hostState = join(root, 'host'); const deliveryState = join(root, 'delivery');
 for (const directory of [daemonState, hostState, deliveryState]) mkdirSync(directory, { mode: 0o700 });
@@ -22,7 +25,7 @@ const credentialPath = join(hostState, 'daemon-token'); const deliveryPath = joi
 writeFileSync(daemonConfig, JSON.stringify({ stateDir: daemonState, port, apiVisibility: 'owner', apiTokenDeliveryFiles: [deliveryPath] }), { mode: 0o600 });
 const daemonEnv = { ...process.env, OURS_CONFIG: daemonConfig, OURS_STATE_DIR: daemonState, OURS_PORT: String(port), OURS_DAEMON_ID: expectedInstanceId, OURS_API_VISIBILITY: 'owner', OURS_BROKER_URL: 'wss://invalid.local/none' };
 for (const key of ['OURS_API_TOKEN', 'OURS_TLS_CERT', 'OURS_TLS_KEY', 'OURS_LISTEN_HOST']) delete daemonEnv[key];
-const daemon = spawn('node', [cli, 'daemon', 'serve', '--managed'], { env: daemonEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+const daemon = spawn('node', [cli, 'serve', '--managed'], { env: daemonEnv, stdio: ['ignore', 'pipe', 'pipe'] });
 let daemonOutput = ''; let proxy; for (const stream of [daemon.stdout, daemon.stderr]) stream.on('data', (value) => { daemonOutput = (daemonOutput + value).slice(-12000); });
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 try {
