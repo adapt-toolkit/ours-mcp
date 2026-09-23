@@ -11,8 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const daemonCli = process.env.OURS_TEST_DAEMON_CLI;
-assert.ok(daemonCli, 'OURS_TEST_DAEMON_CLI must name the official cached runtime CLI');
+const daemonCli = process.env.OURS_TEST_DAEMON_CLI ?? fileURLToPath(new URL('../../../node_modules/.bin/ours-daemon', import.meta.url));
 const cli = process.env.OURS_TEST_MCP_CLI ?? fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -124,7 +123,7 @@ const daemonEnv = {
   OURS_BROKER_URL: 'wss://invalid.local/none',
 };
 for (const key of ['OURS_API_TOKEN', 'OURS_TLS_CERT', 'OURS_TLS_KEY', 'OURS_LISTEN_HOST']) delete daemonEnv[key];
-const daemon = spawn('node', [daemonCli, 'daemon', 'serve', '--managed'], {
+const daemon = spawn('node', [daemonCli, 'serve', '--managed'], {
   env: daemonEnv, stdio: ['ignore', 'pipe', 'pipe'],
 });
 let daemonOutput = '';
@@ -133,6 +132,7 @@ for (const stream of [daemon.stdout, daemon.stderr]) {
 }
 
 let proxy;
+let gateway;
 try {
   const deadline = Date.now() + 180000;
   while (Date.now() < deadline) {
@@ -147,7 +147,13 @@ try {
   assert.equal((await fetch(`${endpoint}/mcp`, { method: 'POST' })).status, 404, 'production daemon has no remote MCP route');
   copyFileSync(join(daemonState, 'daemon-token'), credentialPath);
   copyFileSync(join(daemonState, 'daemon-token'), deliveryPath);
-  writeFileSync(profilePath, JSON.stringify({ endpoint, expectedInstanceId, credentialPath }), { mode: 0o600 });
+  const gatewayPort = await freePort();
+  gateway = spawn(process.execPath, [fileURLToPath(new URL('../test-support/prefixed-daemon.mjs', import.meta.url)), String(gatewayPort), endpoint], { stdio: ['ignore', 'pipe', 'inherit'] });
+  await Promise.race([
+    once(gateway.stdout, 'data'),
+    once(gateway, 'exit').then(() => { throw new Error('gateway exited before readiness'); }),
+  ]);
+  writeFileSync(profilePath, JSON.stringify({ endpoint: `http://127.0.0.1:${gatewayPort}/base/daemon`, expectedInstanceId, credentialPath }), { mode: 0o600 });
   const proxyEnv = {
     ...process.env,
     OURS_CONFIG: profilePath,
@@ -270,6 +276,7 @@ try {
   console.log('native-profile-session: lazy allocation, sibling isolation, recycle, exact end, pending recovery, and resume passed');
 } finally {
   await stopProxy(proxy);
+  if (gateway?.exitCode === null) gateway.kill('SIGTERM');
   if (daemon.exitCode === null) daemon.kill('SIGTERM');
   await Promise.race([once(daemon, 'exit'), pause(7000)]).catch(() => {});
   if (daemon.exitCode === null) daemon.kill('SIGKILL');
