@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@ours.network/sdk": "3.8.1-nightly.10",
+    "@ours.network/sdk": "3.8.1-nightly.11",
     "ws": "^8.21.0",
     "zod": "^3.25.76",
     "@ours.network/mcp": "1.1.1"
