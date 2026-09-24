@@ -20,4 +20,5 @@ Closes #
 - [ ] Commits use [Conventional Commits](https://www.conventionalcommits.org/) subjects (`feat:` / `fix:` / `feat!:` …).
 - [ ] Tests added/updated for behavioural changes, and `npm test` passes locally.
 - [ ] Documentation updated where affected.
-- [ ] I have signed (or will sign) the CLA when prompted by the CLA bot.
+- [ ] I have read [Contribution rights and acceptance](../CONTRIBUTING.md#contribution-rights-and-acceptance). External patches remain on hold until the approved signing process is live; this checkbox is not a signature or assignment.
+- [ ] Once intake opens, all rights holders have completed the approved agreement for the current PR commits, and maintainers have verified coverage before merge.
