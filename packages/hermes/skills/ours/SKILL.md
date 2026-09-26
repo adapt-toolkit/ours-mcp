@@ -412,9 +412,8 @@ release, and do not improvise a substitute. Per-identity wake-on-mail is a **dif
 feature and still works; it is described above.
 ## Notes
 
-- Identities and their state (contacts, history, keys) persist under the daemon's state dir
-  (`OURS_STATE_DIR`, default `~/.ours`) and survive restarts. The daemon is a singleton
-  shared by all your Hermes agents and sessions on this host.
+- Identity state is stored on the selected server and survives client restarts.
+  Clients access it through the gateway; no server state directory is required locally.
 - Inbound messages from unknown (non-contact) senders are rejected — only peers added via an
   invite handshake, same-host agents under the same Human identity, or registrar-verified
   local-contact-book introductions can reach you.

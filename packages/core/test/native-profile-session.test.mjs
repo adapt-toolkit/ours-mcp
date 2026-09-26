@@ -72,8 +72,12 @@ async function connectProxy(env, name) {
 async function stopProxy(proxy) {
   if (!proxy || proxy.child.exitCode !== null) return;
   try { proxy.child.stdin.end(); } catch { /* already closed */ }
-  await Promise.race([once(proxy.child, 'exit'), pause(1000)]).catch(() => {});
-  if (proxy.child.exitCode === null) proxy.child.kill('SIGKILL');
+  await Promise.race([once(proxy.child, 'exit'), pause(5000)]).catch(() => {});
+  if (proxy.child.exitCode === null) {
+    proxy.child.kill('SIGKILL');
+    assert.fail('gateway-attached proxy must exit on stdin EOF');
+  }
+  assert.equal(proxy.child.exitCode, 0);
 }
 
 async function sessionEnd(env, sessionId) {
@@ -216,6 +220,20 @@ try {
   assert.ok(ownerFor(hostState, expectedInstanceId, ownerA));
   assert.ok(ownerFor(hostState, expectedInstanceId, ownerB));
 
+  const savedProfile = readFileSync(profilePath);
+  const beforeInvalid = readFileSync(ownerFor(hostState, expectedInstanceId, ownerA).path, 'utf8');
+  try {
+    for (const invalid of [null, '{}']) {
+      if (invalid === null) rmSync(profilePath); else writeFileSync(profilePath, invalid, {mode:0o600});
+      const result = spawnSync(process.execPath, [cli, 'session-end'], {
+        env: proxyEnv, input: JSON.stringify({session_id:sessionA}), encoding:'utf8', timeout:5000,
+      });
+      assert.equal(result.error, undefined);
+      assert.notEqual(result.status, 0, 'missing/invalid profile must refuse terminal cleanup');
+      assert.equal(readFileSync(ownerFor(hostState, expectedInstanceId, ownerA).path, 'utf8'), beforeInvalid, 'failed profile resolution retains owner state');
+      assert.ok(existsSync(join(daemonState, 'NativeTemporary')), 'invalid profile cannot delete server identity state');
+    }
+  } finally { writeFileSync(profilePath, savedProfile, {mode:0o600}); }
   await sessionEnd(proxyEnv, sessionA);
   assert.ok(!existsSync(join(daemonState, 'NativeTemporary')), 'exact SessionEnd removes owned temporary state');
   assert.ok(!existsSync(join(daemonState, 'SwitchedTemporary')), 'SessionEnd also removes switched-away temporary identities');
