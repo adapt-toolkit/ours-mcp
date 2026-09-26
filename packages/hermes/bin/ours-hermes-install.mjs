@@ -5,7 +5,7 @@
 //     npm i -g @ours.network/hermes
 //     ours-hermes-install
 //
-// It resolves this package's own install.sh (which ensures the ours daemon, registers the
+// It resolves this package's own install.sh (which validates the shared gateway profile, registers the
 // `ours` MCP server in ~/.hermes/config.yaml, and installs the skills) and runs it — no env-var
 // gymnastics. The MCP server + skill install immediately. Wake-on-mail is NOT set up here: the
 // agent enables it in-session by tailing `ours-mcp watch <identity>` (see the ours skill),
@@ -36,13 +36,13 @@ function help() {
 
   ours-hermes-install [options]
 
-Sets up the daemon + the ours MCP server + the skill. It asks nothing about identities or
+Requires an ours-install client profile; sets up the MCP server and skill. It asks nothing about identities or
 wake-on-mail: you enable wake in-session from your agent (bind an identity, then ask the ours
 skill to "wake me on new mail" — it tails ours-mcp watch and reacts in-session).
 
 Options:
       --hermes-dir <dir>   Hermes config+skills root (default ~/.hermes)
-      --skip-daemon        do not install/start the ours daemon
+      --skip-daemon        compatibility flag; server lifecycle is never changed
   -h, --help               show this help
 
 Idempotent: safe to re-run. After it finishes, run /reload-mcp in Hermes.`);
@@ -57,7 +57,6 @@ if (!existsSync(INSTALL)) {
 // the env vars it already understands.
 const env = { ...process.env };
 if (opts.hermesDir) env.HERMES_DIR = opts.hermesDir;
-if (opts.skipDaemon) env.OURS_INSTALL_SKIP_DAEMON = '1';
 
 const res = spawnSync('bash', [INSTALL], { stdio: 'inherit', env });
 if (res.error) { console.error(`ours-hermes-install: ${res.error.message}`); process.exit(1); }

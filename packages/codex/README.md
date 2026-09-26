@@ -51,38 +51,21 @@ The launcher never starts, stops, restarts, or reconfigures the ours daemon. If 
 selected daemon is absent or incompatible, it exits with an error and leaves standard
 `codex` available.
 
-## Selecting a daemon
+## Selecting a gateway
 
-Multiple daemons may run on one host when each uses a distinct port and state directory.
-For network clients, explicit `OURS_CONFIG` takes precedence over the managed
-`~/.ours-client/profile.json`. When the managed file exists, ordinary `ours-codex`
-launches need no environment override. Invalid or unreadable managed profiles
-fail before selecting another daemon. With neither selection, the existing
-local-daemon precedence remains:
-
-1. `ours-codex --ours-port <port>`
-2. `OURS_PORT`
-3. the config selected by `OURS_CONFIG`
-4. `~/.ours/config.json`
-5. port `3050`
-
-All MCP, hooks, unread, and watcher calls inherit the same selected profile. Host-profile
-tools run in the local `@ours.network/mcp` stdio server included as a plugin dependency.
-The MCP server calls the selected daemon's authenticated HTTP API through the SDK.
-Example:
+Every client uses `~/.ours-client/profile.json`; `OURS_CONFIG` can select a complete
+alternate profile. It contains `serverUrl`, `expectedInstanceId`, and `credentialPath`.
+The daemon endpoint is derived as `serverUrl + /daemon`, including gateway path prefixes.
+Missing, unsafe, or invalid profiles fail closed. Remove legacy port/state/token
+selectors; `--ours-port` is rejected. Example after provisioning with `ours-install client`:
 
 ```sh
-OURS_CONFIG="$HOME/.ours/testing.json" ours-codex --ours-port 4050
+OURS_CONFIG="$HOME/.ours-client/testing.json" ours-codex
 ```
 
-An operator-provisioned host profile uses the complete
-`endpoint`/`expectedInstanceId`/`credentialPath` tuple in the selected file. In this mode,
-do not combine the profile with `--ours-port`, `OURS_PORT`, `OURS_API_TOKEN`, or
-`OURS_STATE_DIR`. Codex forwards the actual selected path as `OURS_CONFIG` and the optional `OURS_MCP_CONFIG` host
-record location; the SDK verifies the expected
-daemon instance and rereads `credentialPath` for every request, so an operator token
-update takes effect in the running hook and live monitor without a restart or token
-snapshot in child process environments.
+MCP, hooks, unread and watcher requests inherit that profile. The SDK verifies the
+instance and rereads the issued credential for each request. Client installation and
+launch never install, start, restart or reconfigure server services.
 
 Native ownership is keyed by Codex's actual thread ID. A normal live TUI exit forwards
 that ID through the same `SessionEnd` input used by the hook. If Codex has not produced

@@ -13,6 +13,19 @@ import { fileURLToPath } from 'node:url';
 const PKG = dirname(dirname(fileURLToPath(import.meta.url)));
 const INSTALL = join(PKG, 'install.sh');
 
+function clientBin(root, valid = true) {
+  const bin = join(root, 'bin'); mkdirSync(bin, {recursive:true});
+  writeFileSync(join(bin, 'ours'), `#!/usr/bin/env bash
+echo "$*" >> "${root}/client-calls"
+[ "$*" = "config show --json" ] && exit ${valid ? 0 : 1}
+exit 99
+`);
+  writeFileSync(join(bin, 'ours-mcp'), '#!/usr/bin/env bash\nexit 0\n');
+  writeFileSync(join(bin, 'npm'), `#!/usr/bin/env bash\ntouch "${root}/unexpected-npm"\nexit 99\n`);
+  for (const n of ['ours','ours-mcp','npm']) chmodSync(join(bin,n),0o755);
+  return `${bin}:${process.env.PATH}`;
+}
+
 function run(codexDir, skillsDir) {
   return execFileSync('bash', [INSTALL], {
     encoding: 'utf8',
@@ -20,7 +33,7 @@ function run(codexDir, skillsDir) {
       ...process.env,
       CODEX_DIR: codexDir,
       SKILLS_DIR: skillsDir,
-      OURS_INSTALL_SKIP_DAEMON: '1',
+      PATH: clientBin(codexDir),
       OURS_CODEX_SKIP_NATIVE: '1',
     },
   });
@@ -49,6 +62,9 @@ test('install.sh sets up skills, config.toml, and AGENTS.md; second run is idemp
     assert.match(agents, /get_messages/, 'AGENTS pointer mentions get_messages');
     assert.match(agents, /in-session/i, 'AGENTS pointer describes in-session reactivity');
 
+    assert(!existsSync(join(CODEX, 'unexpected-npm')));
+    assert.equal(readFileSync(join(CODEX, 'client-calls'),'utf8').trim(), 'config show --json');
+
     // second run: idempotent — one MCP table, one pointer
     run(CODEX, SKILLS);
     const cfg2 = readFileSync(join(CODEX, 'config.toml'), 'utf8');
@@ -66,36 +82,17 @@ test('install.sh sets up skills, config.toml, and AGENTS.md; second run is idemp
   }
 });
 
-test('install.sh fails when an upgraded daemon can neither restart nor start', () => {
-  const root = mkdtempSync(join(tmpdir(), 'codex-daemon-failure-'));
-  const bin = join(root, 'bin');
-  const state = join(root, 'upgraded');
-  mkdirSync(bin);
-  writeFileSync(join(bin, 'npm'), '#!/usr/bin/env bash\ntouch "$FAKE_UPGRADE_STATE"\n');
-  writeFileSync(join(bin, 'ours'), `#!/usr/bin/env bash
-case "$*" in
-  version) if [ -f "$FAKE_UPGRADE_STATE" ]; then echo 2.0.0; else echo 1.0.0; fi ;;
-  "daemon status") exit 0 ;;
-  "daemon restart"|"daemon start") exit 1 ;;
-esac
-`);
-  writeFileSync(join(bin, 'ours-mcp'), '#!/usr/bin/env bash\nexit 0\n');
-  for (const name of ['npm', 'ours', 'ours-mcp']) chmodSync(join(bin, name), 0o755);
+test('install.sh refuses an invalid shared profile before plugin or server mutations', () => {
+  const root = mkdtempSync(join(tmpdir(), 'gateway-install-refusal-'));
   try {
-    const result = spawnSync('bash', [INSTALL], {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
-        FAKE_UPGRADE_STATE: state,
-        CODEX_DIR: join(root, '.codex'),
-        SKILLS_DIR: join(root, 'skills'),
-        OURS_CODEX_SKIP_NATIVE: '1',
-      },
-    });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stdout, /could not restart or start the upgraded daemon/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+    const result = spawnSync('bash', [INSTALL], { encoding:'utf8', env:{
+      ...process.env, PATH:clientBin(root,false), CODEX_DIR:join(root,'plugin'),
+      HERMES_DIR:join(root,'plugin'), SKILLS_DIR:join(root,'skills'), OURS_INSTALL_SKIP_DAEMON:'1',
+    }});
+    assert.notEqual(result.status,0);
+    assert.match(result.stdout,/shared gateway profile/);
+    assert.equal(readFileSync(join(root,'client-calls'),'utf8').trim(),'config show --json');
+    assert(!existsSync(join(root,'plugin')));
+    assert(!existsSync(join(root,'unexpected-npm')));
+  } finally { rmSync(root,{recursive:true,force:true}); }
 });

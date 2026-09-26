@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the native ours.network plugin into the OpenAI Codex CLI:
-#   1. ensure the ours operator CLI and MCP adapter are installed; start the shared daemon
+#   1. verify the installed gateway client profile before modifying plugin configuration
 #   2. add/upgrade adapt-toolkit/ours-codex-marketplace
 #   3. install the native `ours` plugin (skills, MCP servers, and hooks)
 #   4. back up and remove installer-owned legacy config only after verification
@@ -10,7 +10,6 @@
 #   SKILLS_DIR                 skills root                (default ~/.agents/skills)
 #   CODEX_CONFIG               config.toml path           (default $CODEX_DIR/config.toml)
 #   CODEX_AGENTS               AGENTS.md path             (default $CODEX_DIR/AGENTS.md)
-#   OURS_INSTALL_SKIP_DAEMON=1 skip daemon install/start
 set -euo pipefail
 
 SELFDIR="$(cd "$(dirname "$0")" && pwd)"
@@ -21,33 +20,20 @@ SKILLS_DIR="${SKILLS_DIR:-$HOME/.agents/skills}"
 
 say(){ printf 'ours-install: %s\n' "$1"; }
 
-# Ensure the ours daemon is on @latest (UPGRADE, not install-if-missing): an already-present
-# daemon must still be pulled up to the newest published version. Record the CLI version
-# before/after; start if not running, restart only if the version actually changed.
-ensure_daemon_latest(){
-  if [ "${OURS_INSTALL_SKIP_DAEMON:-}" = "1" ]; then say "skipping daemon step (OURS_INSTALL_SKIP_DAEMON=1)"; return 0; fi
-  local before after
-  before="$(ours version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-  say "ensuring @ours.network/cli@latest and @ours.network/mcp@latest…"
-  npm i -g @ours.network/cli@latest @ours.network/mcp@latest
-  after="$(ours version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-  if ! ours daemon status >/dev/null 2>&1; then
-    say "starting the ours daemon…"
-    if ! ours daemon start; then say "could not start the ours daemon; installation stopped."; return 1; fi
-  elif [ -n "$before" ] && [ "$before" != "$after" ]; then
-    say "operator CLI upgraded (v${before} → v${after}) — restarting its daemon…"
-    if ! ours daemon restart; then
-      say "restart failed; trying a clean start…"
-      if ! ours daemon start; then say "could not restart or start the upgraded daemon; installation stopped."; return 1; fi
-    fi
-  else
-    say "daemon already current (v${after:-unknown})."
+# Client installation never installs, starts or restarts server services.
+require_gateway_client(){
+  if ! command -v ours >/dev/null 2>&1 || ! command -v ours-mcp >/dev/null 2>&1; then
+    say "Install gateway clients with ours-install client first; ours and ours-mcp are required."
+    return 1
   fi
-  say "operator CLI: $(command -v ours) (v${after:-unknown}); MCP adapter: $(command -v ours-mcp)"
+  if ! ours config show --json >/dev/null; then
+    say "Configure the shared gateway profile with ours-install client first; plugin setup was left unchanged."
+    return 1
+  fi
 }
 
-# --- 1) daemon (ensure @latest + restart on change) ---
-ensure_daemon_latest
+# --- 1) shared gateway client preflight ---
+require_gateway_client
 
 # --- native Codex plugin ------------------------------------------------------
 # Codex owns the plugin cache and hook-trust workflow. Only remove the legacy
@@ -73,7 +59,7 @@ if [ "${OURS_CODEX_SKIP_NATIVE:-}" != "1" ]; then
   CODEX_DIR="$CODEX_DIR" SKILLS_DIR="$SKILLS_DIR" node "$SELFDIR/bin/codex-legacy-cleanup.mjs"
   say "native plugin installed. Review and trust its hooks in Codex, then start a new thread."
   say "standard mode: codex"
-  say "live mode:     ours-codex${OURS_PORT:+ --ours-port $OURS_PORT}"
+  say "live mode:     ours-codex"
   exit 0
 fi
 
@@ -93,11 +79,5 @@ CODEX_CONFIG="$CODEX_CONFIG" node "$SELFDIR/bin/codex-config-install.mjs"
 CODEX_AGENTS="$CODEX_AGENTS" node "$SELFDIR/bin/codex-agents-install.mjs"
 
 say "done. The ours MCP server + skill are live for the next Codex session."
-# --- version echo: show the user they are on latest ---
-if [ "${OURS_INSTALL_SKIP_DAEMON:-}" != "1" ]; then
-  say "versions:"
-  say "  MCP adapter: $(ours-mcp --version 2>/dev/null | head -1 || echo 'unknown')"
-  say "  plugin: $(npm ls -g @ours.network/codex 2>/dev/null | grep -oE '@ours\.network/codex@[0-9][0-9.]*' | head -1 || echo '@ours.network/codex (not a global install)')"
-fi
 say "next: bind (or create) an identity, then the ours skill tails ours-mcp watch (or polls"
 say "      get_messages) in-session so you react to new mail while you work."

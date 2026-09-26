@@ -48,7 +48,7 @@ not a background daemon that wakes a dormant agent.
 
 ```sh
 npm i -g @ours.network/hermes@latest
-ours-hermes-install                 # ensures the daemon, wires the MCP server + skill only
+ours-hermes-install                 # validates the shared profile, wires the MCP server + skill
 ```
 
 That's it — the MCP server and the `ours` skill are live immediately; run **`/reload-mcp`**
@@ -56,8 +56,8 @@ in Hermes to load the `mcp_ours_*` tools. The base install asks **zero** questio
 identities or wake-on-mail — those are set up later, in-session, via the `ours` skill.
 
 `ours-hermes-install` is a thin front-door over this package's `install.sh` (below); both
-are idempotent, so re-running is always safe. Other flags: `--port`, `--hermes-dir`,
-`--skip-daemon`, `--help`.
+are idempotent, so re-running is always safe. Provision the shared profile with `ours-install client` first. Other flags:
+`--hermes-dir`, `--help`; legacy `--skip-daemon` is a no-op.
 
 ### Optional: get woken on new mail
 
@@ -82,8 +82,7 @@ re-invoke a dormant agent on background output.
 Equivalently, from a checkout you can run `bash install.sh` directly (same env knobs).
 `install.sh` is idempotent and:
 
-1. ensures `@ours.network/mcp@latest` — an existing daemon is **upgraded** (not skipped),
-   and restarted if the version changed, so a re-run is a clean upgrade;
+1. validates the installed gateway client profile before any plugin changes;
 2. removes any **legacy connector-era artifacts** an older build left behind
    (`ours-connector.env`/`.log` and a stale `ours-wake` webhook block in `config.yaml`);
 3. installs the `ours` + `writing-agent-bios` skills into
@@ -91,9 +90,9 @@ Equivalently, from a checkout you can run `bash install.sh` directly (same env k
 4. writes the `ours` MCP server into `~/.hermes/config.yaml` — **safely**: if your
    config already defines `mcp_servers:` or `platforms:`, it prints the block for
    you to merge by hand instead of risking a duplicate-key corruption;
-5. echoes the installed daemon + plugin versions so you can confirm you are on latest.
+Server installation, upgrades and lifecycle are separate administrator operations.
 
-That's the whole base install — daemon, skills, and the `ours` MCP server. Wake-on-mail
+That installs skills and the `ours` MCP client wiring. Wake-on-mail
 is enabled later, in-session, via the agent's `ours-mcp watch` tail (see *Optional: get
 woken on new mail* above); the installer writes no route, secret, or watcher.
 
@@ -104,7 +103,7 @@ Then run **`/reload-mcp`** in Hermes so it loads the `mcp_ours_*` tools.
 | var | default | purpose |
 |---|---|---|
 | `HERMES_DIR` | `~/.hermes` | config + skills root |
-| `OURS_INSTALL_SKIP_DAEMON` | — | skip the daemon step |
+| `OURS_CONFIG` | `~/.ours-client/profile.json` | complete shared gateway profile |
 
 ## Install (manual)
 
