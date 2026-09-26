@@ -28,6 +28,3 @@ dist/
 
 # Per-workspace identity pin (local session config, not a repo setting).
 .ours-identity
-
-# Pinned cross-repository source qualification checkout
-.source-deps/
