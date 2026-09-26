@@ -29,7 +29,8 @@ require_gateway_client(){
     say "Install gateway clients with ours-install client first; ours and ours-mcp are required."
     return 1
   fi
-  if ! ours config show --json >/dev/null; then
+  local contract
+  if ! contract="$(ours-mcp verify-client-profile)" || [ "$contract" != "ours.gateway-client-profile-v1" ]; then
     say "Configure the shared gateway profile with ours-install client first; plugin setup was left unchanged."
     return 1
   fi

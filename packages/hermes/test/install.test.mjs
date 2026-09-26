@@ -15,12 +15,13 @@ const INSTALL = join(PKG, 'install.sh');
 
 function clientBin(root, valid = true) {
   const bin = join(root, 'bin'); mkdirSync(bin, {recursive:true});
-  writeFileSync(join(bin, 'ours'), `#!/usr/bin/env bash
+  // A legacy CLI returning successful local config cannot satisfy the new contract.
+  writeFileSync(join(bin, 'ours'), `#!/usr/bin/env bash\necho '{"selection":{"stateDir":"legacy"}}'\nexit 0\n`);
+  writeFileSync(join(bin, 'ours-mcp'), `#!/usr/bin/env bash
 echo "$*" >> "${root}/client-calls"
-[ "$*" = "config show --json" ] && exit ${valid ? 0 : 1}
-exit 99
+echo '${valid ? 'ours.gateway-client-profile-v1' : '{"selection":{"stateDir":"legacy"}}'}'
+exit 0
 `);
-  writeFileSync(join(bin, 'ours-mcp'), '#!/usr/bin/env bash\nexit 0\n');
   writeFileSync(join(bin, 'npm'), `#!/usr/bin/env bash\ntouch "${root}/unexpected-npm"\nexit 99\n`);
   for (const n of ['ours','ours-mcp','npm']) chmodSync(join(bin,n),0o755);
   return `${bin}:${process.env.PATH}`;
@@ -52,7 +53,7 @@ test('install.sh sets up skills + the ours MCP server (no route/secret); second 
     assert.ok(!existsSync(join(H, 'ours-connector.env')), 'no connector env file');
 
     assert(!existsSync(join(H, 'unexpected-npm')));
-    assert.equal(readFileSync(join(H, 'client-calls'),'utf8').trim(), 'config show --json');
+    assert.equal(readFileSync(join(H, 'client-calls'),'utf8').trim(), 'verify-client-profile');
 
     // second run: idempotent — exactly one sentinel block
     run(H);
@@ -72,7 +73,7 @@ test('install.sh refuses an invalid shared profile before plugin or server mutat
     }});
     assert.notEqual(result.status,0);
     assert.match(result.stdout,/shared gateway profile/);
-    assert.equal(readFileSync(join(root,'client-calls'),'utf8').trim(),'config show --json');
+    assert.equal(readFileSync(join(root,'client-calls'),'utf8').trim(),'verify-client-profile');
     assert(!existsSync(join(root,'plugin')));
     assert(!existsSync(join(root,'unexpected-npm')));
   } finally { rmSync(root,{recursive:true,force:true}); }

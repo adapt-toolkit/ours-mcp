@@ -117,3 +117,11 @@ for (const endpoint of ['ftp://server.example', 'wss://server.example', 'https:/
   assert.throws(() => validateHostProfile({ ...tuple, endpoint }));
 }
 console.log('HTTPS profile validation: passed');
+
+for (const [selected, valid] of [[profile,true],[empty,false]]) {
+  const verified = spawnSync(process.execPath, [new URL('../dist/cli.js', import.meta.url).pathname, 'verify-client-profile'], {
+    env: { ...process.env, OURS_CONFIG:selected, OURS_API_TOKEN:undefined, OURS_PORT:undefined, OURS_STATE_DIR:undefined, OURS_DAEMON_ID:undefined }, encoding:'utf8',
+  });
+  assert.equal(verified.status, valid ? 0 : 1, verified.stderr);
+  assert.equal(verified.stdout.trim(), valid ? 'ours.gateway-client-profile-v1' : '');
+}

@@ -116,6 +116,7 @@ function usage(): void {
   out(`ours-mcp ${VERSION} — MCP adapter for the shared ours daemon`);
   out('');
   out('Usage: ours-mcp <command> [options]');
+  out('  verify-client-profile validate the shared gateway profile (no network access)');
   out('  proxy                 run the stdio MCP server (never starts a daemon)');
   out('  session-end           release this harness session and clean up its temporary identities');
   out('  watch [identity]      stream inbound JSON Lines; without a name, only ours-mcp identities');
@@ -139,6 +140,11 @@ async function main(): Promise<void> {
   }
 
   switch (command) {
+    case 'verify-client-profile':
+      if (args.length) throw new Error('Usage: ours-mcp verify-client-profile');
+      hostProfileFromEnv(process.env);
+      out('ours.gateway-client-profile-v1');
+      return;
     case 'proxy':
       if (args.length) throw new Error('Usage: ours-mcp proxy');
       await runProxy();
