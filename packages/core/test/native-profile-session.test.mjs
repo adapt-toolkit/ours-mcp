@@ -193,6 +193,11 @@ try {
   const currentA = await proxy.call('current_identity', {}, sessionA);
   assert.match(JSON.stringify(currentA), /NativePermanent/, 'selector A binding survives selector B calls');
 
+  const switchedTemp = await proxy.call('create_temporary_identity', {
+    name: 'SwitchedTemporary', bio: '', expose_local: false, local_auto_accept: true,
+  }, sessionA);
+  assert.equal(switchedTemp.result?.isError, false, JSON.stringify(switchedTemp));
+
   const temporaryA = await proxy.call('create_temporary_identity', {
     name: 'NativeTemporary', bio: '', expose_local: false, local_auto_accept: true,
   }, sessionA);
@@ -213,11 +218,25 @@ try {
 
   await sessionEnd(proxyEnv, sessionA);
   assert.ok(!existsSync(join(daemonState, 'NativeTemporary')), 'exact SessionEnd removes owned temporary state');
+  assert.ok(!existsSync(join(daemonState, 'SwitchedTemporary')), 'SessionEnd also removes switched-away temporary identities');
   assert.ok(existsSync(join(daemonState, 'NativePermanent')), 'SessionEnd preserves permanent state');
   assert.ok(existsSync(join(daemonState, 'NativeSibling')), 'SessionEnd preserves sibling state');
   assert.equal(ownerFor(hostState, expectedInstanceId, ownerA).value.state, 'ended');
   await sessionEnd(proxyEnv, sessionA);
   assert.equal(ownerFor(hostState, expectedInstanceId, ownerA).value.state, 'ended', 'duplicate SessionEnd is idempotent');
+
+  for (const [seed, expected] of [['NativePermanent', 'NativePermanent'], ['Nobody', 'No identity bound'], ['NativeSibling', 'No identity bound']]) {
+    const seedSession = randomUUID();
+    const seedProxy = await connectProxy({ ...proxyEnv, OURS_BIND_IDENTITY: seed }, 'gateway-seed');
+    try {
+      const result = await seedProxy.call('current_identity', {}, seedSession);
+      assert.equal(result.result?.isError, false, JSON.stringify(result));
+      assert.match(JSON.stringify(result), new RegExp(expected), 'seed binds available identity and never evicts another owner');
+      const sibling = await proxy.call('current_identity', {}, sessionB);
+      assert.match(JSON.stringify(sibling), /NativeSibling/, 'seed refusal preserves the live owner');
+      await sessionEnd(proxyEnv, seedSession);
+    } finally { await stopProxy(seedProxy); }
+  }
 
   const resumedA = await proxy.call('current_identity', {}, sessionA);
   assert.equal(resumedA.result?.isError, false, JSON.stringify(resumedA));
@@ -265,7 +284,7 @@ try {
   const containerEntry = fileURLToPath(new URL('../dist/container.js', import.meta.url));
   for (const command of ['version', 'application-identities', 'hook-state', 'watch']) {
     const result = spawnSync(process.execPath, [containerEntry, expectedInstanceId, command], {
-      env: { ...proxyEnv, OURS_STATE_DIR: containerState, OURS_DAEMON_ID: expectedInstanceId },
+      env: { ...proxyEnv, OURS_CONFIG: join(containerState, '.mcp/profile.json'), OURS_MCP_CONFIG: join(containerState, '.mcp/config.json') },
       input: '', encoding: 'utf8', timeout: 10000,
     });
     assert.equal(result.status, 0, `${command}: ${result.stderr}`);

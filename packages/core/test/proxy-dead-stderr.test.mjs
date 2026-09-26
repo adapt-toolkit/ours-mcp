@@ -34,7 +34,7 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,6 +88,8 @@ async function startQuietDaemon(stateDir) {
 }
 
 function startProxy(port, dir) {
+  const configPath = join(dir, 'profile.json');
+  writeFileSync(configPath, JSON.stringify({serverUrl:`http://127.0.0.1:${port}`, expectedInstanceId:'11111111-2222-3333-4444-555555555555', credentialPath:join(dir,'credential')}), {mode:0o600});
   const p = spawn('node', [CLI, 'proxy'], {
     env: {
       ...process.env,
@@ -95,7 +97,7 @@ function startProxy(port, dir) {
       // exports it, and it would seed a startup bind these cases never asked for
       // (that input has its own suite — env-bind-identity.test.mjs).
       OURS_BIND_IDENTITY: undefined,
-      OURS_PORT: String(port), OURS_STATE_DIR: dir,
+      OURS_CONFIG: configPath, OURS_PORT: undefined, OURS_STATE_DIR: undefined, OURS_API_TOKEN: undefined, OURS_DAEMON_ID: undefined,
       OURS_API_VISIBILITY: 'open',
       OURS_NO_AUTORESTORE: '1',
     },

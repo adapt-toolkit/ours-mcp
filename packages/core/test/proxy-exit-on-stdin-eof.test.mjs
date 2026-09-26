@@ -30,7 +30,7 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,10 +43,10 @@ const ok = (c, m) => { c ? (pass++, console.log('  ✓', m)) : (fail++, console.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res, rej) => { const s = createNetServer(); s.on('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
 
-// A minimal daemon that completes the handshake and then HOLDS the standalone
-// notification SSE open. Holding it open is the point: that stream is what keeps
-// the orphan's event loop alive, so a proxy that does not handle EOF has every
-// reason to stay running and this test can tell "exited" from "had nothing to do".
+// Legacy server fixture deliberately exposes no gateway selection route. These
+// cases exercise local MCP initialization and EOF before an identity is attached.
+// Active gateway watcher EOF and owner retention are covered by
+// native-profile-session.test.mjs with a real daemon and prefixed HTTP proxy.
 async function startQuietDaemon(stateDir) {
   const held = [];
   let sessionId = null;
@@ -86,6 +86,8 @@ async function startQuietDaemon(stateDir) {
 }
 
 function startProxy(port, dir) {
+  const configPath = join(dir, 'profile.json');
+  writeFileSync(configPath, JSON.stringify({serverUrl:`http://127.0.0.1:${port}`, expectedInstanceId:'11111111-2222-3333-4444-555555555555', credentialPath:join(dir,'credential')}), {mode:0o600});
   const p = spawn('node', [CLI, 'proxy'], {
     env: {
       ...process.env,
@@ -93,7 +95,7 @@ function startProxy(port, dir) {
       // exports it, and it would seed a startup bind these cases never asked for
       // (that input has its own suite — env-bind-identity.test.mjs).
       OURS_BIND_IDENTITY: undefined,
-      OURS_PORT: String(port), OURS_STATE_DIR: dir,
+      OURS_CONFIG: configPath, OURS_PORT: undefined, OURS_STATE_DIR: undefined, OURS_API_TOKEN: undefined, OURS_DAEMON_ID: undefined,
       OURS_API_VISIBILITY: 'open',
       OURS_NO_AUTORESTORE: '1',
     },
@@ -137,11 +139,11 @@ console.log('proxy-exit-on-stdin-eof\n');
     // unrelated reasons; we want to prove the EOF path, not a startup failure.
     px.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'eof-test', version: '0' } } });
     const init = await waitFor(px.frames, (f) => f.id === 1 && f.result, 15000);
-    ok(Boolean(init), 'proxy completed the handshake against the fake daemon');
+    ok(Boolean(init), 'gateway-selected proxy completed the MCP handshake');
     px.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
     px.send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     ok(Boolean(await waitFor(px.frames, (f) => f.id === 2 && f.result, 10000)), 'proxy is serving — a tool call round-tripped');
-    await sleep(500); // let the standalone notification SSE settle open
+    await sleep(500); // settle the established local MCP session
 
     const t0 = Date.now();
     px.proc.stdin.end(); // THE ONLY SIGNAL A DEPARTING CLIENT SENDS

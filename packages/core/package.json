@@ -54,7 +54,7 @@
     "dev": "tsx src/cli.ts proxy",
     "prepublishOnly": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/managed-server.test.mjs && node test/application-identities.test.mjs && node test/local-files.test.mjs && node test/cli-delegation.test.mjs && node test/inbox-push.test.mjs && node test/contact-lines.test.mjs && node test/env-bind-identity.test.mjs && node test/proxy-exit-on-stdin-eof.test.mjs && node test/proxy-dead-stderr.test.mjs && node test/session-end-temp-cleanup.test.mjs && node test/host-profile.test.mjs && node test/container.test.mjs && node test/native-profile-session.test.mjs",
+    "test": "node --test test/managed-server.test.mjs && node test/application-identities.test.mjs && node test/local-files.test.mjs && node test/cli-delegation.test.mjs && node test/inbox-push.test.mjs && node test/contact-lines.test.mjs && node test/proxy-exit-on-stdin-eof.test.mjs && node test/proxy-dead-stderr.test.mjs && node test/host-profile.test.mjs && node test/container.test.mjs && node test/native-profile-session.test.mjs",
     "test:external-profile": "node test/native-profile-session.test.mjs && node test/external-profile-stdio-refresh.test.mjs"
   },
   "dependencies": {
