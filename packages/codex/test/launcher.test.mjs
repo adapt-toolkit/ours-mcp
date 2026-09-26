@@ -65,22 +65,23 @@ test('propagates explicit profile without snapshotting credentials or local owne
   assert.equal(env.OURS_CODEX_CAPABILITY, 'cap');
 });
 
-test('propagates exact legacy selection and private control channel', () => {
+test('propagates the shared profile and private control channel only', () => {
   const env = launcherEnvironment({ PATH: '/bin' }, { port: 4050, token: 'tok', configPath: '/tmp/ours.json' }, { socketPath: '/tmp/control.sock', capability: 'cap' });
-  assert.equal(env.OURS_PORT, '4050');
-  assert.equal(env.OURS_API_TOKEN, 'tok');
+  assert.equal(env.OURS_PORT, undefined);
+  assert.equal(env.OURS_API_TOKEN, undefined);
   assert.equal(env.OURS_CONFIG, '/tmp/ours.json');
-  assert.equal(env.OURS_AUTOSTART, '0');
+  assert.equal(env.OURS_AUTOSTART, undefined);
   assert.equal(env.OURS_CODEX_CONTROL_SOCKET, '/tmp/control.sock');
   assert.equal(env.OURS_CODEX_CAPABILITY, 'cap');
-  assert.equal(env.OURS_CLIENT_PID, String(process.pid));
+  assert.equal(env.OURS_CLIENT_PID, undefined);
 });
 
 test('passes the live control environment to both App Server and remote TUI', () => {
   const envs = liveProcessEnvironments({ PATH: '/bin' }, { port: 4050, token: 'tok', configPath: '/tmp/ours.json' }, { socketPath: '/tmp/control.sock', capability: 'cap' });
   assert.equal(envs.appServer.OURS_CODEX_LIVE, '1');
   assert.equal(envs.appServer.OURS_CODEX_CONTROL_SOCKET, '/tmp/control.sock');
-  assert.equal(envs.appServer.OURS_PORT, '4050');
+  assert.equal(envs.appServer.OURS_PORT, undefined);
+  assert.equal(envs.appServer.OURS_CONFIG, '/tmp/ours.json');
   assert.strictEqual(envs.tui, envs.appServer);
 });
 

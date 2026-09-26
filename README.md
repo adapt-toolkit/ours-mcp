@@ -25,31 +25,30 @@ Codex, or Hermes integrations:
 curl -fsSL https://raw.githubusercontent.com/adapt-toolkit/ours-network/main/install.sh | bash
 ```
 
-For a manual npm setup:
+### Shared gateway selection
 
-```sh
-npm install --global @ours.network/daemon @ours.network/mcp@0.17.2
-ours-daemon config setup
-ours-daemon start
-ours-daemon status
-```
+Fleet, ours CLI, MCP and harness hooks select one server through
+`~/.ours-client/profile.json`. `serverUrl` names the HTTP(S) gateway, with
+optional base path. Daemon operations use `/daemon`; Cowork uses `/cowork`.
+The profile also pins `expectedInstanceId` and an absolute `credentialPath`.
+An optional `endpoint` must equal `serverUrl + "/daemon"`.
 
-Then configure the harness to launch `ours-mcp proxy` over stdio. The daemon must
-already be running; a missing or mismatched daemon fails with clear guidance.
+Import a prepared private profile with `ours-install client --config /absolute/profile.json`.
+Use `ours config show --json` to inspect connection metadata without reading the token.
+Keep the profile directory mode 0700 and files mode 0600. `OURS_CONFIG` may
+select the same whole profile for all clients. Remove legacy `OURS_PORT`,
+`OURS_STATE_DIR`, `OURS_API_TOKEN` and `OURS_DAEMON_ID` overrides.
 
-Daemon lifecycle and configuration belong to the daemon package:
+Missing profiles, rejected credentials and unavailable gateways fail closed.
+Clients never read daemon state, start a daemon, or try a local port/socket.
+Hooks use the same gateway and return a harmless no-op on failure. Their
+application-local identity/session files do not select another server.
 
-```sh
-ours-daemon start | stop | restart | status
-ours-daemon serve
-ours-daemon install-service
-ours-daemon uninstall-service
-ours-daemon config show --json
-```
-
-The legacy `ours-mcp` lifecycle verbs remain narrow compatibility aliases that
-delegate argv, stdio, and exit status to `ours-daemon`. New automation should use
-`ours-daemon` directly.
+For full-stack setup, a custom public port (such as 4050), systemd propagation
+and migration, see the [gateway setup guide](https://github.com/adapt-toolkit/ours-network/blob/prerelease/packages/installer/GATEWAY_SETUP.md).
+The coordinated gateway changes require approved matching package releases;
+current npm nightly is not automatically evidence that these changes are installed.
+Server administration uses `ours-install server` on the server host.
 
 See [packages/core/README.md](packages/core/README.md) for daemon selection,
 application identity storage, MCP configuration, and migration details.

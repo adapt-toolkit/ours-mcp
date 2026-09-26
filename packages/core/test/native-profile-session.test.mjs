@@ -153,7 +153,7 @@ try {
     once(gateway.stdout, 'data'),
     once(gateway, 'exit').then(() => { throw new Error('gateway exited before readiness'); }),
   ]);
-  writeFileSync(profilePath, JSON.stringify({ endpoint: `http://127.0.0.1:${gatewayPort}/base/daemon`, expectedInstanceId, credentialPath }), { mode: 0o600 });
+  writeFileSync(profilePath, JSON.stringify({ serverUrl: `http://127.0.0.1:${gatewayPort}/base`, endpoint: `http://127.0.0.1:${gatewayPort}/base/daemon`, expectedInstanceId, credentialPath }), { mode: 0o600 });
   const proxyEnv = {
     ...process.env,
     OURS_CONFIG: profilePath,

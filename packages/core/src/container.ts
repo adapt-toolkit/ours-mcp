@@ -4,13 +4,14 @@ import { readFileSync, createReadStream, createWriteStream, mkdirSync, rmSync } 
 import { basename, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
+import { readGatewayClientProfile } from '@ours.network/sdk/client';
 import { fileURLToPath } from 'node:url';
 
 const [expected, command = 'proxy', ...args] = process.argv.slice(2);
 if (!expected || expected !== process.env.OURS_DAEMON_ID) throw new Error('MCP target does not match the selected daemon');
 const mcpDir = join(process.env.OURS_STATE_DIR || '/var/lib/ours', '.mcp');
 const profilePath = join(mcpDir, 'profile.json');
-const profile = JSON.parse(readFileSync(profilePath, 'utf8'));
+const profile = readGatewayClientProfile({ OURS_CONFIG: profilePath });
 if (profile.expectedInstanceId !== expected) throw new Error('MCP profile does not match the selected daemon');
 for (const key of ['OURS_API_TOKEN', 'OURS_PORT', 'OURS_STATE_DIR', 'OURS_DAEMON_ID', 'OURS_CLIENT_PID', 'OURS_AUTOSTART']) delete process.env[key];
 process.env.OURS_CONFIG = profilePath;

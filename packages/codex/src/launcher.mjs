@@ -31,15 +31,7 @@ export function launcherEnvironment(env, profile, control) {
     // call. The bin shim preserves an explicit value instead of replacing it
     // with whichever child happened to spawn it.
   };
-  if (profile.profile) {
-    for (const key of ['OURS_PORT', 'OURS_API_TOKEN', 'OURS_STATE_DIR', 'OURS_CLIENT_PID', 'OURS_AUTOSTART', 'OURS_DAEMON_ID']) delete out[key];
-  } else {
-    out.OURS_PORT = String(profile.port);
-    out.OURS_AUTOSTART = '0';
-    out.OURS_CLIENT_PID = String(process.pid);
-    if (profile.token) out.OURS_API_TOKEN = profile.token;
-    else delete out.OURS_API_TOKEN;
-  }
+  for (const key of ['OURS_PORT', 'OURS_API_TOKEN', 'OURS_STATE_DIR', 'OURS_CLIENT_PID', 'OURS_AUTOSTART', 'OURS_DAEMON_ID', 'OURS_DAEMON_URL', 'OURS_DAEMON_CREDENTIAL_PATH']) delete out[key];
   return out;
 }
 

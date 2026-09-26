@@ -1,3 +1,4 @@
+import { renderIdentityDirective } from '../dist/hooks/runner.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -19,9 +20,10 @@ test('workspace pin advice does not classify existence or authorize actions', (t
   const run = (kind, payload = {}) => JSON.parse(execFileSync(process.execPath, [
     fileURLToPath(new URL('../dist/hooks/runner.js', import.meta.url)), kind,
   ], { env, cwd: root, input: JSON.stringify({ cwd: root, ...payload }), encoding: 'utf8' }));
-  const before = run('session-start').hookSpecificOutput.additionalContext;
+  const before = renderIdentityDirective({ identity:'Pinned', expose_local:false });
+  assert.equal(run('session-start').hookSpecificOutput, undefined, 'missing gateway fails closed');
   mkdirSync(join(state, 'Pinned'));
-  const after = run('session-start').hookSpecificOutput.additionalContext;
+  const after = renderIdentityDirective({ identity:'Pinned', expose_local:false });
   assert.equal(before, after, 'a local directory is not an authority for identity existence');
   assert.match(after, /suggestion, not an authorization/);
   assert.match(after, /daemon tools/);
@@ -29,7 +31,7 @@ test('workspace pin advice does not classify existence or authorize actions', (t
   assert.match(after, /explicitly confirm/);
   assert.match(after, /persona.*do NOT adopt/s);
   assert.match(after, /only pass force=true after they confirm/);
-  assert.equal(run('user-prompt-submit').hookSpecificOutput.additionalContext, after);
+  assert.equal(run('user-prompt-submit').hookSpecificOutput, undefined);
   assert.equal(run('session-start', { source: 'compact' }).hookSpecificOutput, undefined);
   writeFileSync(join(state, 'bindings.json'), JSON.stringify({ pid: process.pid, bound: ['Other'] }));
   assert.equal(run('user-prompt-submit').hookSpecificOutput, undefined,

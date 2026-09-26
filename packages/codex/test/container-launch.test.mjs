@@ -9,9 +9,9 @@ import { fileURLToPath } from 'node:url';
 
 for (const plugin of ['codex', 'claude-code']) {
   for (const [scenario, contents, mode, reason] of [
-    ['partial legacy tuple', JSON.stringify({ composeFile: '/compose.yml', expectedInstanceId: 'legacy' }), 0o600, /complete host profile/],
-    ['public profile', JSON.stringify({ endpoint: 'http://127.0.0.1:1', expectedInstanceId: '00000000-0000-0000-0000-000000000001', credentialPath: '/private/token' }), 0o644, /private permissions/],
-    ['corrupt profile', '{"composeFile":', 0o600, /not valid JSON/],
+    ['partial legacy tuple', JSON.stringify({ composeFile: '/compose.yml', expectedInstanceId: 'legacy' }), 0o600, /gateway client profile/],
+    ['public profile', JSON.stringify({ endpoint: 'http://127.0.0.1:1', expectedInstanceId: '00000000-0000-0000-0000-000000000001', credentialPath: '/private/token' }), 0o644, /unsafe|0600/],
+    ['corrupt profile', '{"composeFile":', 0o600, /invalid JSON/],
   ]) test(`${plugin} refuses ${scenario} without invoking Docker or falling back`, () => {
     const dir = mkdtempSync(join(tmpdir(), 'ours-legacy-profile-refusal-'));
     try {

@@ -58,7 +58,7 @@ test('built Codex entrypoints use the declared local MCP package', async () => {
     mkdirSync(dirname(hostConfig), { recursive: true });
     writeFileSync(credential, 'client-token\n', { mode: 0o600 });
     writeFileSync(profile, JSON.stringify({
-      endpoint: 'http://127.0.0.1:4050',
+      serverUrl: 'http://127.0.0.1:4050', endpoint: 'http://127.0.0.1:4050/daemon',
       expectedInstanceId: 'b282ca8e-72d2-48cc-a948-b3c1a62129f5',
       credentialPath: credential,
     }), { mode: 0o600 });

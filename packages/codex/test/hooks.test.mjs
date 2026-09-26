@@ -14,14 +14,11 @@ test('SessionStart registers the thread and injects body-free unread context', a
   const stateDir = join(home, 'state');
   const appConfig = join(home, 'ours-mcp.json');
   writeFileSync(appConfig, JSON.stringify({ version: 1, daemons: { [stateDir]: { identities: ['Alice'] } } }));
+  writeFileSync(join(home, 'profile.json'), JSON.stringify({ serverUrl: 'http://gateway.test', expectedInstanceId: '11111111-2222-3333-4444-555555555555', credentialPath: join(home,'credential') }), { mode:0o600 });
   const result = await handleHook({ hook_event_name: 'SessionStart', source: 'startup', session_id: 'thr', cwd: '/repo' }, {
-    env: { HOME: home, OURS_CODEX_CONTROL_SOCKET: '/tmp/s', OURS_CODEX_CAPABILITY: 'cap', OURS_PORT: '4050', OURS_STATE_DIR: stateDir, OURS_API_TOKEN: 'tok', OURS_MCP_CONFIG: appConfig },
+    env: { HOME: home, OURS_CONFIG: join(home, 'profile.json'), OURS_CODEX_CONTROL_SOCKET: '/tmp/s', OURS_CODEX_CAPABILITY: 'cap', OURS_MCP_CONFIG: appConfig },
     send: async (...args) => { commands.push(args); return { state: {} }; },
-    fetch: async (url) => String(url).endsWith('/state-dir')
-      ? Response.json({ stateDir, version: '2.0.1', compat: 1 })
-      : String(url).endsWith('/info')
-        ? Response.json({ name: 'ours', protocol: 1, stateDir })
-        : Response.json({ identities: [{ name: 'Alice', count: 2, recent: [{ from: 'Bob', msg_id: 1, date: 'today', body: 'SECRET' }] }] }),
+    readHostState: async () => ({ unread: { identities: [{ name: 'Alice', count: 2, files: 0 }] } }),
     findPin: async () => ({ identity: 'Alice' }),
   });
   assert.equal(commands[0][2].command, 'register_session');
@@ -77,7 +74,7 @@ for (const managed of [false, true]) test(`${managed ? 'managed' : 'explicit'} p
   const profilePath = managed ? join(home, '.ours-client', 'profile.json') : join(home, 'profile.json');
   const instanceId = '12345678-1234-1234-1234-123456789abc';
   writeFileSync(appConfig, JSON.stringify({ version: 1, daemons: {}, instances: { [instanceId]: { identities: ['Mallory'] } } }));
-  writeFileSync(profilePath, JSON.stringify({ endpoint: 'http://127.0.0.1:4050', expectedInstanceId: instanceId, credentialPath: join(home, 'token') }), { mode: 0o600 });
+  writeFileSync(profilePath, JSON.stringify({ serverUrl: 'http://127.0.0.1:4050', endpoint: 'http://127.0.0.1:4050/daemon', expectedInstanceId: instanceId, credentialPath: join(home, 'token') }), { mode: 0o600 });
   const calls = [];
   const result = await handleHook({ hook_event_name: 'UserPromptSubmit', session_id: 'thread-a', cwd: '/repo' }, {
     env: { HOME: home, ...(managed ? {} : { OURS_CONFIG: profilePath }), OURS_MCP_CONFIG: appConfig },
@@ -95,7 +92,7 @@ for (const managed of [false, true]) test(`${managed ? 'managed' : 'explicit'} p
 test('explicit profile resolution failure never falls back to legacy unread', async () => {
   const home = mkdtempSync(join(tmpdir(), 'ours-codex-profile-failure-'));
   const profilePath = join(home, 'profile.json');
-  writeFileSync(profilePath, JSON.stringify({ endpoint: 'http://127.0.0.1:4050', expectedInstanceId: '12345678-1234-1234-1234-123456789abc', credentialPath: join(home, 'token') }), { mode: 0o600 });
+  writeFileSync(profilePath, JSON.stringify({ serverUrl: 'http://127.0.0.1:4050', endpoint: 'http://127.0.0.1:4050/daemon', expectedInstanceId: '12345678-1234-1234-1234-123456789abc', credentialPath: join(home, 'token') }), { mode: 0o600 });
   let fetched = false;
   const result = await handleHook({ hook_event_name: 'UserPromptSubmit', cwd: '/repo' }, {
     env: { HOME: home, OURS_CONFIG: profilePath },
@@ -113,7 +110,7 @@ test('network profile never invokes the obsolete Docker application-identity rou
   try {
     const profile = join(dir, 'profile.json');
     const marker = join(dir, 'docker-called');
-    writeFileSync(profile, JSON.stringify({ endpoint: 'http://localhost:3050', expectedInstanceId: '12345678-1234-1234-1234-123456789abc', credentialPath: '/token', composeFile: '/compose.yml' }), { mode: 0o600 });
+    writeFileSync(profile, JSON.stringify({ serverUrl: 'http://localhost:3050', endpoint: 'http://localhost:3050/daemon', expectedInstanceId: '12345678-1234-1234-1234-123456789abc', credentialPath: '/token', composeFile: '/compose.yml' }), { mode: 0o600 });
     const appConfig = join(dir, 'host.json');
     writeFileSync(appConfig, JSON.stringify({ version: 1, daemons: {}, instances: { '12345678-1234-1234-1234-123456789abc': { identities: ['HostOnly'] } } }));
     writeFileSync(join(dir, 'docker'), `#!${process.execPath}\nimport fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(marker)}, 'called'); process.exit(41);`);

@@ -11,7 +11,7 @@ for (const plugin of ['codex', 'claude-code']) test(`${plugin} discovers local t
   const home = mkdtempSync(join(tmpdir(), 'ours-local-tools-'));
   const config = join(home, 'profile.json');
   writeFileSync(join(home, 'token'), 'test-only', { mode: 0o600 });
-  writeFileSync(config, JSON.stringify({ endpoint: 'http://127.0.0.1:1', expectedInstanceId: '12345678-1234-1234-1234-123456789abc', credentialPath: join(home, 'token') }), { mode: 0o600 });
+  writeFileSync(config, JSON.stringify({ serverUrl: 'http://127.0.0.1:1', endpoint: 'http://127.0.0.1:1/daemon', expectedInstanceId: '12345678-1234-1234-1234-123456789abc', credentialPath: join(home, 'token') }), { mode: 0o600 });
   const transport = new StdioClientTransport({ command: process.execPath, args: [process.env.OURS_TEST_PLUGIN_ROOT ? join(process.env.OURS_TEST_PLUGIN_ROOT, plugin, 'bin/proxy.mjs') : fileURLToPath(new URL(`../../${plugin}/bin/proxy.mjs`, import.meta.url))], env: { PATH: process.env.PATH, HOME: home, OURS_CONFIG: config, OURS_MCP_CONFIG: join(home, 'identities.json'), CLAUDE_CODE_SESSION_ID: 'test-chat' }, stderr: 'pipe' });
   const client = new Client({ name: 'local-tools-test', version: '1' });
   try {

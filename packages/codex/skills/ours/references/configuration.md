@@ -1,26 +1,24 @@
-# ours daemon configuration
+# Shared gateway client configuration
 
-ours-mcp is a client of one already-running shared daemon. The operator CLI owns
-configuration and lifecycle:
+Fleet, ours CLI, MCP and harness hooks select one server through
+`~/.ours-client/profile.json`. `serverUrl` names the HTTP(S) gateway, with
+optional base path. Daemon operations use `/daemon`; Cowork uses `/cowork`.
+The profile also pins `expectedInstanceId` and an absolute `credentialPath`.
+An optional `endpoint` must equal `serverUrl + "/daemon"`.
 
-```sh
-ours config show --json
-ours config setup --port 3050 --state-dir "$HOME/.ours"
-ours daemon start
-ours daemon status --json
-```
+Import a prepared private profile with `ours-install client --config /absolute/profile.json`.
+Use `ours config show --json` to inspect connection metadata without reading the token.
+Keep the profile directory mode 0700 and files mode 0600. `OURS_CONFIG` may
+select the same whole profile for all clients. Remove legacy `OURS_PORT`,
+`OURS_STATE_DIR`, `OURS_API_TOKEN` and `OURS_DAEMON_ID` overrides.
 
-The MCP adapter and `ours-codex` use the published SDK's coherent selection. The
-wholly default selection is port 3050 with state directory `~/.ours`. For another
-daemon, set `OURS_CONFIG`, or set matching `OURS_PORT` and `OURS_STATE_DIR`. A
-token or endpoint selection must be paired with its state directory. `/state-dir`
-is verified before credentials are sent.
+Missing profiles, rejected credentials and unavailable gateways fail closed.
+Clients never read daemon state, start a daemon, or try a local port/socket.
+Hooks use the same gateway and return a harmless no-op on failure. Their
+application-local identity/session files do not select another server.
 
-The adapter never starts a daemon and never falls back to an embedded one.
-`OURS_INSTANCE`, `--application`, and old ours-mcp daemon variables are errors.
-Standard and live Codex mode use the same selection; live mode only adds an
-explicitly armed, session-scoped wake monitor.
-
-Changing daemon configuration or restarting the shared daemon affects every
-connected application. Explain that blast radius and obtain the user's consent
-before making operator-level changes.
+For full-stack setup, a custom public port (such as 4050), systemd propagation
+and migration, see the [gateway setup guide](https://github.com/adapt-toolkit/ours-network/blob/prerelease/packages/installer/GATEWAY_SETUP.md).
+The coordinated gateway changes require approved matching package releases;
+current npm nightly is not automatically evidence that these changes are installed.
+Server administration uses `ours-install server` on the server host.

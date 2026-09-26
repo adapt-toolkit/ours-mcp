@@ -5,12 +5,7 @@
 //
 //   node ${CLAUDE_PLUGIN_ROOT}/dist/hooks/runner.js session-start
 //
-// session-start surfaces the per-identity UNREAD backlog by reading each
-// identity's on-disk unread.json snapshot DIRECTLY (no MCP / network call), so a
-// resuming agent notices mail that arrived while it was away. The snapshot is
-// content-free (sender + id + date, no body) and is re-derived by the daemon from
-// the identity history database — the authority on unread/read state — so the backlog clears
-// itself once the agent calls get_messages.
+// Hooks read body-free metadata through the shared gateway profile.
 //
 // Hooks must stay fast and must never block the session: any error is swallowed
 // and we emit a benign {continue:true}.
@@ -22,32 +17,6 @@ import { fileURLToPath } from 'node:url';
 import { resolve, join, dirname } from 'node:path';
 
 type HookKind = 'session-start' | 'user-prompt-submit';
-
-function readJsonObject(path: string): Record<string, unknown> {
-  const value = JSON.parse(fs.readFileSync(path, 'utf8')) as unknown;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${path} must contain an object`);
-  return value as Record<string, unknown>;
-}
-
-// Hooks read body-free metadata directly, using the same explicit daemon
-// selection as the SDK-backed proxy.
-function hookStateDir(): string {
-  if (process.env.OURS_STATE_DIR) return resolve(process.env.OURS_STATE_DIR);
-  const home = homedir();
-  if (process.env.OURS_CONFIG) {
-    const config = readJsonObject(process.env.OURS_CONFIG);
-    return resolve(typeof config.stateDir === 'string' ? config.stateDir : join(home, '.ours'));
-  }
-  if (process.env.OURS_PORT || process.env.OURS_API_TOKEN) {
-    throw new Error('explicit port/token requires OURS_STATE_DIR or OURS_CONFIG');
-  }
-  return resolve(home, '.ours');
-}
-
-const STATE_DIR: string | null = (() => {
-  try { return hookStateDir(); }
-  catch { return null; } // corrupt explicit selection: fail closed with a benign hook no-op
-})();
 
 // A workspace can pin itself to an identity by dropping this file at the repo
 // root (NOT under .claude/ — keeping it top-level lets users gitignore it by its
@@ -86,57 +55,9 @@ async function loadNetworkState(payload: Record<string, unknown>): Promise<boole
   return true;
 }
 
-// The daemon writes a content-free unread snapshot per identity (unread.json),
-// re-derived from the identity history database (the authority for unread/read state) after each
-// change. We just read it — no message bodies ever touch this hook.
-function readUnreadSnapshot(dir: string): Unread | null {
-  let raw: string;
-  try {
-    raw = fs.readFileSync(join(dir, 'unread.json'), 'utf8');
-  } catch {
-    return null;
-  }
-  try {
-    const snap = JSON.parse(raw);
-    const count = Number(snap.count ?? 0);
-    if (!count) return null;
-    const recent: NotifyMeta[] = Array.isArray(snap.recent)
-      ? snap.recent.map((m: { from?: unknown; msg_id?: unknown; date?: unknown }) => ({
-          from: String(m.from ?? '?'),
-          msg_id: (m.msg_id as number | string) ?? '?',
-          date: String(m.date ?? ''),
-        }))
-      : [];
-    return { name: '', count, recent };
-  } catch {
-    return null;
-  }
-}
-
 function collectUnread(): Unread[] {
-  if (containerState) return containerState.unread.identities.filter((entry) =>
-    typeof entry.name === 'string' && Number.isSafeInteger(entry.count) && entry.count > 0 && Array.isArray(entry.recent));
-  if (!STATE_DIR) return [];
-  let names: string[];
-  try {
-    const appPath = process.env.OURS_MCP_CONFIG || join(homedir(), '.ours-mcp', 'config.json');
-    const config = readJsonObject(appPath);
-    if (config.version !== 1) throw new Error('unsupported ours-mcp application identity config version');
-    const daemons = config.daemons as Record<string, unknown> | undefined;
-    const selected = daemons?.[resolve(STATE_DIR)] as { identities?: unknown } | undefined;
-    names = Array.isArray(selected?.identities)
-      ? selected.identities.filter((name): name is string => typeof name === 'string' && name.length > 0)
-      : [];
-  } catch {
-    return [];
-  }
-  const out: Unread[] = [];
-  for (const name of names) {
-    const snap = readUnreadSnapshot(join(STATE_DIR, name));
-    if (!snap) continue;
-    out.push({ ...snap, name });
-  }
-  return out;
+  return containerState?.unread.identities.filter((entry) =>
+    typeof entry.name === 'string' && Number.isSafeInteger(entry.count) && entry.count > 0 && Array.isArray(entry.recent)) ?? [];
 }
 
 function watchCommand(identity: string): string {
@@ -213,33 +134,8 @@ function findPinnedIdentity(start: string): IdentityPin | null {
   }
 }
 
-// The server persists a content-free binding snapshot ({pid, bound: [names]})
-// on every binding change. A binding counts only if the snapshot lists one AND
-// the writing server is still alive — a dead pid means the file is a leftover
-// from a crash and nothing is actually bound.
-//
-// The pin is a DEFAULT, not a straitjacket: any live binding — the pinned
-// identity or a different one the user explicitly chose — suppresses the nag.
-// (Tradeoff: bindings are daemon-global, so a concurrent session's binding also
-// suppresses it; the session-start directive still covers that session.)
 function anyIdentityBound(): boolean {
-  if (containerState) return containerState.bindings.length > 0;
-  if (!STATE_DIR) return false;
-  let snap: { pid?: unknown; bound?: unknown };
-  try {
-    snap = JSON.parse(fs.readFileSync(join(STATE_DIR, 'bindings.json'), 'utf8'));
-  } catch {
-    return false;
-  }
-  if (!Array.isArray(snap.bound) || snap.bound.length === 0) return false;
-  const pid = Number(snap.pid);
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
+  return (containerState?.bindings.length ?? 0) > 0;
 }
 
 // CONSENT-FIRST: the pin file is ADVISORY. Its presence (or a change to it)
@@ -249,7 +145,7 @@ function anyIdentityBound(): boolean {
 // persona as the agent's operating mode. The only thing a `force` pin pre-authorizes is
 // skipping the SECOND question (evicting another holder) once the user has
 // already said yes to binding.
-function renderIdentityDirective(pin: IdentityPin): string {
+export function renderIdentityDirective(pin: IdentityPin): string {
   const name = pin.identity;
   const extras: string[] = [];
   if (pin.expose_local !== undefined) extras.push(`expose_local: ${pin.expose_local}`);
@@ -370,4 +266,4 @@ async function main(): Promise<void> {
   }
 }
 
-void main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void main();
