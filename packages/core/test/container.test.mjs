@@ -13,12 +13,12 @@ test('package entrypoint preserves target validation and private file roundtrip'
   const entry = new URL('../dist/container.js', import.meta.url);
   const run = (command, args = [], input, id = expected) => spawnSync(process.execPath,
     [entry.pathname, id, command, ...args], {
-      env: { ...process.env, OURS_STATE_DIR: state, OURS_DAEMON_ID: expected },
+      env: { ...process.env, OURS_CONFIG: join(state, '.mcp/profile.json'), OURS_MCP_CONFIG: join(state, '.mcp/config.json'), OURS_STATE_DIR: undefined, OURS_DAEMON_ID: undefined },
       input, encoding: 'utf8', timeout: 5000,
     });
   try {
     mkdirSync(join(state, '.mcp'), { mode: 0o700 });
-    writeFileSync(join(state, '.mcp/profile.json'), JSON.stringify({ expectedInstanceId: expected }), { mode: 0o600 });
+    writeFileSync(join(state, '.mcp/profile.json'), JSON.stringify({serverUrl:'http://gateway.test', expectedInstanceId: expected, credentialPath:join(state,'credential')}), { mode: 0o600 });
     const id = randomUUID();
     const staged = run('file-stage', [id, 'input.bin'], 'bytes\u0000\n');
     assert.equal(staged.status, 0, staged.stderr);
@@ -36,7 +36,7 @@ test('package entrypoint preserves target validation and private file roundtrip'
     assert.notEqual(run('file-target', ['../outside']).status, 0);
     assert.notEqual(run('file-stage', [randomUUID(), '../outside'], 'bad').status, 0);
     assert.match(run('file-target', [randomUUID()], undefined, randomUUID()).stderr, /target does not match/);
-    writeFileSync(join(state, '.mcp/profile.json'), JSON.stringify({ expectedInstanceId: randomUUID() }));
-    assert.match(run('file-target', [randomUUID()]).stderr, /profile does not match/);
+    writeFileSync(join(state, '.mcp/profile.json'), JSON.stringify({serverUrl:'http://gateway.test', expectedInstanceId: randomUUID(), credentialPath:join(state,'credential')}));
+    assert.match(run('file-target', [randomUUID()]).stderr, /target does not match/);
   } finally { rmSync(state, { recursive: true, force: true }); }
 });

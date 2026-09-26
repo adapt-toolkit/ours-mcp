@@ -15,6 +15,7 @@ function fixture(failAdd = false, orphanedMarker = false) {
   const bin = join(dir, 'bin'); const codex = join(dir, '.codex'); const skills = join(dir, '.agents/skills');
   mkdirSync(bin, { recursive: true }); mkdirSync(skills, { recursive: true }); mkdirSync(codex, { recursive: true });
   const fake = `#!/usr/bin/env bash\necho "$*" >> "${dir}/codex.log"\ncase "$*" in *"plugin add"*) exit ${failAdd ? 1 : 0};; esac\nexit 0\n`;
+  for (const name of ['ours','ours-mcp']) { writeFileSync(join(bin,name),'#!/usr/bin/env bash\necho ours.gateway-client-profile-v1\nexit 0\n'); chmodSync(join(bin,name),0o755); }
   writeFileSync(join(bin, 'codex'), fake); chmodSync(join(bin, 'codex'), 0o755);
   writeFileSync(join(codex, 'config.toml'), orphanedMarker
     ? 'before\n[mcp_servers.ours]\ncommand="ours-mcp"\n[mcp_servers.ours.tools.get_messages]\napproval_mode="approve"\n[mcp_servers.keep]\ncommand="keep"\n# <<< ours.network plugin\nafter\n'

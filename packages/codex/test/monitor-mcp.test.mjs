@@ -8,8 +8,7 @@ import {
 
 test('exposes background and foreground monitor tools', () => {
   assert.deepEqual(monitorToolNames, ['arm_monitor', 'foreground_monitor', 'disarm_monitor', 'monitor_status']);
-  const watch = foregroundWatchProcess('Alice', undefined, {});
-  assert.deepEqual(watch.args.slice(-2), ['watch', 'Alice']);
+  assert.throws(() => foregroundWatchProcess('Alice', undefined, { OURS_CONFIG: '/missing' }), /gateway client profile/);
 });
 
 test('standard mode is informative and live mode uses private control channel', async () => {
@@ -57,7 +56,7 @@ test('foreground monitor can be interrupted', async () => {
   child.killed = false;
   child.kill = () => { child.killed = true; return true; };
   const controller = new AbortController();
-  const waiting = waitForForegroundMail('Alice', 'thread-a', { spawnImpl: () => child, signal: controller.signal });
+  const waiting = waitForForegroundMail('Alice', 'thread-a', { commandFor: () => ({command:'fixture',args:[]}), spawnImpl: () => child, signal: controller.signal });
   controller.abort();
   await assert.rejects(waiting, /stopped/);
   assert.equal(child.killed, true);
@@ -71,7 +70,7 @@ test('foreground watch uses the package-local network client for a selected host
   try {
     const profile = join(dir, 'profile.json');
     writeFileSync(profile, JSON.stringify({
-      endpoint: 'http://127.0.0.1:4050',
+      serverUrl: 'http://127.0.0.1:4050', endpoint: 'http://127.0.0.1:4050/daemon',
       expectedInstanceId: 'b282ca8e-72d2-48cc-a948-b3c1a62129f5',
       credentialPath: join(dir, 'credential'),
     }), { mode: 0o600 });
@@ -89,7 +88,7 @@ test('selected host foreground watch rejects missing native session metadata', a
   const dir = mkdtempSync(join(tmpdir(), 'ours-watch-session-'));
   try {
     const profile = join(dir, 'profile.json');
-    writeFileSync(profile, JSON.stringify({ endpoint: 'http://127.0.0.1:4050', expectedInstanceId: 'b282ca8e-72d2-48cc-a948-b3c1a62129f5', credentialPath: join(dir, 'credential') }), { mode: 0o600 });
+    writeFileSync(profile, JSON.stringify({ serverUrl: 'http://127.0.0.1:4050', endpoint: 'http://127.0.0.1:4050/daemon', expectedInstanceId: 'b282ca8e-72d2-48cc-a948-b3c1a62129f5', credentialPath: join(dir, 'credential') }), { mode: 0o600 });
     assert.throws(() => foregroundWatchProcess('Alice', undefined, { OURS_CONFIG: profile }), /Native session metadata/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

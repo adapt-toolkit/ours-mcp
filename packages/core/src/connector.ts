@@ -167,23 +167,16 @@ async function attachConnector(options: ConnectorOptions, env: NodeJS.ProcessEnv
     return { client, endpoint: profile.endpoint, identities };
   }
 
-  if (hostProfileFromEnv(env) !== null) throw new Error('External owner context is required.');
-  const selection = resolveDaemonConfig();
-  const identities = new ApplicationIdentityStore(selection.expectStateDir);
-  await identities.list();
-  const client = await attachOursClient({
-    leaseToken: options.leaseToken,
-    clientPid: options.clientPid,
-  });
-  return { client, endpoint: selection.baseUrl.value, identities };
+  throw new Error('External owner context and a gateway profile are required.');
 }
 
 export async function runConnector(options: ConnectorOptions): Promise<void> {
   let client: OursClient | undefined;
   let identities: ApplicationIdentityStore;
   let endpoint: string;
-  const nativeProfile = options.selection === undefined ? hostProfileFromEnv(process.env) : null;
+  let nativeProfile: ReturnType<typeof hostProfileFromEnv> | null = null;
   try {
+    nativeProfile = options.selection === undefined ? hostProfileFromEnv(process.env) : null;
     if (nativeProfile) {
       identities = new ApplicationIdentityStore({ instanceId: nativeProfile.expectedInstanceId });
       await identities.list();
@@ -198,6 +191,7 @@ export async function runConnector(options: ConnectorOptions): Promise<void> {
     const reason = error instanceof Error ? error.message : String(error);
     log(reason);
     await refuseOverStdio(reason, options.version);
+    process.exitCode = 1;
     return;
   }
 

@@ -72,8 +72,12 @@ async function connectProxy(env, name) {
 async function stopProxy(proxy) {
   if (!proxy || proxy.child.exitCode !== null) return;
   try { proxy.child.stdin.end(); } catch { /* already closed */ }
-  await Promise.race([once(proxy.child, 'exit'), pause(1000)]).catch(() => {});
-  if (proxy.child.exitCode === null) proxy.child.kill('SIGKILL');
+  await Promise.race([once(proxy.child, 'exit'), pause(5000)]).catch(() => {});
+  if (proxy.child.exitCode === null) {
+    proxy.child.kill('SIGKILL');
+    assert.fail('gateway-attached proxy must exit on stdin EOF');
+  }
+  assert.equal(proxy.child.exitCode, 0);
 }
 
 async function sessionEnd(env, sessionId) {
@@ -153,7 +157,7 @@ try {
     once(gateway.stdout, 'data'),
     once(gateway, 'exit').then(() => { throw new Error('gateway exited before readiness'); }),
   ]);
-  writeFileSync(profilePath, JSON.stringify({ endpoint: `http://127.0.0.1:${gatewayPort}/base/daemon`, expectedInstanceId, credentialPath }), { mode: 0o600 });
+  writeFileSync(profilePath, JSON.stringify({ serverUrl: `http://127.0.0.1:${gatewayPort}/base`, endpoint: `http://127.0.0.1:${gatewayPort}/base/daemon`, expectedInstanceId, credentialPath }), { mode: 0o600 });
   const proxyEnv = {
     ...process.env,
     OURS_CONFIG: profilePath,
@@ -193,6 +197,11 @@ try {
   const currentA = await proxy.call('current_identity', {}, sessionA);
   assert.match(JSON.stringify(currentA), /NativePermanent/, 'selector A binding survives selector B calls');
 
+  const switchedTemp = await proxy.call('create_temporary_identity', {
+    name: 'SwitchedTemporary', bio: '', expose_local: false, local_auto_accept: true,
+  }, sessionA);
+  assert.equal(switchedTemp.result?.isError, false, JSON.stringify(switchedTemp));
+
   const temporaryA = await proxy.call('create_temporary_identity', {
     name: 'NativeTemporary', bio: '', expose_local: false, local_auto_accept: true,
   }, sessionA);
@@ -211,13 +220,41 @@ try {
   assert.ok(ownerFor(hostState, expectedInstanceId, ownerA));
   assert.ok(ownerFor(hostState, expectedInstanceId, ownerB));
 
+  const savedProfile = readFileSync(profilePath);
+  const beforeInvalid = readFileSync(ownerFor(hostState, expectedInstanceId, ownerA).path, 'utf8');
+  try {
+    for (const invalid of [null, '{}']) {
+      if (invalid === null) rmSync(profilePath); else writeFileSync(profilePath, invalid, {mode:0o600});
+      const result = spawnSync(process.execPath, [cli, 'session-end'], {
+        env: proxyEnv, input: JSON.stringify({session_id:sessionA}), encoding:'utf8', timeout:5000,
+      });
+      assert.equal(result.error, undefined);
+      assert.notEqual(result.status, 0, 'missing/invalid profile must refuse terminal cleanup');
+      assert.equal(readFileSync(ownerFor(hostState, expectedInstanceId, ownerA).path, 'utf8'), beforeInvalid, 'failed profile resolution retains owner state');
+      assert.ok(existsSync(join(daemonState, 'NativeTemporary')), 'invalid profile cannot delete server identity state');
+    }
+  } finally { writeFileSync(profilePath, savedProfile, {mode:0o600}); }
   await sessionEnd(proxyEnv, sessionA);
   assert.ok(!existsSync(join(daemonState, 'NativeTemporary')), 'exact SessionEnd removes owned temporary state');
+  assert.ok(!existsSync(join(daemonState, 'SwitchedTemporary')), 'SessionEnd also removes switched-away temporary identities');
   assert.ok(existsSync(join(daemonState, 'NativePermanent')), 'SessionEnd preserves permanent state');
   assert.ok(existsSync(join(daemonState, 'NativeSibling')), 'SessionEnd preserves sibling state');
   assert.equal(ownerFor(hostState, expectedInstanceId, ownerA).value.state, 'ended');
   await sessionEnd(proxyEnv, sessionA);
   assert.equal(ownerFor(hostState, expectedInstanceId, ownerA).value.state, 'ended', 'duplicate SessionEnd is idempotent');
+
+  for (const [seed, expected] of [['NativePermanent', 'NativePermanent'], ['Nobody', 'No identity bound'], ['NativeSibling', 'No identity bound']]) {
+    const seedSession = randomUUID();
+    const seedProxy = await connectProxy({ ...proxyEnv, OURS_BIND_IDENTITY: seed }, 'gateway-seed');
+    try {
+      const result = await seedProxy.call('current_identity', {}, seedSession);
+      assert.equal(result.result?.isError, false, JSON.stringify(result));
+      assert.match(JSON.stringify(result), new RegExp(expected), 'seed binds available identity and never evicts another owner');
+      const sibling = await proxy.call('current_identity', {}, sessionB);
+      assert.match(JSON.stringify(sibling), /NativeSibling/, 'seed refusal preserves the live owner');
+      await sessionEnd(proxyEnv, seedSession);
+    } finally { await stopProxy(seedProxy); }
+  }
 
   const resumedA = await proxy.call('current_identity', {}, sessionA);
   assert.equal(resumedA.result?.isError, false, JSON.stringify(resumedA));
@@ -265,7 +302,7 @@ try {
   const containerEntry = fileURLToPath(new URL('../dist/container.js', import.meta.url));
   for (const command of ['version', 'application-identities', 'hook-state', 'watch']) {
     const result = spawnSync(process.execPath, [containerEntry, expectedInstanceId, command], {
-      env: { ...proxyEnv, OURS_STATE_DIR: containerState, OURS_DAEMON_ID: expectedInstanceId },
+      env: { ...proxyEnv, OURS_CONFIG: join(containerState, '.mcp/profile.json'), OURS_MCP_CONFIG: join(containerState, '.mcp/config.json') },
       input: '', encoding: 'utf8', timeout: 10000,
     });
     assert.equal(result.status, 0, `${command}: ${result.stderr}`);

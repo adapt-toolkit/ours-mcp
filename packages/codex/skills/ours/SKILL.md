@@ -108,12 +108,12 @@ existing file.
    **control-plane monitoring proxy is not available in this release** — there is no tool
    to call. See "Control plane" below.
 
-- **Configuration.** Port, state dir, broker, and GC interval are configurable.
-  More than one daemon may run when each uses a distinct port and state directory.
-  Select live mode with `ours-codex --ours-port <port>` or `OURS_CONFIG`. Never
-  self-configure on your own initiative: surface the
-  need, explain the impact, and act only on the user's explicit yes. Details:
-  `references/configuration.md`.
+- **Configuration.** Every client selects the HTTP gateway through
+  `~/.ours-client/profile.json` (or the whole-profile `OURS_CONFIG` override).
+  `serverUrl` is the base URL; daemon and Cowork use `/daemon` and `/cowork`
+  beneath it. Import the issued credential with `ours-install client`.
+  Local daemon ports, state directories, and Unix sockets are not client routes.
+  Missing or invalid configuration fails closed. See `references/configuration.md`.
 
 ## ours-fleet — persistent harness roles
 

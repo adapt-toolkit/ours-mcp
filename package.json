@@ -18,6 +18,6 @@
   },
   "devDependencies": {
     "@adapt-toolkit/broker": "0.10.12",
-    "@ours.network/sdk": "3.8.1-nightly.11"
+    "@ours.network/sdk": "3.8.1-nightly.13"
   }
 }

@@ -33,7 +33,7 @@ export function planTomlInstall(text) {
 }
 
 // Render the managed TOML block: the `ours` MCP server pointing at the globally-installed
-// daemon proxy (`ours-mcp proxy`). Equivalent to `codex mcp add ours -- ours-mcp proxy`.
+// gateway client (`ours-mcp proxy`). Equivalent to `codex mcp add ours -- ours-mcp proxy`.
 export function renderTomlBlock() {
   return `${SENTINEL}
 # Added by @ours.network/codex install.sh. Remove this whole block to uninstall.
@@ -41,9 +41,9 @@ export function renderTomlBlock() {
 [mcp_servers.ours]
 command = "ours-mcp"
 args = ["proxy"]
-# Optional per-server environment overrides go here, e.g.:
+# Optional whole shared gateway profile override:
 # [mcp_servers.ours.env]
-# OURS_PORT = "3050"
+# OURS_CONFIG = "/absolute/private/path/profile.json"
 ${SENTINEL_END}
 `;
 }

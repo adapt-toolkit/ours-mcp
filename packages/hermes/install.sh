@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the ours.network plugin into Hermes:
-#   1. ensure the ours operator CLI and MCP adapter are installed; start the shared daemon
+#   1. verify the installed gateway client profile before modifying plugin configuration
 #   2. install the ours + writing-agent-bios skills into ~/.hermes/skills/
 #   3. write the `ours` MCP server into ~/.hermes/config.yaml (idempotent, never corrupts
 #      existing YAML)
@@ -10,7 +10,6 @@
 #
 # Idempotent: safe to re-run. Test/CI knobs (all optional):
 #   HERMES_DIR                 config+skills root         (default ~/.hermes)
-#   OURS_INSTALL_SKIP_DAEMON=1 skip daemon install/start
 set -euo pipefail
 
 SELFDIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,30 +23,17 @@ MANAGED_SENTINEL_END='# <<< ours.network plugin'
 
 say(){ printf 'ours-install: %s\n' "$1"; }
 
-# Ensure the ours daemon is on @latest (UPGRADE, not install-if-missing): an already-present
-# daemon must still be pulled up to the newest published version — that is the whole point of a
-# re-run. Record the CLI version before/after; start if not running, restart only if the version
-# actually changed, so the RUNNING daemon always ends on latest.
-ensure_daemon_latest(){
-  if [ "${OURS_INSTALL_SKIP_DAEMON:-}" = "1" ]; then say "skipping daemon step (OURS_INSTALL_SKIP_DAEMON=1)"; return 0; fi
-  local before after
-  before="$(ours version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-  say "ensuring @ours.network/cli@latest and @ours.network/mcp@latest…"
-  npm i -g @ours.network/cli@latest @ours.network/mcp@latest
-  after="$(ours version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-  if ! ours daemon status >/dev/null 2>&1; then
-    say "starting the ours daemon…"
-    if ! ours daemon start; then say "could not start the ours daemon; installation stopped."; return 1; fi
-  elif [ -n "$before" ] && [ "$before" != "$after" ]; then
-    say "operator CLI upgraded (v${before} → v${after}) — restarting its daemon…"
-    if ! ours daemon restart; then
-      say "restart failed; trying a clean start…"
-      if ! ours daemon start; then say "could not restart or start the upgraded daemon; installation stopped."; return 1; fi
-    fi
-  else
-    say "daemon already current (v${after:-unknown})."
+# Client installation never installs, starts or restarts server services.
+require_gateway_client(){
+  if ! command -v ours >/dev/null 2>&1 || ! command -v ours-mcp >/dev/null 2>&1; then
+    say "Install gateway clients with ours-install client first; ours and ours-mcp are required."
+    return 1
   fi
-  say "operator CLI: $(command -v ours) (v${after:-unknown}); MCP adapter: $(command -v ours-mcp)"
+  local contract
+  if ! contract="$(ours-mcp verify-client-profile)" || [ "$contract" != "ours.gateway-client-profile-v1" ]; then
+    say "Configure the shared gateway profile with ours-install client first; plugin setup was left unchanged."
+    return 1
+  fi
 }
 
 # Idempotent, GUARDED cleanup of legacy connector-era artifacts earlier (0.2.0/0.3.0) installers
@@ -74,8 +60,8 @@ legacy_cleanup(){
   fi
 }
 
-# --- 1) daemon (ensure @latest + restart on change) ---
-ensure_daemon_latest
+# --- 1) shared gateway client preflight ---
+require_gateway_client
 
 # --- 1b) legacy connector-era cleanup (idempotent, guarded) ---
 legacy_cleanup
@@ -95,11 +81,5 @@ HERMES_CONFIG="$HERMES_CONFIG" node "$SELFDIR/bin/hermes-config-install.mjs" || 
 }
 
 say "done. Run /reload-mcp in Hermes to load the mcp_ours_* tools."
-# --- version echo: show the user they are on latest ---
-if [ "${OURS_INSTALL_SKIP_DAEMON:-}" != "1" ]; then
-  say "versions:"
-  say "  MCP adapter: $(ours-mcp --version 2>/dev/null | head -1 || echo 'unknown')"
-  say "  plugin: $(npm ls -g @ours.network/hermes 2>/dev/null | grep -oE '@ours\.network/hermes@[0-9][0-9.]*' | head -1 || echo '@ours.network/hermes (not a global install)')"
-fi
 say "next: in your agent, bind (or create) an identity and ask the ours skill to \"wake me on new"
 say "      mail\" — it tails ours-mcp watch in-session and reacts to new mail as it arrives."
