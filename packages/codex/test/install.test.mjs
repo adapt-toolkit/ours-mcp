@@ -33,6 +33,8 @@ function run(codexDir, skillsDir) {
     env: {
       ...process.env,
       CODEX_DIR: codexDir,
+      CODEX_CONFIG: join(codexDir, 'config.toml'),
+      CODEX_AGENTS: join(codexDir, 'AGENTS.md'),
       SKILLS_DIR: skillsDir,
       PATH: clientBin(codexDir),
       OURS_CODEX_SKIP_NATIVE: '1',
