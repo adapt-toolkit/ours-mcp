@@ -183,3 +183,17 @@ origin directly. UUID/capability checks still precede credential-bearing calls.
 This adds client HTTPS support, not an HTTPS daemon listener, certificate
 provisioning or automatic reverse-proxy configuration. Existing local HTTP and
 SSH-tunnel profiles continue to work.
+
+
+### Fleet-managed current-chat file delivery
+
+`createManagedOursMcpServer` accepts an optional `currentChatFile` callback.
+With this opt-in, the existing strict `send_file` schema makes `contact`
+optional: only its absence routes a path-based send to the callback. A supplied
+contact retains ordinary Ours transport; invalid/unknown fields fail before
+admission or file I/O. Chat sending rejects inline bytes and Ours reply fields.
+Without the callback, standalone and managed servers still require contact.
+The exported `MANAGED_FILE_DELIVERY_VERSION = 1` lets Fleet reject incompatible
+installed packages. The callback runs within the existing managed lifecycle
+admission and receives the standard MCP cancellation signal. One callback call
+makes one delivery attempt; the adapter provides no retry/deduplication/recovery.

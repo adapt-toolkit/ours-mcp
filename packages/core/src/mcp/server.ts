@@ -16,7 +16,7 @@ import { registerContactsTools } from './tools/contacts.js';
 import { registerFilesTools } from './tools/files.js';
 import { registerHistoryTools } from './tools/history.js';
 import { registerIdentityTools } from './tools/identity.js';
-import { registerMessagingTools } from './tools/messaging.js';
+import { registerMessagingTools, type CurrentChatFileSender } from './tools/messaging.js';
 import { registerProfileTools } from './tools/profile.js';
 
 /**
@@ -27,8 +27,9 @@ export function createOursMcpServer(
   client: OursClient | OursClientProvider,
   version: string,
   applicationIdentities: ApplicationIdentityStore,
-  options: { remoteDaemonFiles?: boolean; policy?: ToolPolicy; fileContext?: FileExecutionContext } = {},
+  options: { remoteDaemonFiles?: boolean; policy?: ToolPolicy; fileContext?: FileExecutionContext; currentChatFile?: CurrentChatFileSender } = {},
 ): McpServer {
+  if (options.currentChatFile && !options.policy) throw new Error('Current chat delivery requires managed admission');
   if (options.policy && !options.fileContext) throw new Error('Managed ours MCP requires an agent file context');
   const server = new McpServer(
     { name: 'ours', version },
@@ -46,7 +47,7 @@ export function createOursMcpServer(
   registerIdentityTools(registry, clientFor, applicationIdentities, { managedLifetime: Boolean(options.policy) });
   registerContactsTools(registry, clientFor);
   registerProfileTools(registry, clientFor);
-  registerMessagingTools(registry, clientFor, options.fileContext);
+  registerMessagingTools(registry, clientFor, options.fileContext, options.currentChatFile);
   registerCommandTools(registry, clientFor);
   registerFilesTools(registry, clientFor, options);
   registerHistoryTools(registry, clientFor);
@@ -66,6 +67,7 @@ export function createManagedOursMcpServer(
     fileContext: FileExecutionContext;
     admit: ToolPolicy['admit'];
     remoteDaemonFiles?: boolean;
+    currentChatFile?: CurrentChatFileSender;
   },
 ): McpServer {
   return createOursMcpServer(client, version, applicationIdentities, {
@@ -73,3 +75,6 @@ export function createManagedOursMcpServer(
     policy: { version: 1, allowedEffects: ['bound', 'profile', 'contact', 'inventory', 'filesystem'], admit: options.admit },
   });
 }
+
+export type { CurrentChatFileSender } from "./tools/messaging.js";
+export const MANAGED_FILE_DELIVERY_VERSION = 1 as const;
