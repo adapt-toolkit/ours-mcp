@@ -100,3 +100,53 @@ test('all retained tools preserve successful results, structured payloads and SD
   }finally{await a.close();await b.close();}
  }
 });
+
+test('one send_file selects omitted-contact chat before any SDK/file operation, and rejects ambiguous arguments', async () => {
+  const sdkCalls=[], fileCalls=[], sent=[]; let admits=0;
+  const b=await connect(new Proxy({}, {get:(_t,key)=>async()=>{sdkCalls.push(key);throw Error('unexpected SDK');}}),true,{
+    fileContext:{...noFiles,read:async()=>{fileCalls.push('read');throw Error('unexpected read');}},
+    admit:async()=>{admits++;return()=>{};},
+    currentChatFileDirectory:'exports/final reports',
+    currentChatFile:async(args)=>{sent.push(args);return {id:'attachment-'+sent.length,name:'report.bin',mimeType:'application/octet-stream',size:7,sessionGeneration:'g',acpSessionId:'actual',turnId:'t'};},
+  });
+  try {
+    const tools=(await b.client.listTools()).tools;
+    assert.equal(tools.length,27); assert.equal(tools.filter(t=>t.name==='send_file').length,1);
+    assert.match(tools.find(t=>t.name==='send_file').description, /under "exports\/final reports" relative to your working directory/);
+    assert.match(tools.find(t=>t.name==='send_file').description, /maximum 20 MiB/);
+    assert(!tools.some(t=>t.name==='send_file_to_user'));assert(!tools.find(t=>t.name==='send_file').inputSchema.required?.includes('contact'));
+    for(const args of [{contact:null,path:'x'},{contact:'',path:'x'},{contact:'  ',path:'x'},{contact:42,path:'x'},
+      {path:'x',destination:'current_chat'},{path:'x',recipient:'Alice'},{path:'x',request_id:'old'},
+      {path:'x',contact:'Alice',destination:'current_chat'}]){
+      assert.equal((await b.client.callTool({name:'send_file',arguments:args})).isError,true);
+    }
+    assert.equal(admits,0);assert.deepEqual(sdkCalls,[]);assert.deepEqual(fileCalls,[]);assert.deepEqual(sent,[]);
+    for(const args of [{path:'x',data_base64:'eA=='},{data_base64:'eA==',filename:'x'},{path:'x',reply_to_wire_id:'ABC'}])
+      assert.equal((await b.client.callTool({name:'send_file',arguments:args})).isError,true);
+    assert.deepEqual(sent,[]);assert.deepEqual(sdkCalls,[]);
+    const a=await b.client.callTool({name:'send_file',arguments:{path:'deliverables/report.bin'}});
+    const again=await b.client.callTool({name:'send_file',arguments:{path:'deliverables/report.bin'}});
+    assert.equal(a.isError,false);assert.equal(a.structuredContent.destination,'current_chat');
+    assert.notEqual(a.structuredContent.attachment.id,again.structuredContent.attachment.id);
+    assert.equal(sent.length,2); assert.deepEqual(sdkCalls,[]);assert.deepEqual(fileCalls,[]);
+  } finally{await b.close();}
+});
+test('chat sink failure attempts once; missing contact on non-opt-in and standalone remains invalid', async()=>{
+  let calls=0;
+  const a=await connect({},true,{currentChatFile:async()=>{calls++;throw Error('copy failed');}});
+  const b=await connect({},true),c=await connect({},false);
+  try {
+    assert.equal((await a.client.callTool({name:'send_file',arguments:{path:'x'}})).isError,true);assert.equal(calls,1);
+    for(const x of [b,c])for(const args of [{path:'x'},{contact:'Peer',path:'x',destination:'current_chat'}])
+      assert.equal((await x.client.callTool({name:'send_file',arguments:args})).isError,true);
+  }finally{await a.close();await b.close();await c.close();}
+});
+test('opt-in preserves legacy contact inline/reply/outcome and never falls back after a contact error', async()=>{
+  const calls=[];let chat=0;
+  const b=await connect({sendFile:async args=>{calls.push(args);if(args.contact==='Missing')throw new OursError('CONTACT_NOT_FOUND','missing contact');return {kind:'e2e',filename:'x',bytes:1,wireId:'ABC',notRetained:true};}},true,{currentChatFile:async()=>{chat++;throw Error('unexpected chat');}});
+  try{
+    const input={contact:'Peer',data_base64:'eA==',filename:'x',reply_to_wire_id:'Z',reply_to_sentence:2};
+    const r=await b.client.callTool({name:'send_file',arguments:input});assert.equal(r.isError,false);assert.match(r.content[0].text,/NOT retained/);assert.deepEqual(calls[0],{...input,mime:undefined});
+    assert.equal((await b.client.callTool({name:'send_file',arguments:{...input,contact:'Missing'}})).isError,true);assert.equal(chat,0);assert.equal(calls.length,2);
+  }finally{await b.close();}
+});

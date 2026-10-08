@@ -32,7 +32,7 @@ import {
 } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 
-import { runTool, type McpTextResult, type OursClientProvider } from '../tool.js';
+import { runTool, type McpTextResult, type OursClientProvider, type ToolRequestExtra } from '../tool.js';
 
 function sendResult<T extends object>(text: string, outcome: T, isError = false): McpTextResult {
   const historyWarning = 'history_stored' in outcome && outcome.history_stored === false
@@ -45,10 +45,17 @@ function sendResult<T extends object>(text: string, outcome: T, isError = false)
   };
 }
 
+/** Optional supervisor-owned delivery sink. Never obtains an Ours client. */
+export type CurrentChatFileSender = (
+  input: { path: string; filename?: string; mime?: string }, extra: ToolRequestExtra,
+) => Promise<{ id: string; name: string; mimeType: string; size: number; sessionGeneration: string; acpSessionId: string; turnId: string }>;
+
 export function registerMessagingTools(
   server: ToolRegistry,
   clientFor: OursClientProvider,
   files: FileExecutionContext = localFileContext,
+  currentChatFile?: CurrentChatFileSender,
+  currentChatFileDirectory?: string,
 ): void {
   server.tool('bound')(
     'send_message',
@@ -119,21 +126,24 @@ export function registerMessagingTools(
       ),
   );
 
-  server.tool('filesystem')(
+  server.registerTool('filesystem')(
     'send_file',
+    { description: (currentChatFile ? 'Omit contact to attach a file to this ACP chat. ' + (currentChatFileDirectory ? `Write the completed file under ${JSON.stringify(currentChatFileDirectory)} relative to your working directory, then pass its path (maximum 20 MiB). ` : '') + 'Provide path; no inline bytes or reply fields for chat delivery. One attempt, no automatic retries. Specify contact to send through Ours. ' : '') +
     'Send a file to a known contact (by name or container id). Provide EITHER `path` ' +
       '(the connector reads it as your OS user) OR `data_base64` + `filename` (inline bytes). ' +
       'Files and text are distinct messages — to caption a file, also send_message. ' +
       'Requires a bound identity.',
-    {
-      contact: z.string().min(1).describe('Contact name or container id to send to.'),
+    inputSchema: z.object({
+      contact: currentChatFile
+        ? z.string().min(1).regex(/\S/).optional().describe('Ours recipient. Omit ONLY to attach to this ACP chat.')
+        : z.string().min(1).describe('Contact name or container id to send to.'),
       path: z.string().min(1).optional().describe('Filesystem path to the file to send (preferred). Read by the ours connector as YOUR OS user, then streamed to the daemon.'),
       data_base64: z.string().min(1).optional().describe('Inline file bytes, base64-encoded (alternative to path).'),
       filename: z.string().min(1).optional().describe('Filename to advertise (required with data_base64; defaults to basename of path).'),
       mime: z.string().optional().describe('MIME type (inferred from the path extension when omitted).'),
       reply_to_wire_id: z.string().optional().describe('wire_id (from unread or persistent-history tools) this file replies to.'),
       reply_to_sentence: z.number().int().positive().optional().describe('Optional 1-based sentence index in the replied-to item.'),
-    },
+    }).strict() },
     // ⚠ `path` IS READ HERE, NOT BY THE DAEMON, AND THAT IS THE WHOLE POINT.
     //
     // `sendFile({path})` reads the file in the DAEMON's process as the DAEMON's OS
@@ -144,8 +154,16 @@ export function registerMessagingTools(
     // Passing `path` straight through typechecks perfectly and fails only at
     // runtime, on someone else's machine, with a permissions error that has no
     // workaround. A green compile on this handler is not evidence of correctness.
-    async ({ contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }, extra) =>
-      runTool(
+    async ({ contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }, extra) => {
+      if (contact === undefined) {
+        extra.signal.throwIfAborted();
+        if (!currentChatFile || !path || data_base64 !== undefined || reply_to_wire_id !== undefined || reply_to_sentence !== undefined)
+          throw Error('Current chat delivery requires path only, without Ours reply fields');
+        const attachment = await currentChatFile({ path, filename, mime }, extra);
+        return { ...sendResult(`File "${attachment.name}" attached to this ACP chat (${attachment.size} B).`, attachment),
+          structuredContent: { attachment, destination: 'current_chat', status: 'attached' } };
+      }
+      return runTool(
         clientFor(extra),
         async (c) => {
           extra.signal.throwIfAborted();
@@ -213,7 +231,8 @@ export function registerMessagingTools(
               return sendResult(`${desc} sent to "${contact}" (wire_id ${v.wireId}).`, v);
           }
         },
-      ),
+      );
+    },
   );
 
   server.tool('bound')(

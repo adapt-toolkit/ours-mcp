@@ -20,6 +20,13 @@ export class ToolRegistry {
     }
   }
   tool(effect: ToolEffect): McpServer['tool'] {
+    return this.registration(effect, 'tool') as McpServer['tool'];
+  }
+  /** Public registration API accepts a strict Zod object without stripping route fields. */
+  registerTool(effect: ToolEffect): McpServer['registerTool'] {
+    return this.registration(effect, 'registerTool') as McpServer['registerTool'];
+  }
+  private registration(effect: ToolEffect, method: 'tool' | 'registerTool'): unknown {
     if (!TOOL_EFFECTS.includes(effect)) throw new Error('Unclassified ours MCP tool effect');
     // Preserve the MCP SDK's overloads and inference at every registration site.
     return ((...args: unknown[]) => {
@@ -34,7 +41,7 @@ export class ToolRegistry {
         try { return await handler(...callArgs); }
         finally { await release?.(); }
       });
-      return (this.server.tool as (...args: unknown[]) => unknown)(...args);
-    }) as McpServer['tool'];
+      return (this.server[method].bind(this.server) as (...args: unknown[]) => unknown)(...args);
+    });
   }
 }

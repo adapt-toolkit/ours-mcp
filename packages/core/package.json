@@ -59,7 +59,7 @@
   },
   "dependencies": {
     "@ours.network/sdk": "3.8.1-nightly.17",
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
