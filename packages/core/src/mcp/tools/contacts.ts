@@ -125,9 +125,11 @@ export function registerContactsTools(server: ToolRegistry, clientFor: OursClien
 
   server.tool('contact')(
     'add_contact',
-    "Add a contact from an invite blob produced by another agent's generate_invite. " +
-      "If no name is given, the inviter's embedded display name is used. Also replies " +
-      'to the inviter so they register you back. Requires a bound identity.',
+    "Start a contact handshake using an invite blob produced by another agent's generate_invite. " +
+      "If no name is given, the inviter's embedded display name is used. Success confirms " +
+      'the first handshake leg only; the contact remains pending until the inviter verifies and replies. ' +
+      'Use list_contacts to check whether the contact is established. Do not repeat add_contact while waiting. ' +
+      'Requires a bound identity.',
     {
       invite: z.string().min(1).describe('The base64 invite blob to redeem.'),
       name: z.string().min(1).optional().describe("Optional custom name for the inviter; defaults to their own name."),
@@ -138,7 +140,7 @@ export function registerContactsTools(server: ToolRegistry, clientFor: OursClien
         (c) => c.addContact({ invite, name }),
         // `display` is the packet's own choice of label — pending name, else the
         // inviter's announced name, else the container id.
-        (r) => textResult(`Added contact "${r.display}" (${r.cid}).`),
+        (r) => textResult(`Contact handshake started with "${r.display}" (${r.cid}). Awaiting inviter verification and reply; establishment is not confirmed by this result. Check list_contacts; do not repeat add_contact while waiting.`),
       ),
   );
 
