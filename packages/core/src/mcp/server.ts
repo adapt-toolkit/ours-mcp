@@ -27,7 +27,7 @@ export function createOursMcpServer(
   client: OursClient | OursClientProvider,
   version: string,
   applicationIdentities: ApplicationIdentityStore,
-  options: { remoteDaemonFiles?: boolean; policy?: ToolPolicy; fileContext?: FileExecutionContext; currentChatFile?: CurrentChatFileSender } = {},
+  options: { remoteDaemonFiles?: boolean; policy?: ToolPolicy; fileContext?: FileExecutionContext; currentChatFile?: CurrentChatFileSender; currentChatFileDirectory?: string } = {},
 ): McpServer {
   if (options.currentChatFile && !options.policy) throw new Error('Current chat delivery requires managed admission');
   if (options.policy && !options.fileContext) throw new Error('Managed ours MCP requires an agent file context');
@@ -47,7 +47,7 @@ export function createOursMcpServer(
   registerIdentityTools(registry, clientFor, applicationIdentities, { managedLifetime: Boolean(options.policy) });
   registerContactsTools(registry, clientFor);
   registerProfileTools(registry, clientFor);
-  registerMessagingTools(registry, clientFor, options.fileContext, options.currentChatFile);
+  registerMessagingTools(registry, clientFor, options.fileContext, options.currentChatFile, options.currentChatFileDirectory);
   registerCommandTools(registry, clientFor);
   registerFilesTools(registry, clientFor, options);
   registerHistoryTools(registry, clientFor);
@@ -68,6 +68,7 @@ export function createManagedOursMcpServer(
     admit: ToolPolicy['admit'];
     remoteDaemonFiles?: boolean;
     currentChatFile?: CurrentChatFileSender;
+    currentChatFileDirectory?: string;
   },
 ): McpServer {
   return createOursMcpServer(client, version, applicationIdentities, {

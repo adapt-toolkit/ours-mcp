@@ -55,6 +55,7 @@ export function registerMessagingTools(
   clientFor: OursClientProvider,
   files: FileExecutionContext = localFileContext,
   currentChatFile?: CurrentChatFileSender,
+  currentChatFileDirectory?: string,
 ): void {
   server.tool('bound')(
     'send_message',
@@ -127,7 +128,7 @@ export function registerMessagingTools(
 
   server.registerTool('filesystem')(
     'send_file',
-    { description: (currentChatFile ? 'Omit contact to attach a file to this ACP chat. Provide path; no inline bytes or reply fields for chat delivery. One attempt, no automatic retries. Specify contact to send through Ours. ' : '') +
+    { description: (currentChatFile ? 'Omit contact to attach a file to this ACP chat. ' + (currentChatFileDirectory ? `Write the completed file under ${JSON.stringify(currentChatFileDirectory)} relative to your working directory, then pass its path (maximum 20 MiB). ` : '') + 'Provide path; no inline bytes or reply fields for chat delivery. One attempt, no automatic retries. Specify contact to send through Ours. ' : '') +
     'Send a file to a known contact (by name or container id). Provide EITHER `path` ' +
       '(the connector reads it as your OS user) OR `data_base64` + `filename` (inline bytes). ' +
       'Files and text are distinct messages — to caption a file, also send_message. ' +

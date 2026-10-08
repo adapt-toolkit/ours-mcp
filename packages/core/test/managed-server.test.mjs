@@ -106,11 +106,14 @@ test('one send_file selects omitted-contact chat before any SDK/file operation, 
   const b=await connect(new Proxy({}, {get:(_t,key)=>async()=>{sdkCalls.push(key);throw Error('unexpected SDK');}}),true,{
     fileContext:{...noFiles,read:async()=>{fileCalls.push('read');throw Error('unexpected read');}},
     admit:async()=>{admits++;return()=>{};},
+    currentChatFileDirectory:'exports/final reports',
     currentChatFile:async(args)=>{sent.push(args);return {id:'attachment-'+sent.length,name:'report.bin',mimeType:'application/octet-stream',size:7,sessionGeneration:'g',acpSessionId:'actual',turnId:'t'};},
   });
   try {
     const tools=(await b.client.listTools()).tools;
     assert.equal(tools.length,27); assert.equal(tools.filter(t=>t.name==='send_file').length,1);
+    assert.match(tools.find(t=>t.name==='send_file').description, /under "exports\/final reports" relative to your working directory/);
+    assert.match(tools.find(t=>t.name==='send_file').description, /maximum 20 MiB/);
     assert(!tools.some(t=>t.name==='send_file_to_user'));assert(!tools.find(t=>t.name==='send_file').inputSchema.required?.includes('contact'));
     for(const args of [{contact:null,path:'x'},{contact:'',path:'x'},{contact:'  ',path:'x'},{contact:42,path:'x'},
       {path:'x',destination:'current_chat'},{path:'x',recipient:'Alice'},{path:'x',request_id:'old'},

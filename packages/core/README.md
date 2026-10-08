@@ -188,6 +188,8 @@ SSH-tunnel profiles continue to work.
 ### Fleet-managed current-chat file delivery
 
 `createManagedOursMcpServer` accepts an optional `currentChatFile` callback.
+The trusted host can also provide `currentChatFileDirectory` to advertise its
+configured export folder and the 20 MiB limit in the tool description.
 With this opt-in, the existing strict `send_file` schema makes `contact`
 optional: only its absence routes a path-based send to the callback. A supplied
 contact retains ordinary Ours transport; invalid/unknown fields fail before
