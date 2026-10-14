@@ -13,9 +13,10 @@ hand.
 
 ## Breaking changes
 
-- Requires the SDK 4 line (standalone `@ours.network/daemon`, external host
-  history storage with no migration of old daemon state, explicit shared-gateway
-  client selection). See ours-sdk `RELEASE-NOTES-4.0.0.md`.
+- Requires the SDK 4 line: default client attach goes through a saved shared
+  gateway client profile, legacy environment daemon selection is rejected, and
+  the daemon runtime ships separately as `@ours.network/daemon`. See ours-sdk
+  `RELEASE-NOTES-4.0.0.md`.
 - MCP no longer owns or publishes `@ours.network/install`; installer ownership
   moved to ours-network (#106). The installer's last MCP-published `latest` is 1.1.1.
 - Harness MCP tools run locally through the daemon API (#110), and clients share
