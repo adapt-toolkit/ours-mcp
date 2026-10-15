@@ -30,10 +30,10 @@ versions below, `package-lock.json` regenerated, and CI rerun on the new head:
 
 | manifest | dependency | prerelease pin | stable target |
 |---|---|---|---|
-| `packages/core` (`@ours.network/mcp`) | `@ours.network/sdk` | 3.8.1-nightly.18 | 4.0.0 |
-| `packages/core` (dev) | `@ours.network/cli` / `@ours.network/daemon` | 2.8.1-nightly.16 / 3.8.1-nightly.10 | 3.0.0 / 4.0.0 |
-| `packages/claude-code`, `packages/codex` | `@ours.network/sdk` | 3.8.1-nightly.18 | 4.0.0 |
-| root workspace (dev) | `@ours.network/sdk` | 3.8.1-nightly.18 | 4.0.0 |
+| `packages/core` (`@ours.network/mcp`) | `@ours.network/sdk` | 3.8.1-nightly.18 | 4.1.0 |
+| `packages/core` (dev) | `@ours.network/cli` / `@ours.network/daemon` | 2.8.1-nightly.16 / 3.8.1-nightly.10 | 3.1.0 / 4.1.0 |
+| `packages/claude-code`, `packages/codex` | `@ours.network/sdk` | 3.8.1-nightly.18 | 4.1.0 |
+| root workspace (dev) | `@ours.network/sdk` | 3.8.1-nightly.18 | 4.1.0 |
 
 `@ours.network/mcp` pins inside `claude-code`/`codex` (1.1.1 today) are rewritten to the suite version (2.0.0) by the lockstep bump itself.
 
