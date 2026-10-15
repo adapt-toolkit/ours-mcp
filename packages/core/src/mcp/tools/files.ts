@@ -30,17 +30,14 @@
 // byte-identically. Re-typing the templates here would silently lose real
 // message content on every failed transcription.
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { createWriteStream, mkdirSync, statSync } from 'node:fs';
-import { dirname, resolve as resolvePath } from 'node:path';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import type { ToolRegistry } from '../registry.js';
+import { localFileContext, type FileExecutionContext } from '../file-context.js';
 
 import { FILE_SELECTION_CAP, OursError } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 
-import { annotateGetFilesResult, canRead, FILES_ALWAYS_PROMPT, renderFiles } from '../format.js';
-import { runTool, textResult, type McpTextResult } from '../tool.js';
+import { annotateGetFilesResult, FILES_ALWAYS_PROMPT, renderFiles } from '../format.js';
+import { runTool, textResult, type McpTextResult, type OursClientProvider } from '../tool.js';
 
 // The four selection codes, and the `error_category` each one renders as. An
 // explicit table rather than a lowercase() of the code: the categories are a wire
@@ -60,8 +57,13 @@ const SELECTION_CATEGORY: Record<string, string> = {
 // so the bare form is derived from the one source of truth rather than restated.
 const GET_FILES_PREFIX = 'get_files failed: ';
 
-export function registerFilesTools(server: McpServer, clientFor: () => OursClient): void {
-  server.tool(
+export function registerFilesTools(
+  server: ToolRegistry,
+  clientFor: OursClientProvider,
+  options: { remoteDaemonFiles?: boolean; fileContext?: FileExecutionContext } = {},
+): void {
+  const files = options.fileContext ?? localFileContext;
+  server.tool('bound')(
     'list_incoming_files',
     'List unread received files as structured metadata only — authenticated sender CID in ' +
       '`from.id`, untrusted display label in `from.name`, stable file_id/wire_id, filename, ' +
@@ -69,9 +71,9 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
       'change status. Authorize by from.id, then pass approved wire_ids to get_files. ' +
       'Requires a bound identity.',
     {},
-    async () =>
+    async (_args, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.listIncomingFiles(),
         (files) => ({
           content: [{ type: 'text' as const, text: renderFiles(files) }],
@@ -81,7 +83,7 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
       ),
   );
 
-  server.tool(
+  server.tool('filesystem')(
     'get_files',
     'Retrieve selected unread files by stable wire_id, or the oldest bounded unread batch ' +
       'when wire_ids is omitted (default 50, maximum 200). The immutable bytes already live ' +
@@ -103,9 +105,10 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
         'Batch size from 1 to 200 when wire_ids is omitted (default 50).',
       ),
     },
-    async ({ wire_ids, limit }): Promise<McpTextResult> => {
+    async ({ wire_ids, limit }, extra): Promise<McpTextResult> => {
+      const client = await clientFor(extra);
       try {
-        const out = await clientFor().getFiles({ wire_ids, limit });
+        const out = await client.getFiles({ wire_ids, limit });
         // structuredContent carries the same records the prose lists. No
         // outputSchema is declared, so this stays additive for every other client.
         const result: McpTextResult = {
@@ -128,7 +131,21 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
         // wrapper existed only because the proxy saw frames, and passing it a frame
         // annotates nothing, silently. PREPENDS, never substitutes: the daemon text
         // can carry a voice transcript this side cannot reconstruct.
-        annotateGetFilesResult(result, FILES_ALWAYS_PROMPT ? () => false : canRead);
+        const readable = new Map<string, boolean>();
+        if (!options.remoteDaemonFiles && !FILES_ALWAYS_PROMPT) {
+          for (const file of out.files) {
+            if (typeof file.path === 'string') {
+              // The unread commit already happened. A failed probe must not hide its result.
+              let allowed = false;
+              try { allowed = await files.canRead(file.path, extra); } catch { /* conservatively unreadable */ }
+              readable.set(file.path, allowed);
+            }
+          }
+        }
+        annotateGetFilesResult(
+          result,
+          path => readable.get(path) ?? false,
+        );
         return result;
       } catch (e) {
         // Keep this explicit mapping: runTool cannot preserve structured selection errors.
@@ -166,7 +183,7 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
     },
   );
 
-  server.tool(
+  server.tool('filesystem')(
     'save_file',
     'Stream a file from the bound identity\'s persistent history to a path YOUR OS user ' +
       'can write, WITHOUT the bytes ever entering your context. Use this when you run as a ' +
@@ -184,18 +201,19 @@ export function registerFilesTools(server: McpServer, clientFor: () => OursClien
     // agent's user. STREAMED — `fetchFile` would make the whole file resident and
     // break this tool's own promise. `saveFileFallbackNotice` is now unreachable
     // from ours-mcp and stays in the SDK for clients with no connector.
-    async ({ wire_id, dest_path }): Promise<McpTextResult> => {
+    async ({ wire_id, dest_path }, extra): Promise<McpTextResult> => {
+      const client = await clientFor(extra);
       // proxy.ts:557, verbatim. A wire_id names a path segment on the daemon, so a
       // charset check belongs before the request, not after it.
       if (!/^[A-Za-z0-9]+$/.test(wire_id)) return textResult('save_file: invalid wire_id.', true);
+
       try {
-        const body = await clientFor().openFile(wire_id);
-        const abs = resolvePath(dest_path);
-        mkdirSync(dirname(abs), { recursive: true });
-        await pipeline(Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(abs));
-        const size = statSync(abs).size;
+        extra.signal.throwIfAborted();
+        const body = await client.openFile(wire_id);
+        if (extra.signal.aborted) { await body.cancel(); extra.signal.throwIfAborted(); }
+        const saved = await files.write(dest_path, body, extra);
         return textResult(
-          `Saved file (wire_id ${wire_id}) to ${abs} (${size} bytes). ` +
+          `Saved file (wire_id ${wire_id}) to ${saved.path} (${saved.size} bytes). ` +
           'The bytes were streamed daemon→disk and never entered this result.',
         );
       } catch (e) {

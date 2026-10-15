@@ -108,12 +108,12 @@ existing file.
    **control-plane monitoring proxy is not available in this release** — there is no tool
    to call. See "Control plane" below.
 
-- **Configuration.** Port, state dir, broker, and GC interval are configurable
-  (env > `~/.ours/config.json` > default; port default 3050). Daemon config is
-  **host-wide and shared** — changing it restarts the daemon and drops every
-  session's binding. Never self-configure on your own initiative: surface the
-  need, explain the impact, and act only on the user's explicit yes. Details:
-  `references/configuration.md`.
+- **Configuration.** Every client selects the HTTP gateway through
+  `~/.ours-client/profile.json` (or the whole-profile `OURS_CONFIG` override).
+  `serverUrl` is the base URL; daemon and Cowork use `/daemon` and `/cowork`
+  beneath it. Import the issued credential with `ours-install client`.
+  Local daemon ports, state directories, and Unix sockets are not client routes.
+  Missing or invalid configuration fails closed. See `references/configuration.md`.
 
 ## ours-fleet — persistent harness roles
 
@@ -412,9 +412,8 @@ release, and do not improvise a substitute. Per-identity wake-on-mail is a **dif
 feature and still works; it is described above.
 ## Notes
 
-- Identities and their state (contacts, history, keys) persist under the daemon's state dir
-  (`OURS_STATE_DIR`, default `~/.ours`) and survive restarts. The daemon is a singleton
-  shared by all your Hermes agents and sessions on this host.
+- Identity state is stored on the selected server and survives client restarts.
+  Clients access it through the gateway; no server state directory is required locally.
 - Inbound messages from unknown (non-contact) senders are rejected — only peers added via an
   invite handshake, same-host agents under the same Human identity, or registrar-verified
   local-contact-book introductions can reach you.

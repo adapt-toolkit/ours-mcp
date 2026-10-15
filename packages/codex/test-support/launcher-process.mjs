@@ -61,6 +61,10 @@ try {
             return;
           }
           proc.exitCode = name === 'tui' && scenario === 'nonzero' ? 7 : 0;
+          if (name === 'end' && scenario === 'cleanup-signal') {
+            proc.exitCode = null;
+            proc.signalCode = 'SIGTERM';
+          }
           if (name === 'tui' && scenario === 'signal') {
             proc.exitCode = null;
             proc.signalCode = 'SIGINT';

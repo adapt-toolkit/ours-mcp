@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -24,10 +25,12 @@ const shared = {
   logLevel: 'info',
 };
 
-for (const entry of ['cli', 'connector', 'application-identities', 'contacts', 'mcp/push', 'mcp/server']) {
+for (const entry of ['cli', 'container', 'connector', 'host-client/index', 'application-identities', 'contacts', 'host-profile', 'native-session', 'mcp/push', 'mcp/server']) {
   await build({
     ...shared,
     entryPoints: [resolve(root, `src/${entry}.ts`)],
-    outfile: resolve(dist, `${entry.split('/').at(-1)}.js`),
+    outfile: resolve(dist, entry === 'host-client/index' ? 'host-client.js' : `${entry.split('/').at(-1)}.js`),
   });
 }
+
+execFileSync("tsc", ["-p", resolve(root, "tsconfig.json"), "--declaration", "--emitDeclarationOnly", "--outDir", resolve(dist, "types")], { stdio: "inherit" });

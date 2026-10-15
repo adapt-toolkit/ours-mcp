@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { attachOursClient, resolveDaemonConfig } from '@ours.network/sdk';
+import { attachOursClient } from '@ours.network/sdk';
 import type { NotificationEvent } from '@ours.network/sdk';
 
 import { ApplicationIdentityStore, filterApplicationIdentities } from './application-identities.js';
+import { hostProfileFromEnv } from './host-profile.js';
+import { nativeClientFor, endNativeSession } from './native-session.js';
 import type { ConnectorOptions } from './connector.js';
 
 declare const __OURS_VERSION__: string;
@@ -39,35 +40,9 @@ function rejectApplicationFlag(args: string[]): void {
   if (args.some((arg) => arg === '--application' || arg.startsWith('--application='))) {
     throw new Error(
       '`--application` is no longer supported. ours-mcp connects to one coherently selected shared daemon; ' +
-      'use OURS_CONFIG or a matching OURS_PORT + OURS_STATE_DIR selection.',
+      'configure ~/.ours-client/profile.json with the gateway URL.',
     );
   }
-}
-
-async function runOurs(args: string[]): Promise<void> {
-  const explicit = (process.env.OURS_CLI ?? '').trim();
-  const executable = explicit || 'ours';
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(executable, args, { stdio: 'inherit', env: process.env });
-    child.once('error', (error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') {
-        reject(new Error(
-          `Cannot find the ${JSON.stringify(executable)} CLI. Install @ours.network/cli@2.2.0, ` +
-          'put `ours` on PATH, or set OURS_CLI to its executable path.',
-        ));
-        return;
-      }
-      reject(error);
-    });
-    child.once('exit', (code, signal) => {
-      if (signal) {
-        process.kill(process.pid, signal);
-        return;
-      }
-      process.exitCode = code ?? 1;
-      resolve();
-    });
-  });
 }
 
 async function runProxy(): Promise<void> {
@@ -84,8 +59,16 @@ async function runProxy(): Promise<void> {
 }
 
 async function runSessionEnd(): Promise<void> {
-  const client = await attachOursClient({ leaseToken: LEASE_TOKEN, clientPid: CLIENT_PID });
-  await client.releaseLease();
+  const profile = hostProfileFromEnv(process.env);
+    let payload: unknown;
+    try { payload = JSON.parse(readFileSync(0, 'utf8')); } catch {
+      throw new Error('SessionEnd requires valid hook JSON on stdin.');
+    }
+    const sessionId = (payload as { session_id?: unknown } | null)?.session_id;
+    if (typeof sessionId !== 'string' || !sessionId.trim()) {
+      throw new Error('SessionEnd hook input must contain a non-empty session_id.');
+    }
+    await endNativeSession(profile, sessionId, process.env);
 }
 
 function jsonNotification(identity: string, event: NotificationEvent): string {
@@ -106,10 +89,10 @@ async function runWatch(args: string[]): Promise<void> {
   if (args.length > 1 || args[0]?.startsWith('-')) {
     throw new Error('Usage: ours-mcp watch [identity]');
   }
-  const selection = resolveDaemonConfig();
-  const identities = new ApplicationIdentityStore(selection.expectStateDir);
+  const profile = hostProfileFromEnv(process.env);
+  const identities = new ApplicationIdentityStore({ instanceId: profile.expectedInstanceId });
   await identities.list();
-  const client = await attachOursClient({ leaseToken: LEASE_TOKEN, clientPid: CLIENT_PID });
+  const client = await nativeClientFor(profile, (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim());
   const requested = args[0]?.trim();
   let names: string[];
   if (requested) {
@@ -122,23 +105,28 @@ async function runWatch(args: string[]): Promise<void> {
   process.once('SIGINT', () => abort.abort());
   process.once('SIGTERM', () => abort.abort());
   err(`ours-mcp watch: ${names.length === 0 ? 'no application identities' : `watching ${names.join(', ')}`}`);
-  await Promise.all(names.map((name) => watchIdentity(client, name, abort.signal)));
+  try {
+    await Promise.all(names.map((name) => watchIdentity(client, name, abort.signal)));
+  } finally {
+    await client.close();
+  }
 }
 
 function usage(): void {
   out(`ours-mcp ${VERSION} — MCP adapter for the shared ours daemon`);
   out('');
   out('Usage: ours-mcp <command> [options]');
+  out('  verify-client-profile validate the shared gateway profile (no network access)');
   out('  proxy                 run the stdio MCP server (never starts a daemon)');
   out('  session-end           release this harness session and clean up its temporary identities');
   out('  watch [identity]      stream inbound JSON Lines; without a name, only ours-mcp identities');
   out('  start|stop|restart|serve|status');
   out('  install-service|uninstall-service');
-  out('                        compatibility aliases for `ours daemon <command>`');
+  out('                        compatibility aliases for `ours-daemon <command>`');
   out('  version               print the ours-mcp package version');
   out('');
-  out('Daemon configuration and identity CLI operations moved to @ours.network/cli@2.2.0:');
-  out('  ours config setup');
+  out('Daemon administration uses @ours.network/daemon; API commands use @ours.network/cli:');
+  out('  ours-daemon config setup');
   out('  ours identity --help');
 }
 
@@ -148,11 +136,15 @@ async function main(): Promise<void> {
   const command = args.shift() ?? 'help';
 
   if (DAEMON_COMMANDS.has(command)) {
-    await runOurs(['daemon', command === 'run' ? 'serve' : command, ...args]);
-    return;
+    throw new Error('Server lifecycle commands are not client operations. Manage the server with ours-install server; configure clients with ours-install client.');
   }
 
   switch (command) {
+    case 'verify-client-profile':
+      if (args.length) throw new Error('Usage: ours-mcp verify-client-profile');
+      hostProfileFromEnv(process.env);
+      out('ours.gateway-client-profile-v1');
+      return;
     case 'proxy':
       if (args.length) throw new Error('Usage: ours-mcp proxy');
       await runProxy();
@@ -165,7 +157,7 @@ async function main(): Promise<void> {
       await runWatch(args);
       return;
     case 'setup':
-      throw new Error('ours-mcp no longer owns daemon configuration. Run `ours config setup` instead.');
+      throw new Error('ours-mcp no longer owns daemon configuration. Run `ours-daemon config setup` instead.');
     case 'create-root':
     case 'define-local-identity-file':
     case 'voice-setup':

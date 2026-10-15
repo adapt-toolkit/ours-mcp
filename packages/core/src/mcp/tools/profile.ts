@@ -16,23 +16,23 @@
 //
 // Tool descriptions and zod schemas are compatibility-sensitive. The ux-strings
 // gate keeps them byte-stable.
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolRegistry } from '../registry.js';
 import { z } from 'zod';
 
 import type { OursClient } from '@ours.network/sdk';
 
-import { runTool, textResult } from '../tool.js';
+import { runTool, textResult, type OursClientProvider } from '../tool.js';
 
-export function registerProfileTools(server: McpServer, clientFor: () => OursClient): void {
-  server.tool(
+export function registerProfileTools(server: ToolRegistry, clientFor: OursClientProvider): void {
+  server.tool('profile')(
     'set_bio',
     "Set the bound identity's profile bio (free text). For a role, the bio is " +
       'embedded in the invites it generates. For the root identity, the refreshed ' +
       'profile is re-pinned into every role so future role invites carry the update.',
     { bio: z.string().describe('The new bio text (empty string clears it).') },
-    async ({ bio }) =>
+    async ({ bio }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.setBio({ bio }),
         (r) => {
           const suffix = r.rolesRefreshed > 0 ? ` Root profile refreshed in ${r.rolesRefreshed} role(s).` : '';
@@ -41,7 +41,7 @@ export function registerProfileTools(server: McpServer, clientFor: () => OursCli
       ),
   );
 
-  server.tool(
+  server.tool('profile')(
     'advertise_migrate',
     'Enable the e2e-migration capability (core.e2e.migrate) at runtime on the bound ' +
       'identity and proactively offer migration to every already-known eligible e2e ' +
@@ -52,9 +52,9 @@ export function registerProfileTools(server: McpServer, clientFor: () => OursCli
       're-enabling is a no-op for the cap, and the offer election stays fail-closed. ' +
       'Returns how many migration offers were initiated.',
     {},
-    async () =>
+    async (_args, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.advertiseMigrate(),
         ({ wasAdvertising, advertising, offers }) => {
           const already = wasAdvertising ? ' (already advertising — cap unchanged)' : '';
@@ -66,16 +66,16 @@ export function registerProfileTools(server: McpServer, clientFor: () => OursCli
       ),
   );
 
-  server.tool(
+  server.tool('profile')(
     'set_persona',
     "Set the bound identity's local operating contract (persona, free text). The " +
       'persona is how the agent behaves when it adopts this identity; it is NEVER shared ' +
       'via invites — only via the control-plane cluster registry. An agent must ask the ' +
       'user before adopting a persona. Empty string clears it.',
     { persona: z.string().describe('The new persona text (empty string clears it).') },
-    async ({ persona }) =>
+    async ({ persona }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.setPersona({ persona }),
         // persona is local-only and never carried in invites: no root-profile refresh (unlike set_bio).
         (r) => textResult(`Updated the persona of "${r.identity}".`),

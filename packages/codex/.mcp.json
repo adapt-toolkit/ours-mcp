@@ -4,14 +4,14 @@
       "command": "node",
       "args": ["bin/proxy.mjs"],
       "cwd": ".",
-      "env_vars": ["OURS_PORT", "OURS_CONFIG", "OURS_API_TOKEN", "OURS_STATE_DIR", "OURS_AUTOSTART", "OURS_CODEX_LIVE", "OURS_CLIENT_PID"]
+      "env_vars": ["OURS_PORT", "OURS_CONFIG", "OURS_MCP_CONFIG", "OURS_API_TOKEN", "OURS_STATE_DIR", "OURS_AUTOSTART", "OURS_CODEX_LIVE", "OURS_CLIENT_PID"]
     },
     "ours_monitor": {
       "command": "node",
       "args": ["bin/monitor-mcp.mjs"],
       "cwd": ".",
       "tool_timeout_sec": 86400,
-      "env_vars": ["OURS_CODEX_CONTROL_SOCKET", "OURS_CODEX_CAPABILITY", "OURS_PORT", "OURS_CONFIG", "OURS_API_TOKEN", "OURS_STATE_DIR"]
+      "env_vars": ["OURS_CODEX_CONTROL_SOCKET", "OURS_CODEX_CAPABILITY", "OURS_PORT", "OURS_CONFIG", "OURS_MCP_CONFIG", "OURS_API_TOKEN", "OURS_STATE_DIR"]
     }
   }
 }
