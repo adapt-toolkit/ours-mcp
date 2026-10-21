@@ -20,4 +20,9 @@ Closes #
 - [ ] Commits use [Conventional Commits](https://www.conventionalcommits.org/) subjects (`feat:` / `fix:` / `feat!:` …).
 - [ ] Tests added/updated for behavioural changes, and `npm test` passes locally.
 - [ ] Documentation updated where affected.
-- [ ] I have signed (or will sign) the CLA when prompted by the CLA bot.
+
+## Contribution terms
+
+Submitting this PR, including later commits to it, is subject to the
+[contribution terms](https://github.com/adapt-toolkit/ours-mcp/blob/main/CONTRIBUTING.md#contribution-rights).
+No separate agreement, acceptance checkbox or signing step is required.
