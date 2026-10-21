@@ -116,7 +116,7 @@ jobs:
           test "$codex_version" = "$core_version"
           test "$(jq -r .version packages/codex/.codex-plugin/plugin.json)" = "$codex_version"
           for p in codex claude-code; do
-            jq -e '.dependencies | has("@ours.network/mcp") | not' "packages/$p/package.json"
+            jq -e --arg core_version "$core_version" '.dependencies["@ours.network/mcp"] == $core_version' "packages/$p/package.json"
           done
           npm pack --workspace @ours.network/codex --dry-run --json > /tmp/ours-codex-pack.json
           node - <<'NODE'
