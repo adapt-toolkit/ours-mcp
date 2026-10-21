@@ -28,7 +28,8 @@ test('locally installed native plugin exposes both MCP servers', { skip: process
     const monitor = status.data.find((server) => server.name === 'ours_monitor');
     assert.ok(ours, `ours server missing; found: ${status.data.map((server) => server.name).join(', ')}`);
     assert.ok(monitor, `ours_monitor missing; found: ${status.data.map((server) => server.name).join(', ')}`);
-    assert.deepEqual(Object.keys(monitor.tools).sort(), ['arm_monitor', 'disarm_monitor', 'monitor_status'], JSON.stringify(monitor));
+    assert.ok(ours.tools.current_identity, JSON.stringify(ours));
+    assert.deepEqual(Object.keys(monitor.tools).sort(), ['arm_monitor', 'disarm_monitor', 'foreground_monitor', 'monitor_status'], JSON.stringify(monitor));
   } finally {
     client?.close(); if (child.exitCode == null) child.kill('SIGTERM');
     if (child.exitCode == null) await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]);

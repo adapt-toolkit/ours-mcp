@@ -51,22 +51,25 @@ The launcher never starts, stops, restarts, or reconfigures the ours daemon. If 
 selected daemon is absent or incompatible, it exits with an error and leaves standard
 `codex` available.
 
-## Selecting a daemon
+## Selecting a gateway
 
-Multiple daemons may run on one host when each uses a distinct port and state directory.
-Selection precedence is:
-
-1. `ours-codex --ours-port <port>`
-2. `OURS_PORT`
-3. the config selected by `OURS_CONFIG`
-4. `~/.ours/config.json`
-5. port `3050`
-
-All MCP, hooks, unread, and watcher calls inherit the same selected profile. Example:
+Every client uses `~/.ours-client/profile.json`; `OURS_CONFIG` can select a complete
+alternate profile. It contains `serverUrl`, `expectedInstanceId`, and `credentialPath`.
+The daemon endpoint is derived as `serverUrl + /daemon`, including gateway path prefixes.
+Missing, unsafe, or invalid profiles fail closed. Remove legacy port/state/token
+selectors; `--ours-port` is rejected. Example after provisioning with `ours-install client`:
 
 ```sh
-OURS_CONFIG="$HOME/.ours/testing.json" ours-codex --ours-port 4050
+OURS_CONFIG="$HOME/.ours-client/testing.json" ours-codex
 ```
+
+MCP, hooks, unread and watcher requests inherit that profile. The SDK verifies the
+instance and rereads the issued credential for each request. Client installation and
+launch never install, start, restart or reconfigure server services.
+
+Native ownership is keyed by Codex's actual thread ID. A normal live TUI exit forwards
+that ID through the same `SessionEnd` input used by the hook. If Codex has not produced
+a logical thread ID, there is no native owner for the launcher to release.
 
 ## Hooks and consent
 
@@ -77,9 +80,17 @@ lifecycle directly, while the hooks add standard-mode context and defensive stat
 - `SessionStart` surfaces body-free unread metadata and an advisory `.ours-identity` pin.
 - `UserPromptSubmit` can re-surface unresolved unread/pin context.
 - `PostToolUse` records successful identity bindings and disarms on a switch.
-- `SessionEnd` releases the session lease and waits for all session-owned temporary
-  roles to send best-effort removal notices and delete local state. Live mode also
-  invokes this cleanup directly when its TUI exits, so it does not depend on hook trust.
+- `SessionEnd`, when delivered, reads the native `session_id`, durably captures the
+  exact owner, releases its lease, and waits for all owner-scoped temporary roles to
+  send best-effort removal notices and delete local state. Live mode also invokes
+  this cleanup directly when its TUI exits.
+
+The ours MCP owner is allocated lazily from Codex's tool-call thread metadata, so
+`SessionStart` is not required for ownership and may be disabled. Stdio/MCP recycle
+does not end that owner; a later call in the same unended thread recovers it. If
+`SessionEnd` is disabled or never delivered, ours does not infer death from EOF,
+PID, or a timeout and does not claim automatic cleanup. The owner and protected
+resources remain available for ordinary resume until a terminal hook is delivered.
 
 Codex requires review and trust of the exact hook definitions before running them.
 Installation does not bypass hook trust, and live monitoring remains available when the

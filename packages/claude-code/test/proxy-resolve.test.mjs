@@ -16,7 +16,7 @@
 // Self-contained; no build step. Run with:
 //   npm --workspace @ours.network/claude-code test
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, copyFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,6 +43,7 @@ const MARKER = 'CORE_CLI_RAN';
 function makeTree(root, coreBaseRel) {
   const pluginDir = join(root, 'plugins', 'cache', 'ours', 'ours', '0.17.2');
   mkdirSync(join(pluginDir, 'bin'), { recursive: true });
+  mkdirSync(join(pluginDir, 'dist'), { recursive: true });
   const proxy = join(pluginDir, 'bin', 'proxy.mjs');
   copyFileSync(REAL_PROXY, proxy);
   if (coreBaseRel !== null) {
@@ -58,20 +59,12 @@ function makeTree(root, coreBaseRel) {
   return proxy;
 }
 
-function runProxy(proxyPath, env = {}, args = []) {
+function runProxy(proxyPath, env = {}, args = [], input) {
   return spawnSync(process.execPath, [proxyPath, ...args], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
+    input,
   });
-}
-
-// The package metadata itself must wire normal harness close to the dedicated
-// session-end command; this is what distinguishes deterministic cleanup from
-// crash-reaper fallback.
-{
-  const hooks = JSON.parse(readFileSync(join(HERE, '..', 'hooks', 'hooks.json'), 'utf8'));
-  assert(Array.isArray(hooks.hooks.SessionEnd), 'Claude Code package declares a SessionEnd hook');
-  assert(/proxy\.mjs session-end/.test(hooks.hooks.SessionEnd[0].hooks[0].command), 'Claude Code SessionEnd invokes deterministic lease release');
 }
 
 const roots = [];

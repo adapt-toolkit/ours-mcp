@@ -21,20 +21,11 @@ assert.equal(linkedVersion.stdout, directVersion.stdout, 'CLI invoked through a 
 
 const result = spawnSync(process.execPath, [cli.pathname, 'status', '--json'], {
   encoding: 'utf8',
-  env: { ...process.env, OURS_CLI: fake, OURS_TEST_TRACE: trace },
+  env: { ...process.env, OURS_DAEMON_CLI: fake, OURS_TEST_TRACE: trace },
 });
-assert.equal(result.status, 23, 'delegated CLI exit status is preserved');
-assert.equal(result.stdout, 'delegated stdout\n');
-assert.equal(result.stderr, 'delegated stderr\n');
-assert.equal(readFileSync(trace, 'utf8'), 'daemon\nstatus\n--json\n', 'argv is passed without prose parsing');
-
-const missing = spawnSync(process.execPath, [cli.pathname, 'status'], {
-  encoding: 'utf8',
-  env: { ...process.env, OURS_CLI: join(root, 'missing-ours') },
-});
-assert.equal(missing.status, 1);
-assert.match(missing.stderr, /Install @ours\.network\/cli@2\.2\.0/);
-assert.match(missing.stderr, /OURS_CLI/);
+assert.equal(result.status, 1, 'client rejects server lifecycle administration');
+assert.match(result.stderr, /ours-install server/i);
+assert.equal((await import('node:fs')).existsSync(trace), false, 'no local server process is spawned');
 
 const legacyApplication = spawnSync(
   process.execPath,
@@ -43,9 +34,5 @@ const legacyApplication = spawnSync(
 );
 assert.equal(legacyApplication.status, 1);
 assert.match(legacyApplication.stderr, /--application.*no longer supported/);
-
-const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
-assert.match(source, /--application.*no longer supported/s, 'obsolete application selection fails with migration guidance');
-assert.match(source, /Install @ours\.network\/cli@2\.2\.0/, 'missing delegated CLI reports exact install guidance');
 
 console.log('cli-delegation: all passed');

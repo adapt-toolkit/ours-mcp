@@ -46,10 +46,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@ours.network/mcp": "1.1.1",
-    "@ours.network/sdk": "3.7.0",
+    "@ours.network/sdk": "5.0.0",
     "ws": "^8.21.0",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "@ours.network/mcp": "1.1.1"
   },
   "devDependencies": {
     "esbuild": "^0.24.2"
@@ -58,7 +58,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "esbuild src/monitor-mcp.mjs --bundle --platform=node --format=esm --external:@ours.network/mcp --outfile=dist/monitor-mcp.mjs",
+    "build": "node build.mjs",
     "prepack": "npm run build",
     "install-plugin": "bash install.sh",
     "test": "node --test"

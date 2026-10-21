@@ -19,13 +19,13 @@
 // which is the point of the split.
 //
 // Tool descriptions and zod schemas are compatibility-sensitive and kept byte-stable.
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolRegistry } from '../registry.js';
 import { z } from 'zod';
 
 import type { OursClient } from '@ours.network/sdk';
 
 import { buildContactLines } from '../../contacts.js';
-import { runTool, textResult } from '../tool.js';
+import { runTool, textResult, type OursClientProvider } from '../tool.js';
 
 type ContactRoot = Awaited<ReturnType<OursClient['listContacts']>>['roots'][string];
 
@@ -39,8 +39,8 @@ function fmtContactRoot(r: ContactRoot | undefined): string {
   return r.role_id ? `  [role "${r.role_id}" of ${who}]` : `  [root identity of ${who}]`;
 }
 
-export function registerContactsTools(server: McpServer, clientFor: () => OursClient): void {
-  server.tool(
+export function registerContactsTools(server: ToolRegistry, clientFor: OursClientProvider): void {
+  server.tool('contact')(
     'generate_invite',
     'Generate an invite to share out-of-band with another agent. The invite ' +
       'carries your identity and display name. If you pass a name, whoever redeems ' +
@@ -55,9 +55,9 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       name: z.string().min(1).optional().describe('Optional name to register the peer who redeems this invite, e.g. "Bob". Omit to register them under their own name on acceptance. Not allowed with mode "public".'),
       mode: z.enum(['one_time', 'public']).optional().describe('Invite kind. Omitted means "one_time" (single redemption, unchanged legacy behavior). "public" mints a reusable invite for open posting.'),
     },
-    async ({ name, mode }) =>
+    async ({ name, mode }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.generateInvite({ name, mode }),
         (r) => {
           // The heading needs the caller's own `name` argument as well as the result:
@@ -76,16 +76,16 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'list_invites',
     'List the outstanding invites the bound identity has minted and not yet seen ' +
       'redeemed or revoked: invite_id, kind (one_time | public), assigned peer name ' +
       'if any, and creation time. Carries no key material. Use revoke_invite to ' +
       'close one — essential for public invites, which are never consumed.',
     {},
-    async () =>
+    async (_args, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.listInvites(),
         (rows) => {
           if (rows.length === 0) return textResult('No outstanding invites.');
@@ -99,7 +99,7 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'revoke_invite',
     'Revoke an outstanding invite by invite_id (from generate_invite or ' +
       'list_invites). The only way to close a public invite, which has no expiry ' +
@@ -108,9 +108,9 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       'revoking does NOT remove contacts already admitted through the invite — ' +
       'to keep a specific peer out, revoke_invite first, then remove_contact.',
     { invite_id: z.string().min(1).describe('The invite_id to revoke.') },
-    async ({ invite_id }) =>
+    async ({ invite_id }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.revokeInvite({ invite_id }),
         (r) => {
           // revoked: false is the idempotent no-op, and it is NOT an error result.
@@ -123,7 +123,7 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'add_contact',
     "Add a contact from an invite blob produced by another agent's generate_invite. " +
       "If no name is given, the inviter's embedded display name is used. Also replies " +
@@ -132,9 +132,9 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       invite: z.string().min(1).describe('The base64 invite blob to redeem.'),
       name: z.string().min(1).optional().describe("Optional custom name for the inviter; defaults to their own name."),
     },
-    async ({ invite, name }) =>
+    async ({ invite, name }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.addContact({ invite, name }),
         // `display` is the packet's own choice of label — pending name, else the
         // inviter's announced name, else the container id.
@@ -142,14 +142,14 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'list_contacts',
     'List the contacts the bound identity knows about (name + container id), plus ' +
       'any pending local-contact-book introductions awaiting approval.',
     {},
-    async () =>
+    async (_args, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.listContacts(),
         ({ contacts, pending, roots, degraded, renames }) => {
           const degradedByCid = new Map(degraded.map((d) => [d.cid, d]));
@@ -178,7 +178,7 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'list_local_contact_book',
     'List the host-local contact book: identities on THIS host that are exposed for ' +
       'inviteless connection. Any of them can be messaged directly with send_message.',
@@ -186,9 +186,9 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
     // HOST-WIDE and deliberately NOT bound-identity-scoped: the SDK operation calls
     // no requireBound, so an unbound session can still read the book — which is the
     // one moment an agent most needs it. `isMine` is still session-scoped.
-    async () =>
+    async (_args, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.listLocalContactBook(),
         (entries) => {
           if (entries.length === 0) return textResult('The local contact book is empty.');
@@ -201,7 +201,7 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'set_local_book_policy',
     "Change the bound identity's local-contact-book settings: expose (publish/" +
       'unpublish it in the book) and/or auto_accept (whether local introductions are ' +
@@ -210,9 +210,9 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       expose: z.boolean().optional().describe('Publish (true) or remove (false) this identity in the local contact book.'),
       auto_accept: z.boolean().optional().describe('Auto-accept local introductions (false = queue them for approval).'),
     },
-    async ({ expose, auto_accept }) =>
+    async ({ expose, auto_accept }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.setLocalBookPolicy({ expose, auto_accept }),
         // `changes` arrives already worded and already ORDERED (policy before
         // exposure) because clients rely on both the wording and order; this layer
@@ -221,7 +221,7 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'respond_to_introduction',
     'Approve or reject a pending local-contact-book introduction (see list_contacts ' +
       'for the pending list). Approving registers the contact and delivers any messages ' +
@@ -230,9 +230,9 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       contact: z.string().min(1).describe('Pending introduction to act on (name or container id).'),
       action: z.enum(['approve', 'reject']).describe('approve or reject.'),
     },
-    async ({ contact, action }) =>
+    async ({ contact, action }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.respondToIntroduction({ contact, action }),
         // Discriminated on `action` because the two paths report different facts —
         // and have different side effects, which the SDK owns: approving flushes the
@@ -246,7 +246,7 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'remove_contact',
     'Forget a contact (by name or container id) — drops it from the bound identity\'s ' +
       'contacts, so you can no longer message them and inbound messages from them are ' +
@@ -264,9 +264,9 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       'contact book if the peer is still published there. To stop reaching a peer for ' +
       'good, address sends by container id and do not send to it. Requires a bound identity.',
     { contact: z.string().min(1).describe('Contact name or container id to remove.') },
-    async ({ contact }) =>
+    async ({ contact }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.removeContact({ contact }),
         (r) => {
           // `notified` is TRI-STATE and the third state is load-bearing: undefined
@@ -285,7 +285,7 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       ),
   );
 
-  server.tool(
+  server.tool('contact')(
     'rename_contact',
     'Rename a contact (addressed by current name or container id) — rewrites the ' +
       'display name only; the container id, keys and the established encrypted ' +
@@ -296,9 +296,9 @@ export function registerContactsTools(server: McpServer, clientFor: () => OursCl
       contact: z.string().min(1).describe('Contact name or container id to rename.'),
       name: z.string().min(1).describe('The new display name.'),
     },
-    async ({ contact, name }) =>
+    async ({ contact, name }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.renameContact({ contact, name }),
         // `from` is the PREVIOUS display name; the new one is the caller's argument.
         (r) => textResult(`Renamed contact "${r.from}" to "${name}" (${r.cid}).`),

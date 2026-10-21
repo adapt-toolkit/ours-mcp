@@ -23,17 +23,16 @@
 // already happened. Pass that string straight to textResult
 // and so does this file. Re-deriving those two sentences here is
 // exactly the drift the split exists to prevent.
-import { readFileSync } from 'node:fs';
-import { basename, resolve as resolvePath } from 'node:path';
+import { localFileContext, type FileExecutionContext } from '../file-context.js';
 
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolRegistry } from '../registry.js';
 import {
-  errFileUnreadable,
+  OursError,
 } from '@ours.network/sdk';
 import type { OursClient } from '@ours.network/sdk';
 
-import { runTool, type McpTextResult } from '../tool.js';
+import { runTool, type McpTextResult, type OursClientProvider, type ToolRequestExtra } from '../tool.js';
 
 function sendResult<T extends object>(text: string, outcome: T, isError = false): McpTextResult {
   const historyWarning = 'history_stored' in outcome && outcome.history_stored === false
@@ -46,8 +45,19 @@ function sendResult<T extends object>(text: string, outcome: T, isError = false)
   };
 }
 
-export function registerMessagingTools(server: McpServer, clientFor: () => OursClient): void {
-  server.tool(
+/** Optional supervisor-owned delivery sink. Never obtains an Ours client. */
+export type CurrentChatFileSender = (
+  input: { path: string; filename?: string; mime?: string }, extra: ToolRequestExtra,
+) => Promise<{ id: string; name: string; mimeType: string; size: number; sessionGeneration: string; acpSessionId: string; turnId: string }>;
+
+export function registerMessagingTools(
+  server: ToolRegistry,
+  clientFor: OursClientProvider,
+  files: FileExecutionContext = localFileContext,
+  currentChatFile?: CurrentChatFileSender,
+  currentChatFileDirectory?: string,
+): void {
+  server.tool('bound')(
     'send_message',
     'Send an end-to-end-encrypted message to a known contact (by name or container id). ' +
       'If the recipient is not a contact yet, the connection is established automatically ' +
@@ -72,9 +82,9 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
         .optional()
         .describe('Optional 1-based sentence index in the replied-to message.'),
     },
-    async ({ contact, text, reply_to_wire_id, reply_to_sentence }) =>
+    async ({ contact, text, reply_to_wire_id, reply_to_sentence }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.sendMessage({ contact, text, reply_to_wire_id, reply_to_sentence }),
         (v) => {
           switch (v.kind) {
@@ -116,21 +126,24 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
       ),
   );
 
-  server.tool(
+  server.registerTool('filesystem')(
     'send_file',
+    { description: (currentChatFile ? 'Omit contact to attach a file to this ACP chat. ' + (currentChatFileDirectory ? `Write the completed file under ${JSON.stringify(currentChatFileDirectory)} relative to your working directory, then pass its path (maximum 20 MiB). ` : '') + 'Provide path; no inline bytes or reply fields for chat delivery. One attempt, no automatic retries. Specify contact to send through Ours. ' : '') +
     'Send a file to a known contact (by name or container id). Provide EITHER `path` ' +
       '(the connector reads it as your OS user) OR `data_base64` + `filename` (inline bytes). ' +
       'Files and text are distinct messages — to caption a file, also send_message. ' +
       'Requires a bound identity.',
-    {
-      contact: z.string().min(1).describe('Contact name or container id to send to.'),
+    inputSchema: z.object({
+      contact: currentChatFile
+        ? z.string().min(1).regex(/\S/).optional().describe('Ours recipient. Omit ONLY to attach to this ACP chat.')
+        : z.string().min(1).describe('Contact name or container id to send to.'),
       path: z.string().min(1).optional().describe('Filesystem path to the file to send (preferred). Read by the ours connector as YOUR OS user, then streamed to the daemon.'),
       data_base64: z.string().min(1).optional().describe('Inline file bytes, base64-encoded (alternative to path).'),
       filename: z.string().min(1).optional().describe('Filename to advertise (required with data_base64; defaults to basename of path).'),
       mime: z.string().optional().describe('MIME type (inferred from the path extension when omitted).'),
       reply_to_wire_id: z.string().optional().describe('wire_id (from unread or persistent-history tools) this file replies to.'),
       reply_to_sentence: z.number().int().positive().optional().describe('Optional 1-based sentence index in the replied-to item.'),
-    },
+    }).strict() },
     // ⚠ `path` IS READ HERE, NOT BY THE DAEMON, AND THAT IS THE WHOLE POINT.
     //
     // `sendFile({path})` reads the file in the DAEMON's process as the DAEMON's OS
@@ -141,26 +154,34 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
     // Passing `path` straight through typechecks perfectly and fails only at
     // runtime, on someone else's machine, with a permissions error that has no
     // workaround. A green compile on this handler is not evidence of correctness.
-    async ({ contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }) =>
-      runTool(
-        clientFor(),
+    async ({ contact, path, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence }, extra) => {
+      if (contact === undefined) {
+        extra.signal.throwIfAborted();
+        if (!currentChatFile || !path || data_base64 !== undefined || reply_to_wire_id !== undefined || reply_to_sentence !== undefined)
+          throw Error('Current chat delivery requires path only, without Ours reply fields');
+        const attachment = await currentChatFile({ path, filename, mime }, extra);
+        return { ...sendResult(`File "${attachment.name}" attached to this ACP chat (${attachment.size} B).`, attachment),
+          structuredContent: { attachment, destination: 'current_chat', status: 'attached' } };
+      }
+      return runTool(
+        clientFor(extra),
         async (c) => {
+          extra.signal.throwIfAborted();
+          const inputs = Number(Boolean(path)) + Number(Boolean(data_base64));
+          if (inputs !== 1) {
+            throw new OursError('FILE_UNREADABLE', 'send_file requires exactly one of path or data_base64.');
+          }
           if (!path) {
             return c.sendFile({ contact, data_base64, filename, mime, reply_to_wire_id, reply_to_sentence });
           }
-          const abs = resolvePath(path);
-          let bytes: Buffer;
+          const source = await files.read(path, extra);
+          let staged: { upload_id: string };
           try {
-            bytes = readFileSync(abs);
-          } catch (e) {
-            // The SDK's own row for an unreadable file, raised on the side that
-            // actually tried to read it.
-            throw errFileUnreadable(String(e));
-          }
-          const staged = await c.uploadFile(new Uint8Array(bytes), {
-            filename: filename ?? basename(abs),
-            mime,
-          });
+            staged = await c.uploadFile(source.body, {
+              filename: filename ?? source.filename, mime, size: source.size,
+            });
+          } finally { await source.close(); }
+          extra.signal.throwIfAborted();
           return c.sendFile({
             contact,
             upload_id: staged.upload_id,
@@ -210,10 +231,11 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
               return sendResult(`${desc} sent to "${contact}" (wire_id ${v.wireId}).`, v);
           }
         },
-      ),
+      );
+    },
   );
 
-  server.tool(
+  server.tool('bound')(
     'get_messages',
     'Fetch the oldest unread messages for the bound identity and atomically mark that ' +
       'bounded batch read. Defaults to 50 and returns at most 200, plus the remaining unread ' +
@@ -221,9 +243,9 @@ export function registerMessagingTools(server: McpServer, clientFor: () => OursC
       'Read receipts are best-effort after the local read commit; there is no defer, outbox, ' +
       'fallback, or automatic retry.',
     { limit: z.number().int().min(1).max(200).optional().describe('Batch size from 1 to 200 (default 50).') },
-    async ({ limit }) =>
+    async ({ limit }, extra) =>
       runTool(
-        clientFor(),
+        clientFor(extra),
         (c) => c.getMessages({ limit }),
         (payload) => {
           const result = {
