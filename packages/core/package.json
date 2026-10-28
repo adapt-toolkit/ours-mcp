@@ -68,6 +68,6 @@
     "tsx": "^4.19.0",
     "typescript": "^5.5.4",
     "@ours.network/cli": "4.0.1",
-    "@ours.network/daemon": "5.0.0"
+    "@ours.network/daemon": "5.0.1"
   }
 }
