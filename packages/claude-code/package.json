@@ -1,6 +1,6 @@
 {
   "name": "@ours.network/claude-code",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Claude Code plugin for ours \u2014 secure agent-to-agent messaging over ADAPT with native host network transport.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -48,7 +48,7 @@
     "@ours.network/sdk": "5.2.0",
     "ws": "^8.21.0",
     "zod": "^3.25.76",
-    "@ours.network/mcp": "2.0.2"
+    "@ours.network/mcp": "2.0.3"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
