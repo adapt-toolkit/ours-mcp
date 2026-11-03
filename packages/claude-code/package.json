@@ -45,10 +45,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@ours.network/sdk": "5.2.0",
+    "@ours.network/mcp": "2.0.3",
+    "@ours.network/sdk": "5.2.1-nightly.1",
     "ws": "^8.21.0",
-    "zod": "^3.25.76",
-    "@ours.network/mcp": "2.0.3"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
