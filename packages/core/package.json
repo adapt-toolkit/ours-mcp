@@ -58,16 +58,16 @@
     "test:external-profile": "node test/native-profile-session.test.mjs && node test/external-profile-stdio-refresh.test.mjs"
   },
   "dependencies": {
-    "@ours.network/sdk": "5.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@ours.network/sdk": "5.2.1-nightly.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@ours.network/cli": "4.2.1-nightly.1",
+    "@ours.network/daemon": "5.2.1-nightly.1",
     "@types/node": "^20.14.0",
     "esbuild": "^0.24.2",
     "tsx": "^4.19.0",
-    "typescript": "^5.5.4",
-    "@ours.network/cli": "4.0.1",
-    "@ours.network/daemon": "5.0.1"
+    "typescript": "^5.5.4"
   }
 }
