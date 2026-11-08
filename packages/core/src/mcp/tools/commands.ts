@@ -15,6 +15,19 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
   z.record(JsonValueSchema),
 ]));
 
+// Advertised as one non-recursive level: some tool consumers reject any
+// self-referencing $ref in tool parameters, which fails every model request
+// once the catalog is loaded. The pipe keeps full recursive JSON validation at
+// runtime, while the published JSON Schema is only the input side.
+const CommandArgumentsSchema: z.ZodType<JsonValue, z.ZodTypeDef, unknown> = z.union([
+  z.null(),
+  z.boolean(),
+  z.number(),
+  z.string(),
+  z.array(z.unknown()),
+  z.record(z.unknown()),
+]).pipe(JsonValueSchema);
+
 export function registerCommandTools(server: ToolRegistry, clientFor: OursClientProvider): void {
   server.tool('bound')(
     'list_contact_commands',
@@ -42,7 +55,7 @@ export function registerCommandTools(server: ToolRegistry, clientFor: OursClient
     {
       contact: z.string().min(1).describe('Contact name or container id.'),
       command: z.string().min(1).describe('Advertised command name.'),
-      arguments: JsonValueSchema.describe('Any JSON-compatible command arguments accepted by the advertised schema.'),
+      arguments: CommandArgumentsSchema.describe('Any JSON-compatible command arguments accepted by the advertised schema.'),
     },
     async ({ contact, command, arguments: commandArguments }, extra) => runTool(
       clientFor(extra),
