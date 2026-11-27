@@ -2,12 +2,13 @@
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sendControlCommand } from '../control-server.mjs';
 import { resolveDaemonProfile } from '../profile.mjs';
 import { readHostHookState } from '../host-hooks.mjs';
 import { attachOursClient } from '@ours.network/sdk';
+import { prepareAutomaticSession } from '../../../core/src/automatic-session.ts';
 import { hostProfileFromEnv } from '../../../core/src/host-client/index.ts';
 
 async function defaultFindPin(cwd) {
@@ -50,7 +51,7 @@ function renderContext(unread, pin) {
   return lines.join('\n');
 }
 
-export async function handleHook(payload, { env = process.env, fetch: fetchImpl = globalThis.fetch, send = sendControlCommand, findPin = defaultFindPin, profileResolver = resolveDaemonProfile, clientFactory = attachOursClient, readHostState = readHostHookState } = {}) {
+export async function handleHook(payload, { env = process.env, fetch: fetchImpl = globalThis.fetch, send = sendControlCommand, findPin = defaultFindPin, profileResolver = resolveDaemonProfile, clientFactory = attachOursClient, readHostState = readHostHookState, prepareSession = prepareAutomaticSession } = {}) {
   try {
     const event = payload?.hook_event_name;
     const socket = env.OURS_CODEX_CONTROL_SOCKET;
@@ -65,8 +66,9 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
       return { continue: true };
     }
     if (event !== 'SessionStart' && event !== 'UserPromptSubmit') return { continue: true };
+    let controlRegistration;
     if (event === 'SessionStart' && socket && capability && payload.session_id && payload.cwd) {
-      await send(socket, capability, { command: 'register_session', sessionId: payload.session_id, threadId: payload.session_id, cwd: payload.cwd });
+      controlRegistration = await send(socket, capability, { command: 'register_session', sessionId: payload.session_id, threadId: payload.session_id, cwd: payload.cwd });
     }
     let hostProfile;
     try { hostProfile = hostProfileFromEnv(env); }
@@ -75,10 +77,18 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
       const nativeSessionId = payload.session_id;
       if (typeof nativeSessionId !== 'string' || !nativeSessionId) return { continue: true };
       const appPath = env.OURS_MCP_CONFIG || join(env.HOME || homedir(), '.ours-mcp', 'config.json');
-      const state = await readHostState({ profile: hostProfile, nativeSessionId, applicationPath: appPath });
+      const state = await readHostState({ profile: hostProfile, nativeSessionId, applicationPath: appPath, harness: 'codex' });
       const pin = await findPin(payload.cwd || process.cwd());
-      const context = renderContext(state.unread.identities, pin);
-      return context ? { continue: true, hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { continue: true };
+      let registration = '',notice='';
+      if(event === 'SessionStart'){
+        try {
+          const result=await prepareSession(hostProfile,'codex',nativeSessionId,env,{notice:true,source:payload.source,subagent:!!payload.agent_id});
+          if(result?.identity && socket && capability && controlRegistration?.state?.boundIdentity !== result.identity.name) await send(socket,capability,{command:'binding_changed',identity:result.identity.name});
+          if(result?.identity && (result.showNotice ?? result.identity.created)){notice=`Ours: this session is ${result.identity.displayName}, a temporary identity. When the session ends, Ours deletes it and its message history on this computer. Messages you already sent stay with the people and agents who received them. If Ours can't finish cleaning up, the identity and its history stay on this computer until cleanup is completed. Say "keep this Ours identity" to make it permanent, or "call yourself <new name>" to rename it.`;registration=notice+' Nothing retries automatically and there is no cleanup time limit. Only this owning session can close its temporary identity: use close_temporary_identity with its exact name only on explicit user request, retaining upstream approval. For earlier leftovers, run ours-mcp retry-session-ends once only on explicit request and report completed/failed/more counts. An earlier session whose end was never recorded requires resuming that original session; otherwise report blocked without guessing or forcing. Use keep_identity only on explicit user request; it keeps the same identity, contacts and history. Use rename_identity for a user-given local name; the address stays the same. If NAME_TAKEN, ask for another name without adding a suffix. Use list_local_sessions to find sessions on this computer and address the exact handle shown. Keep the existing Ours Monitor workflow; do not arm it automatically.';}
+        }catch(error){registration='Ours session registration unavailable: '+error.message;}
+      }
+      const context = [registration,renderContext(state.unread.identities, pin)].filter(Boolean).join('\n\n');
+      return context ? { continue: true, ...(notice?{systemMessage:notice}:{}), hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { continue: true };
     }
 
     return { continue: true };

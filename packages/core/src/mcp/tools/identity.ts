@@ -132,6 +132,28 @@ export function registerIdentityTools(
   applicationIdentities: ApplicationIdentityStore,
   options: { managedLifetime?: boolean } = {},
 ): void {
+  server.tool('profile')(
+    'rename_identity',
+    'Set the current identity friendly local display name when the user asks. CID and internal name stay unchanged; local label collisions are refused. Does not rename peer contact aliases.',
+    { display_name: z.string().min(1).max(160) },
+    async ({ display_name }, extra) => runTool(clientFor(extra), c => c.renameIdentity({ displayName: display_name }),
+      r => textResult(`Session name: ${r.displayName}. Stable identity: ${r.name} (${r.cid}).`)),
+  );
+  if (!options.managedLifetime) server.tool('lifecycle')(
+    'keep_identity',
+    'Make this exact session-owned temporary identity persistent only when the user asks to keep it. Keeps the same CID, contacts and local history; session end will then retain them. Retry-safe; refuses cleanup that already started.',
+    {},
+    async (_args, extra) => runTool(clientFor(extra), c => c.promoteIdentity(),
+      r => textResult(`Kept identity ${r.displayName} (${r.cid}). It is persistent; session end will retain its local history and contacts.`)),
+  );
+  server.tool('inventory')(
+    'list_local_sessions',
+    'List policy-visible automatically registered, nonretired local session owners with stable handle/CID, friendly label and client. Process liveness is unverified if end delivery was missed. Explicit permanent bindings remain discoverable through list_identities and list_local_contact_book. Choose the exact address when names/projects are ambiguous. Listing does not introduce contacts or arm Monitor.',
+    {},
+    async (_args, extra) => runTool(clientFor(extra), c => c.listLocalSessions(),
+      rows => ({ ...textResult(JSON.stringify(rows, null, 2)), structuredContent: { sessions: rows } })),
+  );
+
   server.tool('binding')(
     'create_identity',
     'Create a new self-sovereign identity (an ADAPT node) with the given display ' +
@@ -454,7 +476,7 @@ export function registerIdentityTools(
         // `described: false` means ::actor::describe_identity threw — the five
         // described fields are UNKNOWN, not empty, so the response degrades to the
         // bare line, dropping the hierarchy, temporary, bio and persona sentences.
-        if (!r.described) return textResult(`Bound to "${r.name}" (${r.cid}).`);
+        if (!r.described) return textResult(`Bound to "${r.displayName ?? r.name}" (${r.cid}).${r.displayName ? ` Stable address: ${r.name}.` : ''}`);
         const place = r.isRoot
           ? ' — the ROOT identity of this host'
           : r.roleId !== ''
@@ -469,7 +491,7 @@ export function registerIdentityTools(
           : '';
         const bio = r.bio ? `\nBio: ${r.bio}` : '';
         const persona = r.persona ? `\nPersona: ${r.persona}` : '';
-        return textResult(`Bound to "${r.name}" (${r.cid})${place}.${temp}${bio}${persona}`);
+        return textResult(`Bound to "${r.displayName ?? r.name}" (${r.cid})${place}.${r.displayName ? ` Stable address: ${r.name}.` : ''}${temp}${bio}${persona}`);
       } catch (err) {
         // NOT a missing `true` and NOT a forgotten runTool: it renders
         // the not-bound case with isError FALSE, and this handler preserves that.

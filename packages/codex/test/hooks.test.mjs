@@ -128,3 +128,29 @@ test('network profile never invokes the obsolete Docker application-identity rou
     assert.equal(existsSync(marker), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('automatic startup offers one visible notice, private basename and binding sync without arming Monitor',async()=>{
+ const home=mkdtempSync(join(tmpdir(),'ours-auto-notice-'));const profile=join(home,'profile.json');
+ writeFileSync(profile,JSON.stringify({serverUrl:'http://gateway.test',expectedInstanceId:'11111111-2222-3333-4444-555555555555',credentialPath:join(home,'credential')}),{mode:0o600});
+ const calls=[],prepared=[];let created=true;
+ const deps={env:{HOME:home,OURS_CONFIG:profile,OURS_MCP_CONFIG:join(home,'mcp.json'),OURS_CODEX_CONTROL_SOCKET:'/tmp/control',OURS_CODEX_CAPABILITY:'fixture'},
+  send:async(...args)=>{calls.push(args[2]);return {state:{boundIdentity:created?null:'session-opaque'}};},
+  readHostState:async()=>({unread:{identities:[]}}),findPin:async()=>null,
+  prepareSession:async(...args)=>{prepared.push(args);return {identity:{name:'session-opaque',displayName:'session-opaque',created}};}};
+ const first=await handleHook({hook_event_name:'SessionStart',source:'startup',session_id:'native',cwd:'/private/team/repo'},deps);
+ assert.match(first.systemMessage,/Ours: this session is/);assert.match(first.hookSpecificOutput.additionalContext,/do not arm it automatically/);
+ assert.equal(prepared[0][4].projectLabel,undefined);assert.ok(!first.systemMessage.includes('/private/team'));
+ assert.deepEqual(calls.map(x=>x.command),['register_session','binding_changed']);assert.ok(!calls.some(x=>x.command==='arm'));
+ created=false;calls.length=0;const repeat=await handleHook({hook_event_name:'SessionStart',source:'resume',session_id:'native',cwd:'/private/team/repo'},deps);
+ assert.equal(repeat.systemMessage,undefined);assert.deepEqual(calls.map(x=>x.command),['register_session']);
+});
+
+test('explicitly bound sessions retain unread hook context',async()=>{
+ const home=mkdtempSync(join(tmpdir(),'ours-explicit-unread-'));const profile=join(home,'profile.json');
+ writeFileSync(profile,JSON.stringify({serverUrl:'http://gateway.test',expectedInstanceId:'11111111-2222-3333-4444-555555555555',credentialPath:join(home,'credential')}),{mode:0o600});
+ const r=await handleHook({hook_event_name:'SessionStart',session_id:'bound-thread'}, {
+  env:{HOME:home,OURS_CONFIG:profile,OURS_BIND_IDENTITY:'Explicit'},findPin:async()=>null,
+  prepareSession:async()=>null,readHostState:async()=>({unread:{identities:[{name:'Explicit',count:3}]}})
+ });
+ assert.match(r.hookSpecificOutput.additionalContext,/Explicit: 3/);assert.equal(r.systemMessage,undefined);
+});

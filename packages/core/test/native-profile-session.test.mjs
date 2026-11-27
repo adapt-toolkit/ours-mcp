@@ -114,6 +114,7 @@ const daemonConfig = join(daemonState, 'daemon-config.json');
 const credentialPath = join(hostState, 'daemon-token');
 const deliveryPath = join(deliveryState, 'daemon-token');
 const profilePath = join(hostState, 'profile.json');
+const faultPath=join(root,'gateway-faults.json');
 writeFileSync(daemonConfig, JSON.stringify({
   stateDir: daemonState, port, apiVisibility: 'owner', apiTokenDeliveryFiles: [deliveryPath],
 }), { mode: 0o600 });
@@ -152,7 +153,7 @@ try {
   copyFileSync(join(daemonState, 'daemon-token'), credentialPath);
   copyFileSync(join(daemonState, 'daemon-token'), deliveryPath);
   const gatewayPort = await freePort();
-  gateway = spawn(process.execPath, [fileURLToPath(new URL('../test-support/prefixed-daemon.mjs', import.meta.url)), String(gatewayPort), endpoint], { stdio: ['ignore', 'pipe', 'inherit'] });
+  gateway = spawn(process.execPath, [fileURLToPath(new URL('../test-support/prefixed-daemon.mjs', import.meta.url)), String(gatewayPort), endpoint, faultPath], { stdio: ['ignore', 'pipe', 'inherit'] });
   await Promise.race([
     once(gateway.stdout, 'data'),
     once(gateway, 'exit').then(() => { throw new Error('gateway exited before readiness'); }),
@@ -167,6 +168,7 @@ try {
     if (key.startsWith('OURS_') && !['OURS_CONFIG', 'OURS_MCP_CONFIG', 'OURS_TEST_DAEMON_CLI'].includes(key)) delete proxyEnv[key];
   }
   delete proxyEnv.CLAUDE_CODE_SESSION_ID;
+  delete proxyEnv.FLEET_OURS_MANAGED;
 
   const sessionA = randomUUID();
   const sessionB = randomUUID();
@@ -276,7 +278,17 @@ try {
     .find((row) => row.value.state === 'active' && ![freshA.ownerInstanceId, ownerB].includes(row.value.ownerInstanceId));
   assert.ok(pendingRecord);
   const pendingOwner = pendingRecord.value.ownerInstanceId;
-  writeFileSync(pendingRecord.path, `${JSON.stringify({ ...pendingRecord.value, state: 'pending' }, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(faultPath,JSON.stringify({release:true}));
+  const failedEnd=spawnSync(process.execPath,[cli,'session-end','--harness','codex'],{env:proxyEnv,input:JSON.stringify({session_id:pendingSession}),encoding:'utf8',timeout:10000});
+  assert.notEqual(failedEnd.status,0,'failed cleanup is visible');
+  assert.equal(JSON.parse(readFileSync(pendingRecord.path,'utf8')).state,'pending');
+  rmSync(faultPath);
+  const retry=spawnSync(process.execPath,[cli,'retry-session-ends'],{env:proxyEnv,encoding:'utf8',timeout:15000});
+  assert.equal(retry.status,0,retry.stderr);assert.equal(JSON.parse(retry.stdout).completed,1);
+  const duplicate=spawnSync(process.execPath,[cli,'retry-session-ends'],{env:proxyEnv,encoding:'utf8',timeout:15000});
+  assert.equal(duplicate.status,0,duplicate.stderr);assert.equal(JSON.parse(duplicate.stdout).attempted,0);
+  assert.equal(JSON.parse(readFileSync(ownerFor(hostState,expectedInstanceId,ownerB).path,'utf8')).state,'active','pending retry never releases active sibling');
+  assert.equal(JSON.parse(readFileSync(pendingRecord.path,'utf8')).state,'ended');
   const recoveredPending = await proxy.call('current_identity', {}, pendingSession);
   assert.match(JSON.stringify(recoveredPending), /No identity bound/);
   assert.ok(!existsSync(join(daemonState, 'PendingTemporary')), 'pending terminal intent is recovered before successor allocation');
@@ -290,6 +302,19 @@ try {
   try {
     const fallback = await claude.call('list_identities');
     assert.equal(fallback.result?.isError, false, JSON.stringify(fallback));
+    const policy=join(root,'bad-policy.json');writeFileSync(policy,'broken JSON');
+    const bad=await connectProxy({...claudeEnv,OURS_SESSION_POLICY:policy},'corrupt-policy');
+    try{const result=await bad.call('list_identities');assert.equal(result.result?.isError,false,JSON.stringify(result));}finally{await stopProxy(bad);}
+    const endedEnv={...claudeEnv,CLAUDE_CODE_SESSION_ID:randomUUID()};
+    const ended=await connectProxy(endedEnv,'clear-record');
+    try{
+      await ended.call('list_identities');await sessionEnd(endedEnv,endedEnv.CLAUDE_CODE_SESSION_ID);
+      const result=await ended.call('list_identities');assert.equal(result.result?.isError,false,JSON.stringify(result));
+    }finally{await stopProxy(ended);}
+    writeFileSync(faultPath,JSON.stringify({selection:'once'}));
+    const down=await connectProxy({...claudeEnv,CLAUDE_CODE_SESSION_ID:randomUUID()},'selection-down');
+    try{const result=await down.call('list_identities');assert.equal(result.result?.isError,false,JSON.stringify(result));}finally{await stopProxy(down);rmSync(faultPath);}
+
   } finally {
     await stopProxy(claude);
   }

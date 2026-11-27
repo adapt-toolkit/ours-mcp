@@ -1,13 +1,15 @@
 import { dirname } from 'node:path';
 import { ApplicationIdentityStore } from '../../core/src/application-identities.ts';
+import { nativeSessionKey } from '../../core/src/automatic-session.ts';
 import { nativeClientForAtRoot } from '../../core/src/host-client/index.ts';
 
 /** Body-free hook metadata, scoped to this client's adopted identities. */
-export async function readHostHookState({ profile, nativeSessionId, applicationPath, clientFor = nativeClientForAtRoot }) {
+export async function readHostHookState({ profile, nativeSessionId, applicationPath, harness, clientFor = nativeClientForAtRoot }) {
   const store = new ApplicationIdentityStore({ instanceId: profile.expectedInstanceId }, { path: applicationPath });
   const identities = await store.list();
   const visible = new Set(identities);
-  const client = await clientFor(profile, nativeSessionId, dirname(applicationPath));
+  const selector = harness ? await nativeSessionKey(profile, harness, nativeSessionId, { ...process.env, OURS_MCP_CONFIG: applicationPath }) : nativeSessionId;
+  const client = await clientFor(profile, selector, dirname(applicationPath));
   try {
     const [unread, rows] = await Promise.all([client.unread(), client.listIdentities()]);
     const entries = (Array.isArray(unread?.identities) ? unread.identities : []).flatMap(entry => {

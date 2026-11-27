@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "harness": "codex",
+  "capabilities": [
+    "native-session-auto-v1",
+    "identity-display-name-v1",
+    "identity-promotion-v1"
+  ]
+}

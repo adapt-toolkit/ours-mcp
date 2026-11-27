@@ -5,3 +5,7 @@ export {
   nativeClientForAtRoot,
   nativeSessionRecordPath,
 } from './native-session.js';
+
+export { prepareAutomaticSession, nativeSessionKey } from '../automatic-session.js';
+
+export { retryPendingNativeSessionEnds } from "../native-session.js";

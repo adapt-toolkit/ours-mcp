@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { prepareAutomaticSession } from '../host-hooks.mjs';
 //
 // ours hook runner — Claude Code host seam (single entry point, subcommand
 // dispatch, mirrors the adapt-workspace pattern). Invoked from hooks/hooks.json:
@@ -14,7 +15,7 @@ import * as fs from 'node:fs';
 import { hostProfileFromEnv, readHostHookState } from '../host-hooks.mjs';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { resolve, join, dirname } from 'node:path';
+import { basename, resolve, join, dirname } from 'node:path';
 
 type HookKind = 'session-start' | 'user-prompt-submit';
 
@@ -44,6 +45,9 @@ type NotifyMeta = { from: string; msg_id: number | string; date: string };
 type Unread = { name: string; count: number; recent: NotifyMeta[] };
 type ContainerHookState = { identities: string[]; unread: { identities: Unread[] }; bindings: string[] };
 let containerState: ContainerHookState | null = null;
+let automaticContext = '';
+let automaticNotice = '';
+
 
 async function loadNetworkState(payload: Record<string, unknown>): Promise<boolean> {
   const profile = hostProfileFromEnv(process.env);
@@ -51,7 +55,7 @@ async function loadNetworkState(payload: Record<string, unknown>): Promise<boole
   const nativeSessionId = payload.session_id;
   if (typeof nativeSessionId !== 'string' || !nativeSessionId) throw new Error('Claude hook requires session_id in network mode');
   const appPath = process.env.OURS_MCP_CONFIG || join(process.env.HOME || homedir(), '.ours-mcp', 'config.json');
-  containerState = await readHostHookState({ profile, nativeSessionId, applicationPath: appPath });
+  containerState = await readHostHookState({ profile, nativeSessionId, applicationPath: appPath, harness: 'claude-code' });
   return true;
 }
 
@@ -197,12 +201,14 @@ function sessionStart(raw: string): void {
   const unread = collectUnread();
 
   const blocks: string[] = [];
+  if (automaticContext) blocks.push(automaticContext);
   if (pinned) blocks.push(renderIdentityDirective(pinned));
   if (unread.length > 0) blocks.push(renderContext(unread));
   if (blocks.length === 0) return noop();
 
   emit({
     continue: true,
+    ...(automaticNotice ? { systemMessage: automaticNotice } : {}),
     hookSpecificOutput: {
       hookEventName: 'SessionStart',
       additionalContext: blocks.join('\n\n'),
@@ -248,6 +254,15 @@ async function main(): Promise<void> {
     } catch { /* hook handlers preserve their benign malformed-input behavior */ }
     switch (kind) {
       case 'session-start':
+        if (typeof payload.session_id === 'string') {
+          try {
+            const result = await prepareAutomaticSession(hostProfileFromEnv(process.env), 'claude-code', payload.session_id, process.env, { notice: true, source: String(payload.source || ''), subagent: !!payload.agent_id || payload.is_sidechain === true });
+            if (result?.identity && (result.showNotice ?? result.identity.created)) {
+              automaticNotice = `Ours: this session is ${result.identity.displayName}, a temporary identity. When the session ends, Ours deletes it and its message history on this computer. Messages you already sent stay with the people and agents who received them. If Ours can't finish cleaning up, the identity and its history stay on this computer until cleanup is completed. Say "keep this Ours identity" to make it permanent, or "call yourself <new name>" to rename it.`;
+              automaticContext = automaticNotice + ' Nothing retries automatically and there is no cleanup time limit. Only this owning session can close its temporary identity: use close_temporary_identity with its exact name only on explicit user request, retaining upstream approval. For earlier leftovers, run ours-mcp retry-session-ends once only on explicit request and report completed/failed/more counts. An earlier session whose end was never recorded requires resuming that original session; otherwise report blocked without guessing or forcing. Use keep_identity only on explicit user request; it keeps the same identity, contacts and history. Use rename_identity for a user-given local name; the address stays the same. If NAME_TAKEN, ask for another name without adding a suffix. Use list_local_sessions to find sessions on this computer and address the exact handle shown. Keep the existing Ours Monitor workflow; do not arm it automatically.';
+            }
+          } catch (error) { automaticContext = 'Ours session registration unavailable: ' + (error instanceof Error ? error.message : String(error)); }
+        }
         await loadNetworkState(payload);
         sessionStart(raw);
         return;

@@ -28,7 +28,8 @@
     "skills",
     "hooks",
     "bin",
-    "dist"
+    "dist",
+    "integration-capabilities.json"
   ],
   "publishConfig": {
     "access": "public"
