@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { hostProfileFromEnv, nativeClientForAtRoot } from '../../core/src/host-client/index.ts';
+import { hostProfileFromEnv, nativeClientForAtRoot, nativeSessionKey } from '../../core/src/host-client/index.ts';
 
 export async function runNetworkWatch({
   identity,
@@ -27,7 +27,8 @@ export async function runNetworkWatch({
   }
   let client;
   try {
-    client = await clientFor(profile, nativeSessionId, hostRecordRoot);
+    const selector = await nativeSessionKey(profile, 'codex', nativeSessionId, { ...env, OURS_MCP_CONFIG: join(hostRecordRoot,'config.json') });
+    client = await clientFor(profile, selector, hostRecordRoot);
     for await (const event of client.watchNotifications(identity, { kinds: ['inbound'], signal: controller.signal })) {
       const summary = event?.event === 'file_received'
         ? `[${identity}] new file ${event.filename ?? '?'} from ${event.from ?? '?'}`

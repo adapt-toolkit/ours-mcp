@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { OursClient } from '@ours.network/sdk';
@@ -41,7 +41,7 @@ export async function nativeSessionKey(profile: HostProfile, harness: NativeHarn
   return key;
 }
 
-export async function prepareAutomaticSession(profile: HostProfile | null, harness: NativeHarness, id: string, env: NodeJS.ProcessEnv = process.env, options: { source?: string; subagent?: boolean; managed?: boolean } = {}): Promise<null | { client: OursClient; selector: string; identity: Awaited<ReturnType<OursClient['ensureSessionIdentity']>> | null }> {
+export async function prepareAutomaticSession(profile: HostProfile | null, harness: NativeHarness, id: string, env: NodeJS.ProcessEnv = process.env, options: { source?: string; subagent?: boolean; managed?: boolean; projectLabel?: string; notice?: boolean } = {}): Promise<null | { client: OursClient; selector: string; identity: Awaited<ReturnType<OursClient['ensureSessionIdentity']>> | null; showNotice?: boolean }> {
   // Fleet/explicit bindings remain under their existing supervisor/connector path.
   if (!profile || options.managed || options.subagent || env.OURS_BIND_IDENTITY?.trim()) return null;
   const policy = await automaticSessionPolicy(env);
@@ -58,10 +58,18 @@ export async function prepareAutomaticSession(profile: HostProfile | null, harne
     if (['ended','pending'].includes(existing.state) && options.source !== 'resume') throw new Error('This native owner has ended. Resume the native session explicitly before creating another identity.');
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const client = await nativeClientFor(profile, selector, env);
-  if (initialized.has(client)) return { client, selector, identity: null };
-  const identity = await client.ensureSessionIdentity({ harness, sessionHandle: 's-' + createHash('sha256').update(harness + '\0' + id).digest('hex'), exposeLocal: policy.exposeLocal, localAutoAccept: policy.localAutoAccept, ...('localLabel' in policy && policy.localLabel ? { localLabel: policy.localLabel } : {}) });
+  if (initialized.has(client) && !options.notice && !options.projectLabel) return { client, selector, identity: null };
+  const identity = await client.ensureSessionIdentity({ harness, sessionHandle: 's-' + createHash('sha256').update(harness + '\0' + id).digest('hex'), exposeLocal: policy.exposeLocal, localAutoAccept: policy.localAutoAccept, ...(options.projectLabel ? { projectLabel: options.projectLabel } : {}), ...('localLabel' in policy && policy.localLabel ? { localLabel: policy.localLabel } : {}) });
   const store = new ApplicationIdentityStore({ instanceId: profile.expectedInstanceId }, { path: applicationIdentityConfigPath(env) });
   await store.add(identity.name);
   initialized.add(client);
-  return { client, selector, identity };
+  let showNotice = false;
+  if (options.notice && identity.temporary && !identity.preserved) {
+    // A tool connection may create the identity before SessionStart. Only a hook
+    // claims the visible notice, once per CID, atomically across hook processes.
+    const marker = path + '.notice-' + createHash('sha256').update(identity.cid).digest('hex');
+    try { await writeFile(marker, '1\n', { flag: 'wx', mode: 0o600 }); showNotice = true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  }
+  return { client, selector, identity, showNotice };
 }

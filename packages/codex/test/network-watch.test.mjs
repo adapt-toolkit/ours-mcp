@@ -29,7 +29,7 @@ test('network watch uses the durable native owner and emits one body-free arriva
     installSignalHandlers: false,
   });
   assert.deepEqual(calls, [
-    ['client', profile, 'thread-a', '/host/private'],
+    ['client', profile, 'codex:thread-a', '/host/private'],
     ['watch', 'Alice', ['inbound']],
   ]);
   assert.match(output, /new message from Peer/);

@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { sendControlCommand } from '../control-server.mjs';
 import { resolveDaemonProfile } from '../profile.mjs';
@@ -66,8 +66,9 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
       return { continue: true };
     }
     if (event !== 'SessionStart' && event !== 'UserPromptSubmit') return { continue: true };
+    let controlRegistration;
     if (event === 'SessionStart' && socket && capability && payload.session_id && payload.cwd) {
-      await send(socket, capability, { command: 'register_session', sessionId: payload.session_id, threadId: payload.session_id, cwd: payload.cwd });
+      controlRegistration = await send(socket, capability, { command: 'register_session', sessionId: payload.session_id, threadId: payload.session_id, cwd: payload.cwd });
     }
     if (env.OURS_BIND_IDENTITY?.trim()) return {continue:true};
     let hostProfile;
@@ -79,15 +80,16 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
       const appPath = env.OURS_MCP_CONFIG || join(env.HOME || homedir(), '.ours-mcp', 'config.json');
       const state = await readHostState({ profile: hostProfile, nativeSessionId, applicationPath: appPath, harness: 'codex' });
       const pin = await findPin(payload.cwd || process.cwd());
-      let registration = '';
+      let registration = '',notice='';
       if(event === 'SessionStart'){
         try {
-          const result=await prepareSession(hostProfile,'codex',nativeSessionId,env,{source:payload.source,subagent:!!payload.agent_id});
-          if(result?.identity?.created) registration=`Session identity: ${result.identity.displayName}. It is temporary. When Ours receives this session's end, it removes the identity and local history; peer copies remain. Missing end delivery can delay cleanup. Ask to keep this identity to make it persistent, or rename it with rename_identity. Keep the existing Ours Monitor workflow; do not arm it automatically.`;
+          const result=await prepareSession(hostProfile,'codex',nativeSessionId,env,{notice:true,source:payload.source,subagent:!!payload.agent_id,projectLabel:typeof payload.cwd==='string'?[...basename(payload.cwd).normalize('NFC').replace(/\p{C}/gu,'').trim()].slice(0,80).join('')||undefined:undefined});
+          if(result?.identity && socket && capability && controlRegistration?.state?.boundIdentity !== result.identity.name) await send(socket,capability,{command:'binding_changed',identity:result.identity.name});
+          if(result?.identity && (result.showNotice ?? result.identity.created)){notice=`Ours: this session is ${result.identity.displayName}, a temporary identity. When the session ends, Ours deletes it and its message history on this computer. Messages you already sent stay with the people and agents who received them. If the session doesn't end cleanly, deletion may happen later. Say "keep this Ours identity" to make it permanent, or "call yourself <new name>" to rename it.`;registration=notice+' Use keep_identity only on explicit user request; it keeps the same identity, contacts and history. Use rename_identity for a user-given local name; the address stays the same. If NAME_TAKEN, ask for another name without adding a suffix. Use list_local_sessions to find sessions on this computer and address the exact handle shown. Keep the existing Ours Monitor workflow; do not arm it automatically.';}
         }catch(error){registration='Ours session registration unavailable: '+error.message;}
       }
       const context = [registration,renderContext(state.unread.identities, pin)].filter(Boolean).join('\n\n');
-      return context ? { continue: true, hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { continue: true };
+      return context ? { continue: true, ...(notice?{systemMessage:notice}:{}), hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { continue: true };
     }
 
     return { continue: true };

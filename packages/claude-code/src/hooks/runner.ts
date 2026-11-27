@@ -15,7 +15,7 @@ import * as fs from 'node:fs';
 import { hostProfileFromEnv, readHostHookState } from '../host-hooks.mjs';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { resolve, join, dirname } from 'node:path';
+import { basename, resolve, join, dirname } from 'node:path';
 
 type HookKind = 'session-start' | 'user-prompt-submit';
 
@@ -46,6 +46,7 @@ type Unread = { name: string; count: number; recent: NotifyMeta[] };
 type ContainerHookState = { identities: string[]; unread: { identities: Unread[] }; bindings: string[] };
 let containerState: ContainerHookState | null = null;
 let automaticContext = '';
+let automaticNotice = '';
 
 
 async function loadNetworkState(payload: Record<string, unknown>): Promise<boolean> {
@@ -207,6 +208,7 @@ function sessionStart(raw: string): void {
 
   emit({
     continue: true,
+    ...(automaticNotice ? { systemMessage: automaticNotice } : {}),
     hookSpecificOutput: {
       hookEventName: 'SessionStart',
       additionalContext: blocks.join('\n\n'),
@@ -255,8 +257,11 @@ async function main(): Promise<void> {
       case 'session-start':
         if (typeof payload.session_id === 'string') {
           try {
-            const result = await prepareAutomaticSession(hostProfileFromEnv(process.env), 'claude-code', payload.session_id, process.env, { source: String(payload.source || ''), subagent: !!payload.agent_id || payload.is_sidechain === true });
-            if (result?.identity?.created) automaticContext = `Session identity: ${result.identity.displayName}. It is temporary. When Ours receives this session's end, it removes the identity and its local history; peer copies remain. Missing end delivery can delay cleanup. Ask to keep this identity to make it persistent, or rename it with rename_identity. Keep the existing Ours Monitor workflow; do not arm it automatically.`;
+            const result = await prepareAutomaticSession(hostProfileFromEnv(process.env), 'claude-code', payload.session_id, process.env, { notice: true, source: String(payload.source || ''), subagent: !!payload.agent_id || payload.is_sidechain === true, projectLabel: typeof payload.cwd === 'string' ? [...basename(payload.cwd).normalize('NFC').replace(/\p{C}/gu,'').trim()].slice(0,80).join('') || undefined : undefined });
+            if (result?.identity && (result.showNotice ?? result.identity.created)) {
+              automaticNotice = `Ours: this session is ${result.identity.displayName}, a temporary identity. When the session ends, Ours deletes it and its message history on this computer. Messages you already sent stay with the people and agents who received them. If the session doesn't end cleanly, deletion may happen later. Say "keep this Ours identity" to make it permanent, or "call yourself <new name>" to rename it.`;
+              automaticContext = automaticNotice + ' Use keep_identity only on explicit user request; it keeps the same identity, contacts and history. Use rename_identity for a user-given local name; the address stays the same. If NAME_TAKEN, ask for another name without adding a suffix. Use list_local_sessions to find sessions on this computer and address the exact handle shown. Keep the existing Ours Monitor workflow; do not arm it automatically.';
+            }
           } catch (error) { automaticContext = 'Ours session registration unavailable: ' + (error instanceof Error ? error.message : String(error)); }
         }
         await loadNetworkState(payload);

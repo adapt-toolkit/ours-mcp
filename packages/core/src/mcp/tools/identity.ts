@@ -148,7 +148,7 @@ export function registerIdentityTools(
   );
   server.tool('inventory')(
     'list_local_sessions',
-    'List policy-visible active sessions on this host with stable handle/CID, friendly label and client. Choose the exact address when names/projects are ambiguous. Listing does not introduce contacts or arm Monitor.',
+    'List policy-visible automatically registered, nonretired local session owners with stable handle/CID, friendly label and client. Process liveness is unverified if end delivery was missed. Explicit permanent bindings remain discoverable through list_identities and list_local_contact_book. Choose the exact address when names/projects are ambiguous. Listing does not introduce contacts or arm Monitor.',
     {},
     async (_args, extra) => runTool(clientFor(extra), c => c.listLocalSessions(),
       rows => ({ ...textResult(JSON.stringify(rows, null, 2)), structuredContent: { sessions: rows } })),

@@ -65,3 +65,14 @@ test('retired or pending native owner is not recreated by ordinary tool or compa
   }
  }finally{await close(f);}
 });
+
+test('MCP-first creation leaves exactly one visible hook notice claim',async()=>{
+ const f=await fixture();try{
+  const initial=await prepareAutomaticSession(f.profile,'codex','mcp-first',f.env);
+  assert.equal(initial.identity.created,true);assert.equal(initial.showNotice,false);
+  const hooks=await Promise.all(Array.from({length:6},()=>prepareAutomaticSession(f.profile,'codex','mcp-first',f.env,{notice:true,source:'startup'})));
+  assert.equal(hooks.filter(r=>r.showNotice).length,1,'only one concurrent hook claims the notice');
+  assert.ok(hooks.every(r=>r.identity.cid===initial.identity.cid && !r.identity.created));
+  assert.equal((await prepareAutomaticSession(f.profile,'codex','mcp-first',f.env,{notice:true,source:'resume'})).showNotice,false);
+ }finally{await close(f);}
+});
