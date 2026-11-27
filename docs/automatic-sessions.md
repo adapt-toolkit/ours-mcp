@@ -6,7 +6,7 @@ With a configured Human/root daemon, a supported native SessionStart hook calls 
 
 `current_identity` shows stable name/CID and optional friendly display name. Ask the agent to `rename_identity` with a display_name such as “API reviewer”; a local collision is refused. Name/CID addressing stays stable, and peers can retain their own contact aliases. Ask to `keep_identity` to persist the current temporary identity without replacing its CID, contacts or history. It is not auto-approved. A repeat succeeds if already persistent; cleanup that won the race is never resurrected.
 
-`list_local_sessions` returns policy-visible active local sessions with exact CID/handle, friendly name, client, optional private host/project labels and start time. Use the exact address; do not guess from model/project/name. Hook startup records only a sanitized project basename, never its full local path. Existing explicit permanent bindings without automatic metadata remain available through list_identities and list_local_contact_book. Nonretired ownership is not proof the native process is still alive after a missed end. No automatic remote invitation or global directory is created. Default local introduction auto-accept is false; existing user policy wins. Intra-root trust and existing contact rules still govern sends.
+`list_local_sessions` returns policy-visible active local sessions with exact CID/handle, friendly name, client, optional private host/project labels and start time. Use the exact address; do not guess from model/project/name. Hook startup does not project OS usernames, hostnames, project paths or project basenames. Default installer labels are opaque; a private policy may explicitly choose a label. Existing explicit permanent bindings without automatic metadata remain available through list_identities and list_local_contact_book. Nonretired ownership is not proof the native process is still alive after a missed end. No automatic remote invitation or global directory is created. Default local introduction auto-accept is false; existing user policy wins. Intra-root trust and existing contact rules still govern sends.
 
 When a delivered SessionEnd releases the exact owner, temporary identity files and local SQLite history are deleted through existing daemon cleanup. Failed cleanup remains fenced and retryable. Peer copies/backups are not erased. EOF of a short-lived hook/MCP process is not native session death. Missing SessionEnd can delay cleanup. Existing Linux incarnation observer can release a proven long-lived owner; a hook parent PID alone is not proof. No blanket crash/window-close deletion guarantee. Explicit resume after an ended owner starts a new incarnation; stale ordinary tool access does not recreate it.
 
@@ -32,3 +32,17 @@ Replace Local-OPAQUE with the generated public pseudonym or existing explicit id
 6. Open two new sessions of any configured client. Check actual current identities and list_local_sessions, select exact CID/handle, send a requested message, and retain the existing explicitly armed Monitor workflow. Do not claim live delivery or a timed install unless performed. Connecting another host/person still uses the invitation/trust flow.
 
 Explicit advanced installer options remain available. Reruns preserve existing source/profile/root/auth/policies and should reconcile missing Ours settings instead of creating duplicate plugins/identities/containers. An existing full workspace or different endpoint is an actionable conflict, not permission to overwrite it.
+
+## Retry a missing or failed session end
+There is no TTL, EOF sweep or automatic background retry. A failed end durably leaves its exact owner pending; the identity and local history can remain indefinitely until cleanup is retried. Ordinary manual tools remain available and do not recreate an automatic identity for the retired owner.
+
+For a failed end already recorded as pending, explicitly run `ours-mcp retry-session-ends`. It makes at most 20 attempts for pending owners of the selected daemon, reports completed/failed/more counts, exits nonzero on failures, and never releases active owners. It does not need the earlier native session ID. If `more` is true, run another bounded batch only on explicit request.
+
+For a missing end that was never recorded as pending, after confirming that the indicated native session has ended, rerun the installed command with that session's exact native ID and harness:
+
+```sh
+printf '%s\n' '{"session_id":"EXACT_NATIVE_SESSION_ID"}' | ours-mcp session-end --harness codex
+# For Claude Code use --harness claude-code.
+```
+
+This is one bounded attempt at the same captured owner. On success it marks the record ended; repeated success is idempotent. On failure it exits nonzero and retains pending intent so the user can retry after restoring the daemon. Never substitute an identity name or a guessed native ID. This command ends an active target too, so run it only with explicit user intent to end that exact session. Keep the profile/config and local owner records used by that session. Promotion remains persistent; a later explicit native resume finds and rebinds the same kept CID without forcing another owner's lease.

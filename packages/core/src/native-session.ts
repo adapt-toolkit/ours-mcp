@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 import { attachOursClient } from '@ours.network/sdk';
@@ -209,4 +209,27 @@ export async function endNativeSessionAtRoot(
     }
     await finishPending(path, profile, record.ownerInstanceId);
   });
+}
+
+/** Explicit bounded recovery. Only durable pending intent is eligible, never active owners. */
+export async function retryPendingNativeSessionEnds(profileValue: HostProfile, env: NodeJS.ProcessEnv = process.env) {
+  const profile=validateHostProfile(profileValue), root=dirname(applicationIdentityConfigPath(env));
+  const directory=join(root,'sessions',profile.expectedInstanceId);
+  let entries: string[];
+  try { entries=await readdir(directory); }
+  catch(error) { if((error as NodeJS.ErrnoException).code==='ENOENT') return {attempted:0,completed:0,failed:0,more:false};throw error; }
+  let attempted=0,completed=0,failed=0,more=false;
+  for(const entry of entries.filter(name=>/^[a-f0-9]{64}\.json$/.test(name)).sort()) {
+    const path=join(directory,entry), record=await readRecord(path);
+    if(record?.state!=='pending')continue;
+    if(attempted>=20){more=true;break;}
+    attempted++;
+    try {
+      await serialized(path,async()=>{
+        const current=await readRecord(path);
+        if(current?.state==='pending')await finishPending(path,profile,current.ownerInstanceId);
+      });completed++;
+    }catch{failed++;}
+  }
+  return {attempted,completed,failed,more};
 }

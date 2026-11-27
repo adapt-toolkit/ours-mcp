@@ -246,7 +246,6 @@ function userPromptSubmit(raw: string): void {
 async function main(): Promise<void> {
   const kind = (process.argv[2] ?? '') as HookKind;
   try {
-    if (process.env.OURS_BIND_IDENTITY?.trim()) return noop();
     const raw = readStdin();
     let payload: Record<string, unknown> = {};
     try {
@@ -257,10 +256,10 @@ async function main(): Promise<void> {
       case 'session-start':
         if (typeof payload.session_id === 'string') {
           try {
-            const result = await prepareAutomaticSession(hostProfileFromEnv(process.env), 'claude-code', payload.session_id, process.env, { notice: true, source: String(payload.source || ''), subagent: !!payload.agent_id || payload.is_sidechain === true, projectLabel: typeof payload.cwd === 'string' ? [...basename(payload.cwd).normalize('NFC').replace(/\p{C}/gu,'').trim()].slice(0,80).join('') || undefined : undefined });
+            const result = await prepareAutomaticSession(hostProfileFromEnv(process.env), 'claude-code', payload.session_id, process.env, { notice: true, source: String(payload.source || ''), subagent: !!payload.agent_id || payload.is_sidechain === true });
             if (result?.identity && (result.showNotice ?? result.identity.created)) {
-              automaticNotice = `Ours: this session is ${result.identity.displayName}, a temporary identity. When the session ends, Ours deletes it and its message history on this computer. Messages you already sent stay with the people and agents who received them. If the session doesn't end cleanly, deletion may happen later. Say "keep this Ours identity" to make it permanent, or "call yourself <new name>" to rename it.`;
-              automaticContext = automaticNotice + ' Use keep_identity only on explicit user request; it keeps the same identity, contacts and history. Use rename_identity for a user-given local name; the address stays the same. If NAME_TAKEN, ask for another name without adding a suffix. Use list_local_sessions to find sessions on this computer and address the exact handle shown. Keep the existing Ours Monitor workflow; do not arm it automatically.';
+              automaticNotice = `Ours: this session is ${result.identity.displayName}, a temporary identity. When the session ends, Ours deletes it and its message history on this computer. Messages you already sent stay with the people and agents who received them. If Ours can't finish cleaning up, the identity and its history stay on this computer until cleanup is completed. Say "keep this Ours identity" to make it permanent, or "call yourself <new name>" to rename it.`;
+              automaticContext = automaticNotice + ' Nothing retries automatically and there is no cleanup time limit. Only this owning session can close its temporary identity: use close_temporary_identity with its exact name only on explicit user request, retaining upstream approval. For earlier leftovers, run ours-mcp retry-session-ends once only on explicit request and report completed/failed/more counts. An earlier session whose end was never recorded requires resuming that original session; otherwise report blocked without guessing or forcing. Use keep_identity only on explicit user request; it keeps the same identity, contacts and history. Use rename_identity for a user-given local name; the address stays the same. If NAME_TAKEN, ask for another name without adding a suffix. Use list_local_sessions to find sessions on this computer and address the exact handle shown. Keep the existing Ours Monitor workflow; do not arm it automatically.';
             }
           } catch (error) { automaticContext = 'Ours session registration unavailable: ' + (error instanceof Error ? error.message : String(error)); }
         }

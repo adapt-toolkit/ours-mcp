@@ -17,7 +17,8 @@
         "OURS_CLIENT_PID",
         "OURS_SESSION_POLICY",
         "OURS_AUTO_SESSION_IDENTITIES",
-        "OURS_BIND_IDENTITY"
+        "OURS_BIND_IDENTITY",
+        "FLEET_OURS_MANAGED"
       ]
     },
     "ours_monitor": {

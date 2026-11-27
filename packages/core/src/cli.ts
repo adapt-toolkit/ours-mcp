@@ -10,7 +10,7 @@ import type { NotificationEvent } from '@ours.network/sdk';
 import { dirname } from 'node:path';
 import { applicationIdentityConfigPath, ApplicationIdentityStore, filterApplicationIdentities } from './application-identities.js';
 import { hostProfileFromEnv } from './host-profile.js';
-import { nativeClientFor, endNativeSession, nativeSessionRecordPath } from './native-session.js';
+import { nativeClientFor, endNativeSession, nativeSessionRecordPath, retryPendingNativeSessionEnds } from './native-session.js';
 import type { ConnectorOptions } from './connector.js';
 
 declare const __OURS_VERSION__: string;
@@ -132,6 +132,7 @@ function usage(): void {
   out('Usage: ours-mcp <command> [options]');
   out('  verify-client-profile validate the shared gateway profile (no network access)');
   out('  proxy                 run the stdio MCP server (never starts a daemon)');
+  out('  retry-session-ends    retry at most 20 pending native ends for the selected daemon');
   out('  session-end           release this harness session and clean up its temporary identities');
   out('  watch [identity]      stream inbound JSON Lines; without a name, only ours-mcp identities');
   out('  start|stop|restart|serve|status');
@@ -163,6 +164,13 @@ async function main(): Promise<void> {
       if (args.length) throw new Error('Usage: ours-mcp proxy');
       await runProxy();
       return;
+    case 'retry-session-ends': {
+      if(args.length)throw new Error('Usage: ours-mcp retry-session-ends');
+      const result=await retryPendingNativeSessionEnds(hostProfileFromEnv(process.env),process.env);
+      out(JSON.stringify(result));
+      if(result.failed)process.exitCode=1;
+      return;
+    }
     case 'session-end':
       if (args.length && (args.length !== 2 || args[0] !== '--harness' || !['claude-code','codex'].includes(args[1]))) throw new Error('Usage: ours-mcp session-end --harness claude-code|codex');
       await runSessionEnd(args[1] as 'claude-code' | 'codex' | undefined);

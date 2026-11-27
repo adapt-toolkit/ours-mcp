@@ -217,15 +217,14 @@ export async function runConnector(options: ConnectorOptions): Promise<void> {
     ? async (extra: ToolRequestExtra): Promise<OursClient> => {
         const id = nativeSelector(extra);
         const harness = extra._meta && Object.hasOwn(extra._meta, 'threadId') ? 'codex' : 'claude-code';
-        const selector = await nativeSessionKey(nativeProfile, harness, id, process.env);
         let automatic: Awaited<ReturnType<typeof prepareAutomaticSession>> = null;
         if (!seed) {
-          try { automatic = await prepareAutomaticSession(nativeProfile, harness, id, process.env); }
+          try { automatic = await prepareAutomaticSession(nativeProfile, harness, id, process.env, { toolCall: true, managed: process.env.FLEET_OURS_MANAGED === '1', subagent: !!(extra._meta?.agentId || extra._meta?.parentThreadId || extra._meta?.isSubagent || extra._meta?.is_sidechain) }); }
           catch (error) {
-            if (!['OURS_AUTO_UNSUPPORTED','NO_ROOT'].includes(String((error as {code?: unknown})?.code))) throw error;
-            log(`Automatic session registration unavailable; existing manual tools remain available: ${error instanceof Error ? error.message : String(error)}`);
+            log('Automatic session registration unavailable; existing manual tools remain available.');
           }
         }
+        const selector = automatic?.selector ?? await nativeSessionKey(nativeProfile, harness, id, process.env);
         const selected = automatic?.client ?? await nativeClientFor(nativeProfile, selector, process.env);
         if (seed && !seeded.has(selected)) {
           await seedBinding(selected, identities, seed);

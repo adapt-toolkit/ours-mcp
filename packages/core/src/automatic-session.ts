@@ -9,13 +9,15 @@ import { nativeClientFor, nativeSessionRecordPath } from './native-session.js';
 
 export type NativeHarness = 'claude-code' | 'codex';
 const initialized = new WeakSet<OursClient>();
+const ready = new Map<string, {client: OursClient; selector: string}>();
 const required = ['automatic-session-identities-v1','identity-display-name-v1','identity-promotion-v1'];
 
 export async function automaticSessionPolicy(env: NodeJS.ProcessEnv = process.env) {
   if (env.OURS_AUTO_SESSION_IDENTITIES === '0') return { enabled: false, exposeLocal: false, localAutoAccept: false };
   const path = resolve(env.OURS_SESSION_POLICY || join(env.HOME || homedir(), '.ours-mcp', 'session-policy.json'));
   try {
-    const value = JSON.parse(await readFile(path, 'utf8'));
+    const text = await readFile(path, 'utf8');
+    let value;try{value=JSON.parse(text);}catch{throw new Error('Invalid standalone session policy');}
     if (value.version !== 1 || ['enabled','exposeLocal','localAutoAccept'].some(k => typeof value[k] !== 'boolean')) throw new Error('Invalid standalone session policy');
     if (value.localLabel !== undefined && (typeof value.localLabel !== 'string' || !value.localLabel.trim() || value.localLabel.length > 80 || /[\p{C}\p{Zl}\p{Zp}]/u.test(value.localLabel))) throw new Error('Invalid private local label');
     return value as { enabled: boolean; exposeLocal: boolean; localAutoAccept: boolean; localLabel?: string };
@@ -41,9 +43,12 @@ export async function nativeSessionKey(profile: HostProfile, harness: NativeHarn
   return key;
 }
 
-export async function prepareAutomaticSession(profile: HostProfile | null, harness: NativeHarness, id: string, env: NodeJS.ProcessEnv = process.env, options: { source?: string; subagent?: boolean; managed?: boolean; projectLabel?: string; notice?: boolean } = {}): Promise<null | { client: OursClient; selector: string; identity: Awaited<ReturnType<OursClient['ensureSessionIdentity']>> | null; showNotice?: boolean }> {
+export async function prepareAutomaticSession(profile: HostProfile | null, harness: NativeHarness, id: string, env: NodeJS.ProcessEnv = process.env, options: { source?: string; subagent?: boolean; managed?: boolean; projectLabel?: string; notice?: boolean; toolCall?: boolean } = {}): Promise<null | { client: OursClient; selector: string; identity: Awaited<ReturnType<OursClient['ensureSessionIdentity']>> | null; showNotice?: boolean }> {
   // Fleet/explicit bindings remain under their existing supervisor/connector path.
-  if (!profile || options.managed || options.subagent || env.OURS_BIND_IDENTITY?.trim()) return null;
+  if (!profile || options.managed || env.FLEET_OURS_MANAGED === '1' || options.subagent || env.OURS_BIND_IDENTITY?.trim()) return null;
+  const cacheKey = JSON.stringify([profile.endpoint,profile.expectedInstanceId,harness,id]);
+  const cached = ready.get(cacheKey);
+  if (cached && options.toolCall) return null; // The manual connector still resolves the current durable owner.
   const policy = await automaticSessionPolicy(env);
   if (!policy.enabled) return null;
   const selector = await nativeSessionKey(profile, harness, id, env);
@@ -57,12 +62,20 @@ export async function prepareAutomaticSession(profile: HostProfile | null, harne
     const existing = JSON.parse(await readFile(path, 'utf8'));
     if (['ended','pending'].includes(existing.state) && options.source !== 'resume') throw new Error('This native owner has ended. Resume the native session explicitly before creating another identity.');
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  if (harness === 'codex' && options.toolCall) {
+    // Codex may issue MCP calls for child threads. Only SessionStart can attest
+    // a main thread; a bare threadId is not permission to allocate an identity.
+    try { await readFile(path + '.main', 'utf8'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+  }
   const client = await nativeClientFor(profile, selector, env);
   if (initialized.has(client) && !options.notice && !options.projectLabel) return { client, selector, identity: null };
   const identity = await client.ensureSessionIdentity({ harness, sessionHandle: 's-' + createHash('sha256').update(harness + '\0' + id).digest('hex'), exposeLocal: policy.exposeLocal, localAutoAccept: policy.localAutoAccept, ...(options.projectLabel ? { projectLabel: options.projectLabel } : {}), ...('localLabel' in policy && policy.localLabel ? { localLabel: policy.localLabel } : {}) });
   const store = new ApplicationIdentityStore({ instanceId: profile.expectedInstanceId }, { path: applicationIdentityConfigPath(env) });
   await store.add(identity.name);
   initialized.add(client);
+  ready.set(cacheKey, {client, selector});
+  if (options.notice && harness === 'codex') await writeFile(path + '.main', '1\n', {mode:0o600});
   let showNotice = false;
   if (options.notice && identity.temporary && !identity.preserved) {
     // A tool connection may create the identity before SessionStart. Only a hook
