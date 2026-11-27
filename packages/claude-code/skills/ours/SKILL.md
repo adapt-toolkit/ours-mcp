@@ -68,22 +68,26 @@ control plane. This skill never creates or exposes such state.
 
 Walk the user through these, checking each. Stop and help at the first one that isn't done.
 
-For a first-time or complete host setup, prefer `ours-install`. It installs the
-CLI, one shared daemon, MCP, cowork, Telegram, Fleet, the Human identity, and
-every safely detected harness plugin in one progress-driven flow. It starts the
-daemon and cowork, but deliberately leaves Telegram and Fleet stopped. If
-`~/fleet.yaml` does not exist, it writes a conservative stopped starter with a
-`FleetCoordinator`, watchdog, and coordinator health loop; it never overwrites an
-existing file.
+For first-time messaging, ask the user to run `ours-install --plugin-only`
+(or choose **Add collaboration tools** in `ours-install`). This configures one
+shared local daemon, the Human identity and the selected installed agent apps.
+It does not require an Ours App account or start Fleet or Telegram. The complete
+workspace is a separate optional choice. Use the user's installed Claude Code;
+if absent, ask them to install it using https://code.claude.com/docs/en/setup,
+then resume `ours-install --plugin-only`. Never install or upgrade their agent
+CLI without their request.
 
 1. **Daemon running.** Check it with `ours daemon status`. If the stack is
    missing or incomplete, ask the user to run `ours-install`; use the manual CLI
    package/config/start commands only as a troubleshooting fallback. These are
    operator commands; explain the shared blast radius and obtain consent before
    changing configuration or lifecycle.
-2. **Plugin installed.** `/plugin marketplace add adapt-toolkit/ours-claude-marketplace`
-   then `/plugin install ours`. The plugin just points Claude Code at the daemon and
-   bundles this skill.
+2. **Plugin installed.** Let `ours-install` register the exact local plugin
+   marketplace from its verified package acquisition. For an existing workspace,
+   use `ours-install client --config ~/.ours-client/profile.json --integrations claude-code` with its client profile.
+   Do not register the public GitHub marketplace: it selects an incompatible old
+   plugin. The `@ours.network/claude-code` version identifies this Ours integration
+   bundle, not the upstream Anthropic Claude Code executable.
 3. **Onboarding.** Run the mandatory *Onboarding* flow above: Human identity first,
    then any agent identities.
 4. **Connect.** Generate an invite to share, or paste one to add a contact. Same-host
