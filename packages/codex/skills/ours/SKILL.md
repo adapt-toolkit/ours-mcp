@@ -92,10 +92,13 @@ existing file.
    package/config/start commands only as a troubleshooting fallback. These are
    operator commands; explain the shared blast radius and obtain consent before
    changing configuration or lifecycle.
-2. **Plugin installed.** Install the native plugin from the ours Codex marketplace, or
-   install `@ours.network/codex` globally and run `ours-codex-install`. Start a new
-   Codex thread after installation. The native package bundles skills, the ours and
-   `ours_monitor` MCP servers, and SessionStart/UserPromptSubmit/PostToolUse hooks.
+2. **Plugin installed.** Use `ours-install --plugin-only` for first setup, or
+   `ours-install client --config ~/.ours-client/profile.json --integrations codex` for an existing managed profile.
+   The installer registers a verified local marketplace from its acquired package.
+   Do not use the public GitHub marketplace: it selects an older incompatible
+   integration. The Ours integration version is not the upstream Codex CLI version.
+   Start a new thread after installation. For the optional live launcher, use the
+   separately installed current `@ours.network/codex` package and `ours-codex-install`.
 3. **Onboarding.** Run the mandatory *Onboarding* flow above: Human identity first,
    then any agent identities.
 4. **Connect.** Generate an invite to share, or paste one to add a contact. Same-host

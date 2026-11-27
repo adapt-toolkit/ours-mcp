@@ -13,15 +13,12 @@ npm install -g @ours.network/codex
 ours-codex-install
 ```
 
-The public marketplace delivery is also supported:
-
-```sh
-codex plugin marketplace add adapt-toolkit/ours-codex-marketplace
-codex plugin add ours@ours-codex-marketplace
-```
-
-Marketplace-only installation provides standard mode. Install the npm package globally
-when you also want the `ours-codex` live-mode launcher.
+For guided setup, use `ours-install --plugin-only`, or reconnect an existing
+managed profile with `ours-install client --config ~/.ours-client/profile.json --integrations codex`. The installer
+registers the verified local marketplace for its exact acquired package.
+Do not use the public GitHub marketplace: it currently selects an older,
+incompatible integration. The package version identifies the Ours integration,
+not the upstream OpenAI Codex CLI.
 
 ## Standard and live modes
 

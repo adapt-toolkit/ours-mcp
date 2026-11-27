@@ -84,7 +84,7 @@ CLI without their request.
    changing configuration or lifecycle.
 2. **Plugin installed.** Let `ours-install` register the exact local plugin
    marketplace from its verified package acquisition. For an existing workspace,
-   use `ours-install client --integrations claude-code` with its client profile.
+   use `ours-install client --config ~/.ours-client/profile.json --integrations claude-code` with its client profile.
    Do not register the public GitHub marketplace: it selects an incompatible old
    plugin. The `@ours.network/claude-code` version identifies this Ours integration
    bundle, not the upstream Anthropic Claude Code executable.
