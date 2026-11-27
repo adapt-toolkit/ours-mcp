@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { prepareAutomaticSession } from '../host-hooks.mjs';
 //
 // ours hook runner — Claude Code host seam (single entry point, subcommand
 // dispatch, mirrors the adapt-workspace pattern). Invoked from hooks/hooks.json:
@@ -44,6 +45,8 @@ type NotifyMeta = { from: string; msg_id: number | string; date: string };
 type Unread = { name: string; count: number; recent: NotifyMeta[] };
 type ContainerHookState = { identities: string[]; unread: { identities: Unread[] }; bindings: string[] };
 let containerState: ContainerHookState | null = null;
+let automaticContext = '';
+
 
 async function loadNetworkState(payload: Record<string, unknown>): Promise<boolean> {
   const profile = hostProfileFromEnv(process.env);
@@ -51,7 +54,7 @@ async function loadNetworkState(payload: Record<string, unknown>): Promise<boole
   const nativeSessionId = payload.session_id;
   if (typeof nativeSessionId !== 'string' || !nativeSessionId) throw new Error('Claude hook requires session_id in network mode');
   const appPath = process.env.OURS_MCP_CONFIG || join(process.env.HOME || homedir(), '.ours-mcp', 'config.json');
-  containerState = await readHostHookState({ profile, nativeSessionId, applicationPath: appPath });
+  containerState = await readHostHookState({ profile, nativeSessionId, applicationPath: appPath, harness: 'claude-code' });
   return true;
 }
 
@@ -197,6 +200,7 @@ function sessionStart(raw: string): void {
   const unread = collectUnread();
 
   const blocks: string[] = [];
+  if (automaticContext) blocks.push(automaticContext);
   if (pinned) blocks.push(renderIdentityDirective(pinned));
   if (unread.length > 0) blocks.push(renderContext(unread));
   if (blocks.length === 0) return noop();
@@ -240,6 +244,7 @@ function userPromptSubmit(raw: string): void {
 async function main(): Promise<void> {
   const kind = (process.argv[2] ?? '') as HookKind;
   try {
+    if (process.env.OURS_BIND_IDENTITY?.trim()) return noop();
     const raw = readStdin();
     let payload: Record<string, unknown> = {};
     try {
@@ -248,6 +253,12 @@ async function main(): Promise<void> {
     } catch { /* hook handlers preserve their benign malformed-input behavior */ }
     switch (kind) {
       case 'session-start':
+        if (typeof payload.session_id === 'string') {
+          try {
+            const result = await prepareAutomaticSession(hostProfileFromEnv(process.env), 'claude-code', payload.session_id, process.env, { source: String(payload.source || ''), subagent: !!payload.agent_id || payload.is_sidechain === true });
+            if (result?.identity?.created) automaticContext = `Session identity: ${result.identity.displayName}. It is temporary. When Ours receives this session's end, it removes the identity and its local history; peer copies remain. Missing end delivery can delay cleanup. Ask to keep this identity to make it persistent, or rename it with rename_identity. Keep the existing Ours Monitor workflow; do not arm it automatically.`;
+          } catch (error) { automaticContext = 'Ours session registration unavailable: ' + (error instanceof Error ? error.message : String(error)); }
+        }
         await loadNetworkState(payload);
         sessionStart(raw);
         return;

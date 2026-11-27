@@ -1,7 +1,20 @@
+import { acquireSessionGuard } from './session-guard.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
+
+const updates = new Map<string, Promise<void>>();
+async function serializedUpdate<T>(path: string, work: () => Promise<T>): Promise<T> {
+  const predecessor = updates.get(path) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const tail = predecessor.catch(() => {}).then(() => gate); updates.set(path, tail);
+  await predecessor.catch(() => {});
+  let unlock: (() => void) | undefined;
+  try { unlock = acquireSessionGuard(path); return await work(); }
+  finally { try { unlock?.(); } finally { release(); if (updates.get(path) === tail) updates.delete(path); } }
+}
 
 export const APPLICATION_IDENTITIES_VERSION = 1 as const;
 export const APPLICATION_IDENTITIES_ENV = 'OURS_MCP_CONFIG';
@@ -112,6 +125,7 @@ export class ApplicationIdentityStore {
 
   async add(name: string): Promise<void> {
     if (!name) throw new Error('Cannot add an empty identity name to ours-mcp.');
+    return serializedUpdate(this.path, async () => {
     const config = await readConfig(this.path);
     const rows = this.rows(config);
     const key = this.key();
@@ -119,9 +133,11 @@ export class ApplicationIdentityStore {
     if (identities.includes(name)) return;
     rows[key] = { identities: [...identities, name].sort() };
     await writeConfigAtomic(this.path, config);
+    });
   }
 
   async remove(name: string): Promise<void> {
+    return serializedUpdate(this.path, async () => {
     const config = await readConfig(this.path);
     const rows = this.rows(config);
     const key = this.key();
@@ -130,6 +146,7 @@ export class ApplicationIdentityStore {
     const identities = current.identities.filter((candidate) => candidate !== name);
     if (identities.length === 0) delete rows[key]; else rows[key] = { identities };
     await writeConfigAtomic(this.path, config);
+    });
   }
 }
 

@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "exec node \"${PLUGIN_ROOT}/bin/proxy.mjs\" session-end",
+            "command": "exec node \"${PLUGIN_ROOT}/bin/proxy.mjs\" session-end --harness codex",
             "timeout": 30,
             "statusMessage": "Closing temporary ours identities"
           }

@@ -8,6 +8,7 @@ import { sendControlCommand } from '../control-server.mjs';
 import { resolveDaemonProfile } from '../profile.mjs';
 import { readHostHookState } from '../host-hooks.mjs';
 import { attachOursClient } from '@ours.network/sdk';
+import { prepareAutomaticSession } from '../../../core/src/automatic-session.ts';
 import { hostProfileFromEnv } from '../../../core/src/host-client/index.ts';
 
 async function defaultFindPin(cwd) {
@@ -50,7 +51,7 @@ function renderContext(unread, pin) {
   return lines.join('\n');
 }
 
-export async function handleHook(payload, { env = process.env, fetch: fetchImpl = globalThis.fetch, send = sendControlCommand, findPin = defaultFindPin, profileResolver = resolveDaemonProfile, clientFactory = attachOursClient, readHostState = readHostHookState } = {}) {
+export async function handleHook(payload, { env = process.env, fetch: fetchImpl = globalThis.fetch, send = sendControlCommand, findPin = defaultFindPin, profileResolver = resolveDaemonProfile, clientFactory = attachOursClient, readHostState = readHostHookState, prepareSession = prepareAutomaticSession } = {}) {
   try {
     const event = payload?.hook_event_name;
     const socket = env.OURS_CODEX_CONTROL_SOCKET;
@@ -68,6 +69,7 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
     if (event === 'SessionStart' && socket && capability && payload.session_id && payload.cwd) {
       await send(socket, capability, { command: 'register_session', sessionId: payload.session_id, threadId: payload.session_id, cwd: payload.cwd });
     }
+    if (env.OURS_BIND_IDENTITY?.trim()) return {continue:true};
     let hostProfile;
     try { hostProfile = hostProfileFromEnv(env); }
     catch { return { continue: true }; }
@@ -75,9 +77,16 @@ export async function handleHook(payload, { env = process.env, fetch: fetchImpl 
       const nativeSessionId = payload.session_id;
       if (typeof nativeSessionId !== 'string' || !nativeSessionId) return { continue: true };
       const appPath = env.OURS_MCP_CONFIG || join(env.HOME || homedir(), '.ours-mcp', 'config.json');
-      const state = await readHostState({ profile: hostProfile, nativeSessionId, applicationPath: appPath });
+      const state = await readHostState({ profile: hostProfile, nativeSessionId, applicationPath: appPath, harness: 'codex' });
       const pin = await findPin(payload.cwd || process.cwd());
-      const context = renderContext(state.unread.identities, pin);
+      let registration = '';
+      if(event === 'SessionStart'){
+        try {
+          const result=await prepareSession(hostProfile,'codex',nativeSessionId,env,{source:payload.source,subagent:!!payload.agent_id});
+          if(result?.identity?.created) registration=`Session identity: ${result.identity.displayName}. It is temporary. When Ours receives this session's end, it removes the identity and local history; peer copies remain. Missing end delivery can delay cleanup. Ask to keep this identity to make it persistent, or rename it with rename_identity. Keep the existing Ours Monitor workflow; do not arm it automatically.`;
+        }catch(error){registration='Ours session registration unavailable: '+error.message;}
+      }
+      const context = [registration,renderContext(state.unread.identities, pin)].filter(Boolean).join('\n\n');
       return context ? { continue: true, hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { continue: true };
     }
 

@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/bin/proxy.mjs session-end",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/bin/proxy.mjs session-end --harness claude-code",
             "timeout": 30000
           }
         ]

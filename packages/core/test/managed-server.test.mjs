@@ -4,7 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { OursError } from '@ours.network/sdk';
 import { createOursMcpServer, createManagedOursMcpServer } from '@ours.network/mcp/server';
-const forbidden = ['create_identity','choose_identity','create_temporary_identity','create_root_identity','remove_identity','close_temporary_identity','define_local_identity_file'];
+const forbidden = ['create_identity','choose_identity','create_temporary_identity','create_root_identity','remove_identity','close_temporary_identity','define_local_identity_file','keep_identity'];
 const noFiles = { read: async () => { throw Error('denied'); }, write: async () => { throw Error('denied'); }, canRead: async () => false };
 async function connect(sdk, managed, options = {}) {
   const server = managed
@@ -14,14 +14,14 @@ async function connect(sdk, managed, options = {}) {
   const [a,b] = InMemoryTransport.createLinkedPair(); await server.connect(b); await client.connect(a);
   return {client,close:async()=>{await client.close();await server.close();}};
 }
-test('managed discovery preserves all 27 original schemas and rejects guessed lifecycle dispatch',async()=>{
+test('managed discovery preserves all original schemas and additive non-lifecycle tools and rejects guessed lifecycle dispatch',async()=>{
   const calls=[];
   const sdk=new Proxy({}, { get:(_t,key)=>async()=>{calls.push(key);throw Error('must not dispatch');} });
   const a=await connect(sdk,false),b=await connect(sdk,true);
   try {
     const standalone=(await a.client.listTools()).tools;
     const managed=(await b.client.listTools()).tools;
-    assert.equal(standalone.length,34);assert.equal(managed.length,27);
+    assert.equal(standalone.length,37);assert.equal(managed.length,29);
     assert.deepEqual(managed,standalone.filter(t=>!forbidden.includes(t.name)));
     for(const name of forbidden){const r=await b.client.callTool({name,arguments:{name:'Other',path:'/never'}});assert.equal(r.isError,true);}
     assert.deepEqual(calls,[]);
@@ -66,6 +66,7 @@ test('failed readability callback preserves committed unread batch and transcrip
 
 test('all retained tools preserve successful results, structured payloads and SDK error rendering',async()=>{
  const results={
+  renameIdentity:{name:'Agent',displayName:'fixture',cid:'CID'},listLocalSessions:[],
   listIdentities:[],currentIdentity:{name:'Agent',cid:'CID',described:false},
   generateInvite:{mode:'one_time',inviteId:'invite',blob:'fixture'},listInvites:[],revokeInvite:{revoked:false},
   addContact:{display:'Peer',cid:'PEER'},listContacts:{contacts:[],pending:[],roots:{},degraded:[],renames:{}},
@@ -96,7 +97,7 @@ test('all retained tools preserve successful results, structured payloads and SD
     assert.deepEqual(right,left,`${tool.name} ${failing?'error':'success'} parity`);
     if(!failing)assert.equal(right.isError,false,`${tool.name} must exercise a successful handler`);
    }
-   assert.deepEqual(calls[1].filter(c=>c[0]!=='currentIdentity'),calls[0].filter(c=>c[0]!=='currentIdentity'));assert.equal(tools.length,27);
+   assert.deepEqual(calls[1].filter(c=>c[0]!=='currentIdentity'),calls[0].filter(c=>c[0]!=='currentIdentity'));assert.equal(tools.length,29);
   }finally{await a.close();await b.close();}
  }
 });
@@ -111,7 +112,7 @@ test('one send_file selects omitted-contact chat before any SDK/file operation, 
   });
   try {
     const tools=(await b.client.listTools()).tools;
-    assert.equal(tools.length,27); assert.equal(tools.filter(t=>t.name==='send_file').length,1);
+    assert.equal(tools.length,29); assert.equal(tools.filter(t=>t.name==='send_file').length,1);
     assert.match(tools.find(t=>t.name==='send_file').description, /under "exports\/final reports" relative to your working directory/);
     assert.match(tools.find(t=>t.name==='send_file').description, /maximum 20 MiB/);
     assert(!tools.some(t=>t.name==='send_file_to_user'));assert(!tools.find(t=>t.name==='send_file').inputSchema.required?.includes('contact'));
@@ -149,4 +150,9 @@ test('opt-in preserves legacy contact inline/reply/outcome and never falls back 
     const r=await b.client.callTool({name:'send_file',arguments:input});assert.equal(r.isError,false);assert.match(r.content[0].text,/NOT retained/);assert.deepEqual(calls[0],{...input,mime:undefined});
     assert.equal((await b.client.callTool({name:'send_file',arguments:{...input,contact:'Missing'}})).isError,true);assert.equal(chat,0);assert.equal(calls.length,2);
   }finally{await b.close();}
+});
+
+test('friendly rename is visible while current identity preserves exact stable addressing',async()=>{
+ const b=await connect({currentIdentity:async()=>({name:'session-opaque',displayName:'API reviewer',cid:'CID',described:false}),listLocalContactBook:async()=>[{name:'session-opaque',displayName:'API reviewer',container_id:'CID',published_at:'now',isMine:true}]},false);
+ try{const current=await b.client.callTool({name:'current_identity',arguments:{}});assert.match(JSON.stringify(current),/API reviewer/);assert.match(JSON.stringify(current),/session-opaque/);const book=await b.client.callTool({name:'list_local_contact_book',arguments:{}});assert.match(JSON.stringify(book),/API reviewer/);assert.match(JSON.stringify(book),/CID/);}finally{await b.close();}
 });

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { nativeSessionKey } from './automatic-session.js';
 
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -6,9 +7,10 @@ import { fileURLToPath } from 'node:url';
 import { attachOursClient } from '@ours.network/sdk';
 import type { NotificationEvent } from '@ours.network/sdk';
 
-import { ApplicationIdentityStore, filterApplicationIdentities } from './application-identities.js';
+import { dirname } from 'node:path';
+import { applicationIdentityConfigPath, ApplicationIdentityStore, filterApplicationIdentities } from './application-identities.js';
 import { hostProfileFromEnv } from './host-profile.js';
-import { nativeClientFor, endNativeSession } from './native-session.js';
+import { nativeClientFor, endNativeSession, nativeSessionRecordPath } from './native-session.js';
 import type { ConnectorOptions } from './connector.js';
 
 declare const __OURS_VERSION__: string;
@@ -58,7 +60,7 @@ async function runProxy(): Promise<void> {
   });
 }
 
-async function runSessionEnd(): Promise<void> {
+async function runSessionEnd(harness?: 'claude-code' | 'codex'): Promise<void> {
   const profile = hostProfileFromEnv(process.env);
     let payload: unknown;
     try { payload = JSON.parse(readFileSync(0, 'utf8')); } catch {
@@ -68,7 +70,17 @@ async function runSessionEnd(): Promise<void> {
     if (typeof sessionId !== 'string' || !sessionId.trim()) {
       throw new Error('SessionEnd hook input must contain a non-empty session_id.');
     }
-    await endNativeSession(profile, sessionId, process.env);
+    let selector = harness ? await nativeSessionKey(profile, harness, sessionId, process.env) : sessionId;
+    if (!harness) {
+      const candidates = new Set([sessionId, await nativeSessionKey(profile,'claude-code',sessionId,process.env), await nativeSessionKey(profile,'codex',sessionId,process.env)]);
+      const active = [...candidates].filter(key => {
+        try { const record = JSON.parse(readFileSync(nativeSessionRecordPath(dirname(applicationIdentityConfigPath(process.env)),profile.expectedInstanceId,key),'utf8'));return ['active','pending'].includes(record.state); }
+        catch(error) { if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error; }
+      });
+      if(active.length>1)throw new Error('Ambiguous native session; pass --harness claude-code|codex. No owner was released.');
+      if(active.length===1)selector=active[0];
+    }
+    await endNativeSession(profile, selector, process.env);
 }
 
 function jsonNotification(identity: string, event: NotificationEvent): string {
@@ -92,7 +104,9 @@ async function runWatch(args: string[]): Promise<void> {
   const profile = hostProfileFromEnv(process.env);
   const identities = new ApplicationIdentityStore({ instanceId: profile.expectedInstanceId });
   await identities.list();
-  const client = await nativeClientFor(profile, (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim());
+  const nativeId = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+  const selector = await nativeSessionKey(profile, 'claude-code', nativeId, process.env);
+  const client = await nativeClientFor(profile, selector);
   const requested = args[0]?.trim();
   let names: string[];
   if (requested) {
@@ -150,8 +164,8 @@ async function main(): Promise<void> {
       await runProxy();
       return;
     case 'session-end':
-      if (args.length) throw new Error('Usage: ours-mcp session-end');
-      await runSessionEnd();
+      if (args.length && (args.length !== 2 || args[0] !== '--harness' || !['claude-code','codex'].includes(args[1]))) throw new Error('Usage: ours-mcp session-end --harness claude-code|codex');
+      await runSessionEnd(args[1] as 'claude-code' | 'codex' | undefined);
       return;
     case 'watch':
       await runWatch(args);

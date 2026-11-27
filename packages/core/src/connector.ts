@@ -1,3 +1,4 @@
+import { nativeSessionKey, prepareAutomaticSession } from './automatic-session.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 import { attachOursClient, OursError, resolveDaemonConfig } from '@ours.network/sdk';
@@ -214,8 +215,18 @@ export async function runConnector(options: ConnectorOptions): Promise<void> {
   };
   const clientFor = nativeProfile
     ? async (extra: ToolRequestExtra): Promise<OursClient> => {
-        const selector = nativeSelector(extra);
-        const selected = await nativeClientFor(nativeProfile, selector, process.env);
+        const id = nativeSelector(extra);
+        const harness = extra._meta && Object.hasOwn(extra._meta, 'threadId') ? 'codex' : 'claude-code';
+        const selector = await nativeSessionKey(nativeProfile, harness, id, process.env);
+        let automatic: Awaited<ReturnType<typeof prepareAutomaticSession>> = null;
+        if (!seed) {
+          try { automatic = await prepareAutomaticSession(nativeProfile, harness, id, process.env); }
+          catch (error) {
+            if (!['OURS_AUTO_UNSUPPORTED','NO_ROOT'].includes(String((error as {code?: unknown})?.code))) throw error;
+            log(`Automatic session registration unavailable; existing manual tools remain available: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        const selected = automatic?.client ?? await nativeClientFor(nativeProfile, selector, process.env);
         if (seed && !seeded.has(selected)) {
           await seedBinding(selected, identities, seed);
           seeded.add(selected);

@@ -194,7 +194,7 @@ export function registerContactsTools(server: ToolRegistry, clientFor: OursClien
           if (entries.length === 0) return textResult('The local contact book is empty.');
           const lines = entries.map((e) => {
             const tag = e.isMine ? '  ← this session' : '';
-            return `• ${e.name} — ${e.container_id} (published ${e.published_at})${tag}`;
+            return `• ${e.displayName ?? e.name} — ${e.container_id}${e.displayName ? ` (stable address ${e.name})` : ''} (published ${e.published_at})${tag}`;
           });
           return textResult(`Local contact book (${entries.length}):\n${lines.join('\n')}`);
         },
